@@ -2462,6 +2462,7 @@
         class:hidden-page={page !== "terminal"}
         class:with-terminal-tools={terminalToolsMounted && page === "terminal" && Boolean(activeTerminalId)}
         class="full-page terminal-page persistent-terminals"
+        style={terminalToolsStyle()}
       >
         <div
           class:split-workspace={splitMode && workspaceActive}
@@ -2543,7 +2544,6 @@
           <div
             class="terminal-tools-slot"
             class:open={terminalToolsOpen}
-            style={terminalToolsStyle()}
           >
             <TerminalToolsSidebar
               appearance={activeTerminalAppearance()}

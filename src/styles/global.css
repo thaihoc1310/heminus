@@ -2719,7 +2719,7 @@ select:focus-visible {
 
 .persistent-terminals {
   display: flex;
-  background: #17191c;
+  background: var(--terminal-tool-background, var(--app-terminal-background, #17191c));
 }
 
 .persistent-terminals.hidden-page,
@@ -2742,7 +2742,6 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  opacity: 0;
   color: var(--terminal-tool-foreground);
   background: var(--terminal-tool-background);
   border-left: 1px solid transparent;
@@ -2750,16 +2749,14 @@ select:focus-visible {
   transition:
     flex-basis 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
     width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    opacity 160ms ease,
     transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
     border-color 160ms ease;
-  will-change: flex-basis, width, opacity, transform;
+  will-change: flex-basis, width, transform;
 }
 
 .terminal-tools-slot.open {
   flex-basis: 344px;
   width: 344px;
-  opacity: 1;
   border-left-color: var(--terminal-tool-border);
   transform: translateX(0);
 }
