@@ -117,25 +117,10 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_session_started ON session_records(started_at DESC);
 
-            DELETE FROM session_records
-            WHERE id NOT IN (
-                SELECT latest.id
-                FROM session_records AS latest
-                WHERE latest.id = (
-                    SELECT candidate.id
-                    FROM session_records AS candidate
-                    WHERE candidate.host_id = latest.host_id
-                       OR (candidate.host_id IS NULL AND latest.host_id IS NULL)
-                    ORDER BY candidate.started_at DESC, candidate.rowid DESC
-                    LIMIT 1
-                )
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_host_latest
-                ON session_records(host_id)
-                WHERE host_id IS NOT NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_local_latest
-                ON session_records((1))
-                WHERE host_id IS NULL;
+            DROP INDEX IF EXISTS idx_session_host_latest;
+            DROP INDEX IF EXISTS idx_session_local_latest;
+            CREATE INDEX IF NOT EXISTS idx_session_host_active
+                ON session_records(host_id, ended_at);
 
             CREATE TABLE IF NOT EXISTS command_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1096,21 +1081,29 @@ impl Database {
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut statement = self.connection.prepare(
             "
-            SELECT id, host_id, title, started_at, ended_at, status
-            FROM session_records
-            WHERE id IN (
-                SELECT latest.id
-                FROM session_records AS latest
-                WHERE latest.id = (
-                    SELECT candidate.id
-                    FROM session_records AS candidate
-                    WHERE candidate.host_id = latest.host_id
-                       OR (candidate.host_id IS NULL AND latest.host_id IS NULL)
-                    ORDER BY candidate.started_at DESC, candidate.rowid DESC
-                    LIMIT 1
-                )
-            )
-            ORDER BY started_at DESC
+            SELECT session.id, session.host_id, session.title, session.started_at,
+                   session.ended_at, session.status
+            FROM session_records AS session
+            WHERE session.ended_at IS NULL
+               OR (
+                    session.ended_at IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM session_records AS active
+                        WHERE (active.host_id = session.host_id
+                               OR (active.host_id IS NULL AND session.host_id IS NULL))
+                          AND active.ended_at IS NULL
+                    )
+                    AND session.id = (
+                        SELECT candidate.id
+                        FROM session_records AS candidate
+                        WHERE candidate.host_id = session.host_id
+                           OR (candidate.host_id IS NULL AND session.host_id IS NULL)
+                        ORDER BY candidate.started_at DESC, candidate.rowid DESC
+                        LIMIT 1
+                    )
+               )
+            ORDER BY session.started_at DESC
             LIMIT ?1
             ",
         )?;
@@ -1157,14 +1150,6 @@ impl Database {
 
     pub fn start_session(&self, host_id: Option<Uuid>, title: impl Into<String>) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        let host_id_text = host_id.map(|value| value.to_string());
-        self.connection.execute(
-            "
-            DELETE FROM session_records
-            WHERE host_id = ?1 OR (host_id IS NULL AND ?1 IS NULL)
-            ",
-            params![host_id_text.as_deref()],
-        )?;
         self.save_session(&SessionRecord {
             id,
             host_id,
@@ -1190,6 +1175,14 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn rename_session(&self, id: Uuid, title: &str) -> Result<bool> {
+        let affected = self.connection.execute(
+            "UPDATE session_records SET title = ?2 WHERE id = ?1",
+            params![id.to_string(), title],
+        )?;
+        Ok(affected > 0)
     }
 
     pub fn reconcile_active_sessions(&self) -> Result<usize> {
@@ -1621,6 +1614,37 @@ mod tests {
     }
 
     #[test]
+    fn session_history_keeps_all_active_sessions_per_host() {
+        let database = Database::in_memory().unwrap();
+        let host = Host::new("VM 1", "vm1.example.com", "root");
+        database.save_host(&host).unwrap();
+        let first = database.start_session(Some(host.id), "VM 1").unwrap();
+        let second = database.start_session(Some(host.id), "VM 1").unwrap();
+
+        let active = database.list_sessions(10).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|session| session.ended_at.is_none()));
+
+        database
+            .finish_session(first, SessionStatus::Disconnected)
+            .unwrap();
+        database
+            .finish_session(second, SessionStatus::Disconnected)
+            .unwrap();
+        let finished = database.list_sessions(10).unwrap();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].id, second);
+    }
+
+    #[test]
+    fn active_session_title_can_be_renamed() {
+        let database = Database::in_memory().unwrap();
+        let session = database.start_session(None, "Local Terminal").unwrap();
+        assert!(database.rename_session(session, "Database migration").unwrap());
+        assert_eq!(database.list_sessions(10).unwrap()[0].title, "Database migration");
+    }
+
+    #[test]
     fn interrupted_sessions_are_reconciled_on_startup() {
         let database = Database::in_memory().unwrap();
         let active_host = Host::new("Active", "active.example.com", "root");
@@ -1654,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_session_replaces_the_previous_session_for_the_same_host() {
+    fn an_active_session_hides_older_finished_sessions_for_the_same_host() {
         let database = Database::in_memory().unwrap();
         let host = Host::new("Server", "server.example.com", "root");
         database.save_host(&host).unwrap();

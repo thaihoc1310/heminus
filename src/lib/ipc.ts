@@ -329,18 +329,29 @@ export async function listSessions(limit = 200): Promise<SessionRecord[]> {
   return invoke<SessionRecord[]>("list_sessions", { limit });
 }
 
+export async function disconnectSession(historyId: string): Promise<boolean> {
+  if (!isTauri) return false;
+  return invoke<boolean>("terminal_disconnect_history", { historyId });
+}
+
 export async function openTerminal(
   rows: number,
   cols: number,
   channel: Channel<TerminalEvent>,
-  host: Host | null = null
+  host: Host | null = null,
+  sessionTitle?: string
 ): Promise<string> {
   return invoke<string>("terminal_open", {
     rows,
     cols,
     host,
-    onEvent: channel
+    onEvent: channel,
+    sessionTitle
   });
+}
+
+export async function renameTerminalSession(id: string, title: string): Promise<boolean> {
+  return invoke<boolean>("terminal_rename", { id, title });
 }
 
 export async function attachTerminal(

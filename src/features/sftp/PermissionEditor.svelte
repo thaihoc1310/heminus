@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import Icon from "../../components/Icon.svelte";
+  import { confirmDiscardChanges } from "../../lib/unsavedChanges";
 
   let {
     path,
@@ -24,7 +25,8 @@
     { label: "Others", bits: [0o004, 0o002, 0o001] }
   ];
 
-  let mode = $state(untrack(() => initialMode & 0o7777));
+  const baselineMode = untrack(() => initialMode & 0o7777);
+  let mode = $state(baselineMode);
   let saving = $state(false);
   let saveError = $state("");
 
@@ -49,8 +51,13 @@
     }
   }
 
+  async function requestClose() {
+    if (saving || !(await confirmDiscardChanges(mode !== baselineMode))) return;
+    onclose();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape" && !saving) onclose();
+    if (event.key === "Escape" && !saving) void requestClose();
   }
 </script>
 
@@ -61,7 +68,7 @@
     class="permission-editor-backdrop"
     aria-label="Close permission editor"
     disabled={saving}
-    onclick={onclose}
+    onclick={() => void requestClose()}
   ></button>
   <div
     class="permission-editor"
@@ -74,7 +81,7 @@
         <h2 id="permission-editor-title">Edit permissions</h2>
         <span class="permission-mode">{modeLabel()}</span>
       </div>
-      <button class="permission-close" title="Close" disabled={saving} onclick={onclose}>
+      <button class="permission-close" title="Close" disabled={saving} onclick={() => void requestClose()}>
         <Icon name="close" size={19} />
       </button>
     </header>
@@ -118,7 +125,7 @@
     </div>
 
     <footer>
-      <button class="quiet-button" disabled={saving} onclick={onclose}>Cancel</button>
+      <button class="quiet-button" disabled={saving} onclick={() => void requestClose()}>Cancel</button>
       <button class="dialog-primary" disabled={saving} onclick={() => void save()}>
         {saving ? "Saving…" : "Save"}
       </button>

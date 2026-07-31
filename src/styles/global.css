@@ -760,7 +760,8 @@ select:focus-visible {
 }
 
 .titlebar-space {
-  flex: 1 1 auto;
+  flex: 1 0 54px;
+  min-width: 54px;
 }
 
 .window-controls {
@@ -5718,6 +5719,124 @@ select:focus-visible {
   color: var(--ink);
 }
 
+.session-title small,
+.session-child-title small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.session-disclosure,
+.session-disclosure-placeholder {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+}
+
+.session-disclosure {
+  padding: 0;
+  color: #75848e;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.session-disclosure:hover {
+  color: var(--ink);
+  background: #edf2f3;
+}
+
+.session-disclosure svg {
+  transition: transform 140ms ease;
+}
+
+.session-disclosure.expanded svg {
+  transform: rotate(90deg);
+}
+
+.session-children {
+  border-top: 1px solid #e8edef;
+  background: #f8fafb;
+}
+
+.session-child-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(220px, 1.2fr) 110px 110px;
+  align-items: center;
+  gap: 16px;
+  min-height: 48px;
+  padding: 0 14px 0 52px;
+  color: #64727b;
+  font-size: 11px;
+  border-top: 1px solid #edf1f2;
+}
+
+.session-child-row:first-child {
+  border-top: 0;
+}
+
+.session-child-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.disconnect-status,
+.session-disconnect-button {
+  font: inherit;
+  border: 0;
+  cursor: pointer;
+}
+
+.disconnect-status {
+  min-width: 88px;
+}
+
+.disconnect-status .status-hover {
+  display: none;
+}
+
+.disconnect-status:hover:not(:disabled) {
+  color: #a93645;
+  background: #f9e4e7;
+}
+
+.disconnect-status:hover:not(:disabled) .status-default {
+  display: none;
+}
+
+.disconnect-status:hover:not(:disabled) .status-hover {
+  display: inline;
+}
+
+.disconnect-status:disabled,
+.session-disconnect-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.session-disconnect-button {
+  justify-self: start;
+  padding: 6px 9px;
+  color: #a93645;
+  border-radius: 8px;
+  background: #f9e4e7;
+}
+
+.session-disconnect-button:hover:not(:disabled) {
+  background: #f4d4d9;
+}
+
+.compact-error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
 .status-pill {
   justify-self: start;
   padding: 4px 8px;
@@ -5735,6 +5854,27 @@ select:focus-visible {
 .status-pill.failed {
   color: #a93645;
   background: #f9e4e7;
+}
+
+.session-list.grid-view .session-group {
+  min-width: 0;
+}
+
+.session-list.grid-view .session-children {
+  margin-top: -1px;
+  border: 1px solid #e2e8ea;
+  border-top: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+.session-list.grid-view .session-group.expanded .session-row {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.session-list.grid-view .session-child-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 11px 14px;
 }
 
 .page-loading,

@@ -34,6 +34,7 @@
 
   let {
     paneId,
+    title,
     host = null,
     appearance,
     snippetVersion = 0,
@@ -54,6 +55,7 @@
     shouldPreserveSession = () => false
   }: {
     paneId: string;
+    title: string;
     host?: Host | null;
     appearance: TerminalAppearance;
     snippetVersion?: number;
@@ -395,6 +397,13 @@
             sessionId = null;
           }
         }
+        if (event.kind === "disconnect") {
+          if (sessionId) {
+            onSessionClosed(paneId);
+            sessionId = null;
+          }
+          onClose();
+        }
       };
       channel.onmessage = handleTerminalEvent;
 
@@ -406,10 +415,10 @@
           );
           sessionId = resumeSessionId;
         } catch {
-          sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host);
+          sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
         }
       } else {
-        sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host);
+        sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
       }
       let lastPtyRows = terminal.rows;
       let lastPtyCols = terminal.cols;

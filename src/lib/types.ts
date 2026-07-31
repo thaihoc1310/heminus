@@ -237,6 +237,7 @@ export interface SessionRecord {
 export type TerminalEvent =
   | { kind: "output"; bytes: number[] }
   | { kind: "exit" }
+  | { kind: "disconnect" }
   | { kind: "error"; message: string };
 
 export type MainPage =

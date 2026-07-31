@@ -27,6 +27,7 @@
     setIdentitySecret,
     takeDetachedTerminalPayload,
     transferTerminalTab,
+    renameTerminalSession,
     writeTerminal
   } from "./lib/ipc";
   import type {
@@ -52,6 +53,11 @@
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
   import { parseQuickConnectInput } from "./lib/quickConnect";
+  import {
+    confirmDiscardChanges,
+    draftChanged,
+    draftSnapshot
+  } from "./lib/unsavedChanges";
   import {
     compareCollectionItems,
     type CollectionSort,
@@ -122,6 +128,9 @@
   let showHostPassword = $state(false);
   let hostSubeditor = $state<HostSubeditor | null>(null);
   let hostSubeditorClosing = $state(false);
+  let hostEditorBaseline = $state<string | null>(null);
+  let hostSubeditorBaseline = $state<string | null>(null);
+  let themeSubeditorBaseline = $state<TerminalAppearance | null>(null);
   let environmentDraft = $state<Array<{ name: string; value: string }>>([]);
   let jumpHostDraft = $state<string[]>([]);
   let chainPickerOpen = $state(false);
@@ -199,6 +208,7 @@
   let suppressTopTabClick = false;
   let searchTimer: number | null = null;
   let detachedInitialized = $state(!detachedMode);
+  let managerEditorDirty = $state<Record<string, boolean>>({});
   const appearanceSaveTimers = new Map<string, number>();
   const localTerminalAppearanceKey = "heminus-local-terminal-appearance";
   const terminalTabDragMime = "application/x-heminus-terminal-tab";
@@ -246,7 +256,7 @@
     const onKeydown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        page = "new-tab";
+        void switchPage("new-tab");
       }
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "t") {
         event.preventDefault();
@@ -328,6 +338,9 @@
       await openTerminal();
     } finally {
       detachedInitialized = true;
+      await tick();
+      await appWindow?.show();
+      await appWindow?.setFocus();
     }
   }
 
@@ -449,14 +462,13 @@
           host.port === target.port
       );
       if (existing) {
-        editHost(existing);
+        await editHost(existing);
         return;
       }
 
       query = "";
       await refreshHosts();
-      newHost();
-      if (!selected) return;
+      if (!(await newHost()) || !selected) return;
       selected.label = target.address;
       selected.address = target.address;
       selected.username = target.username;
@@ -468,14 +480,43 @@
     }
   }
 
-  function chooseHost(host: Host) {
+  function hostEditorState() {
+    return { selected, credentialMode, hostPassword };
+  }
+
+  function rememberHostEditorBaseline() {
+    hostEditorBaseline = draftSnapshot(hostEditorState());
+  }
+
+  function hostEditorDirty(): boolean {
+    return inspectorOpen && draftChanged(hostEditorBaseline, hostEditorState());
+  }
+
+  async function canLeaveHostEditor(): Promise<boolean> {
+    return confirmDiscardChanges(hostEditorDirty());
+  }
+
+  function discardHostEditor() {
+    hostSubeditor = null;
+    hostSubeditorBaseline = null;
+    themeSubeditorBaseline = null;
+    inspectorOpen = false;
+    hostEditorMenuOpen = false;
+    hostEditorBaseline = null;
+    if (selected && !hosts.some((host) => host.id === selected?.id)) selected = null;
+  }
+
+  async function chooseHost(host: Host) {
+    if (!(await canLeaveHostEditor())) return;
+    hostEditorBaseline = null;
     selected = cloneHost(host);
     inspectorOpen = false;
     message = `${host.username}@${host.address}:${host.port}`;
     messageIsError = false;
   }
 
-  function editHost(host: Host) {
+  async function editHost(host: Host) {
+    if (inspectorOpen && !(await canLeaveHostEditor())) return;
     selected = cloneHost(host);
     prepareCredentialEditor(host);
     hostSubeditor = null;
@@ -483,11 +524,14 @@
     hostEditorMenuOpen = false;
     message = `${host.username}@${host.address}:${host.port}`;
     messageIsError = false;
+    rememberHostEditorBaseline();
   }
 
-  function openHostContextMenu(event: MouseEvent, host: Host) {
+  async function openHostContextMenu(event: MouseEvent, host: Host) {
     event.preventDefault();
+    if (!(await canLeaveHostEditor())) return;
     groupContextMenu = null;
+    hostEditorBaseline = null;
     selected = cloneHost(host);
     inspectorOpen = false;
     const width = 248;
@@ -524,6 +568,7 @@
   }
 
   async function duplicateHost(host: Host) {
+    if (!(await canLeaveHostEditor())) return;
     const now = new Date().toISOString();
     try {
       const duplicate = await saveHost({
@@ -539,6 +584,7 @@
       inspectorOpen = true;
       message = "Duplicated locally";
       messageIsError = false;
+      rememberHostEditorBaseline();
     } catch (cause) {
       showMessage(cause, true);
     }
@@ -557,14 +603,13 @@
     }
   }
 
-  function closeInspector() {
-    hostSubeditor = null;
-    inspectorOpen = false;
-    hostEditorMenuOpen = false;
-    if (selected && !hosts.some((host) => host.id === selected?.id)) selected = null;
+  async function closeInspector() {
+    if (!(await canLeaveHostEditor())) return;
+    discardHostEditor();
   }
 
-  function newHost() {
+  async function newHost(): Promise<boolean> {
+    if (!(await canLeaveHostEditor())) return false;
     newHostMenuOpen = false;
     const now = new Date().toISOString();
     selected = {
@@ -594,7 +639,9 @@
     hostEditorMenuOpen = false;
     message = "Connection details stay on this device.";
     messageIsError = false;
+    rememberHostEditorBaseline();
     requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#host-address")?.focus());
+    return true;
   }
 
   async function persistHost(): Promise<Host | null> {
@@ -613,6 +660,7 @@
       await refreshHosts();
       message = "Saved locally";
       messageIsError = false;
+      rememberHostEditorBaseline();
       return saved;
     } catch (cause) {
       showMessage(cause, true);
@@ -662,6 +710,8 @@
     environmentDraft = selected.environment.map((variable) => ({ ...variable }));
     hostSubeditorClosing = false;
     hostSubeditor = "environment";
+    hostSubeditorBaseline = draftSnapshot(environmentDraft);
+    themeSubeditorBaseline = null;
   }
 
   function openChainEditor() {
@@ -670,12 +720,19 @@
     chainPickerOpen = false;
     hostSubeditorClosing = false;
     hostSubeditor = "chain";
+    hostSubeditorBaseline = draftSnapshot(jumpHostDraft);
+    themeSubeditorBaseline = null;
   }
 
   function openThemeEditor() {
     if (!selected) return;
     hostSubeditorClosing = false;
     hostSubeditor = "theme";
+    themeSubeditorBaseline = {
+      theme: selected.terminal_theme,
+      fontSize: selected.terminal_font_size
+    };
+    hostSubeditorBaseline = draftSnapshot(themeSubeditorBaseline);
   }
 
   function hostSubeditorTitle(): string {
@@ -684,17 +741,38 @@
     return "Select Color Theme";
   }
 
-  function closeHostSubeditor(save: boolean) {
+  function hostSubeditorState(): unknown {
+    if (hostSubeditor === "environment") return environmentDraft;
+    if (hostSubeditor === "chain") return jumpHostDraft;
+    if (hostSubeditor === "theme" && selected) {
+      return { theme: selected.terminal_theme, fontSize: selected.terminal_font_size };
+    }
+    return null;
+  }
+
+  function hostSubeditorDirty(): boolean {
+    return Boolean(hostSubeditor) && draftChanged(hostSubeditorBaseline, hostSubeditorState());
+  }
+
+  async function closeHostSubeditor(save: boolean) {
     if (!selected || !hostSubeditor || hostSubeditorClosing) return;
+    if (!save && !(await confirmDiscardChanges(hostSubeditorDirty()))) return;
     if (save && hostSubeditor === "environment") {
       if (!environmentDraftValid()) return;
       selected.environment = environmentDraft.map((variable) => ({ ...variable }));
     }
     if (save && hostSubeditor === "chain") selected.jump_host_ids = [...jumpHostDraft];
+    if (!save && hostSubeditor === "theme" && themeSubeditorBaseline) {
+      selected.terminal_theme = themeSubeditorBaseline.theme;
+      selected.terminal_font_size = themeSubeditorBaseline.fontSize;
+    }
+    hostSubeditorBaseline = null;
     hostSubeditorClosing = true;
     window.setTimeout(() => {
       hostSubeditor = null;
       hostSubeditorClosing = false;
+      hostSubeditorBaseline = null;
+      themeSubeditorBaseline = null;
       chainPickerOpen = false;
     }, 180);
   }
@@ -1157,7 +1235,8 @@
     }
   }
 
-  async function openTerminal(host: Host | null = null) {
+  async function openTerminal(host: Host | null = null, pageChangePrepared = false) {
+    if (!pageChangePrepared && !(await preparePageChange("terminal"))) return;
     if (terminalTabs.length >= 16) {
       message = "Heminus can keep at most 16 terminal sessions open.";
       return;
@@ -1187,14 +1266,16 @@
     }
   }
 
-  function activateStandaloneTerminal(id: string) {
+  async function activateStandaloneTerminal(id: string) {
+    if (!(await preparePageChange("terminal"))) return;
     activeTerminalId = id;
     workspaceActive = false;
     page = "terminal";
   }
 
-  function activateWorkspace() {
+  async function activateWorkspace() {
     if (!splitMode || workspacePaneIds.length < 2) return;
+    if (!(await preparePageChange("terminal"))) return;
     workspaceActive = true;
     if (!activeTerminalId || !workspacePaneIds.includes(activeTerminalId)) {
       activeTerminalId = workspacePaneIds[0] ?? null;
@@ -1230,7 +1311,17 @@
     )?.trim();
     if (!name) return;
     const target = terminalTabs.find((candidate) => candidate.id === tab.id);
-    if (target) target.title = name;
+    if (!target) return;
+    const sessionId = terminalSessionIds[tab.id] ?? tab.resumeSessionId;
+    if (sessionId) {
+      try {
+        await renameTerminalSession(sessionId, name);
+      } catch (cause) {
+        showMessage(cause, true);
+        return;
+      }
+    }
+    target.title = name;
   }
 
   async function splitTerminalTab(tab: TerminalTab) {
@@ -2109,10 +2200,28 @@
     messageIsError = error;
   }
 
-  function switchPage(next: MainPage) {
+  function setManagerEditorDirty(editor: MainPage, dirty: boolean) {
+    if (managerEditorDirty[editor] === dirty) return;
+    managerEditorDirty = { ...managerEditorDirty, [editor]: dirty };
+  }
+
+  function currentEditorDirty(): boolean {
+    if (page === "hosts") return hostEditorDirty() || hostSubeditorDirty();
+    return Boolean(managerEditorDirty[page]);
+  }
+
+  async function preparePageChange(next: MainPage): Promise<boolean> {
+    if (next === page) return true;
+    if (!(await confirmDiscardChanges(currentEditorDirty()))) return false;
+    if (page === "hosts" && inspectorOpen) discardHostEditor();
+    return true;
+  }
+
+  async function switchPage(next: MainPage) {
+    if (!(await preparePageChange(next))) return;
     if (next === "terminal") {
       if (activeTerminalId) page = "terminal";
-      else void openTerminal();
+      else void openTerminal(null, true);
     }
     else if (next === "sftp") void openSftp();
     else if (next === "snippets") void openSnippets();
@@ -2526,6 +2635,7 @@
               {#if TerminalComponent}
                 <TerminalComponent
                   paneId={tab.id}
+                  title={tab.title}
                   host={tab.host}
                   appearance={tab.appearance}
                   snippetVersion={terminalSnippetVersion}
@@ -3244,7 +3354,9 @@
     {:else if page === "snippets"}
       <main class="full-page">
         {#if SnippetsComponent}
-          <SnippetsComponent />
+          <SnippetsComponent
+            ondirtychange={(dirty: boolean) => setManagerEditorDirty("snippets", dirty)}
+          />
         {:else}
           <div class="page-loading">Loading snippets…</div>
         {/if}
@@ -3252,7 +3364,9 @@
     {:else if page === "forwarding"}
       <main class="full-page">
         {#if ForwardingComponent}
-          <ForwardingComponent />
+          <ForwardingComponent
+            ondirtychange={(dirty: boolean) => setManagerEditorDirty("forwarding", dirty)}
+          />
         {:else}
           <div class="page-loading">Loading port forwarding…</div>
         {/if}
@@ -3260,7 +3374,9 @@
     {:else if page === "keychain"}
       <main class="full-page">
         {#if KeychainComponent}
-          <KeychainComponent />
+          <KeychainComponent
+            ondirtychange={(dirty: boolean) => setManagerEditorDirty("keychain", dirty)}
+          />
         {:else}
           <div class="page-loading">Loading keychain…</div>
         {/if}

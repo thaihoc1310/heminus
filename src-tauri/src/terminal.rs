@@ -93,6 +93,7 @@ impl Drop for TerminalManager {
 pub enum TerminalEvent {
     Output { bytes: Vec<u8> },
     Exit,
+    Disconnect,
     Error { message: String },
 }
 
@@ -195,12 +196,13 @@ pub fn terminal_open(
     rows: u16,
     cols: u16,
     host: Option<heminus_domain::Host>,
+    session_title: Option<String>,
     on_event: Channel<TerminalEvent>,
 ) -> Result<Uuid, String> {
     let history_host_id = host.as_ref().map(|value| value.id);
-    let history_title = host
-        .as_ref()
-        .map(|value| value.label.clone())
+    let history_title = session_title
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| host.as_ref().map(|value| value.label.clone()))
         .unwrap_or_else(|| "Local Terminal".into());
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -522,6 +524,67 @@ pub fn terminal_close(
         )
         .map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+#[tauri::command]
+pub fn terminal_disconnect_history(
+    manager: State<'_, TerminalManager>,
+    app_state: State<'_, AppState>,
+    history_id: Uuid,
+) -> Result<bool, String> {
+    let removed = {
+        let mut sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "terminal lock poisoned")?;
+        let runtime_id = sessions
+            .iter()
+            .find_map(|(id, session)| (session.history_id == history_id).then_some(*id));
+        runtime_id.and_then(|id| sessions.remove(&id))
+    };
+    let Some(mut session) = removed else {
+        return Ok(false);
+    };
+    let _ = session.killer.kill();
+    app_state
+        .database
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?
+        .finish_session(history_id, heminus_domain::SessionStatus::Disconnected)
+        .map_err(|error| error.to_string())?;
+    publish_terminal_event(&session.event_sink, TerminalEvent::Disconnect);
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn terminal_rename(
+    manager: State<'_, TerminalManager>,
+    app_state: State<'_, AppState>,
+    id: Uuid,
+    title: String,
+) -> Result<bool, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Terminal name cannot be empty".into());
+    }
+    if title.chars().count() > 120 {
+        return Err("Terminal name cannot exceed 120 characters".into());
+    }
+    let history_id = manager
+        .sessions
+        .lock()
+        .map_err(|_| "terminal lock poisoned")?
+        .get(&id)
+        .map(|session| session.history_id);
+    let Some(history_id) = history_id else {
+        return Ok(false);
+    };
+    app_state
+        .database
+        .lock()
+        .map_err(|_| "database lock poisoned".to_string())?
+        .rename_session(history_id, title)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

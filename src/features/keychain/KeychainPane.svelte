@@ -17,10 +17,19 @@
   } from "../../lib/ipc";
   import type { Identity, IdentityKind, KeyMaterial } from "../../lib/types";
   import {
+    confirmDiscardChanges,
+    draftChanged,
+    draftSnapshot
+  } from "../../lib/unsavedChanges";
+  import {
     compareCollectionItems,
     type CollectionSort,
     type CollectionView
   } from "../../lib/collection";
+
+  let { ondirtychange = (_dirty: boolean) => {} } = $props<{
+    ondirtychange?: (dirty: boolean) => void;
+  }>();
 
   let identities = $state<Identity[]>([]);
   let selected = $state<Identity | null>(null);
@@ -48,6 +57,11 @@
   let collectionView = $state<CollectionView>("grid");
   let collectionSort = $state<CollectionSort>("az");
   let collectionQuery = $state("");
+  let editorBaseline = $state<string | null>(null);
+  const editorDirty = $derived(
+    Boolean(selected || generationOpen || importOpen) &&
+      draftChanged(editorBaseline, editorState())
+  );
   const keys = $derived.by(() =>
     identities
       .filter(
@@ -111,8 +125,22 @@
     return () => {
       disposed = true;
       unlisten?.();
+      ondirtychange(false);
     };
   });
+
+  $effect(() => ondirtychange(editorDirty));
+
+  function editorState(): unknown {
+    if (selected) return { selected, pendingSecret };
+    if (generationOpen) return { generatedLabel, generatedPassphrase };
+    if (importOpen) return { importPath, importLabel, importPassphrase };
+    return null;
+  }
+
+  function rememberEditorBaseline() {
+    editorBaseline = draftSnapshot(editorState());
+  }
 
   async function refresh(preferredId?: string) {
     loading = true;
@@ -126,6 +154,7 @@
       selected = next ? { ...next } : null;
       await loadMaterial(selected);
       pendingSecret = "";
+      editorBaseline = selected ? draftSnapshot(editorState()) : null;
       isError = false;
     } catch (cause) {
       showError(cause);
@@ -134,7 +163,8 @@
     }
   }
 
-  function createIdentity(kind: IdentityKind = "password") {
+  async function createIdentity(kind: IdentityKind = "password") {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     generationOpen = false;
     importOpen = false;
     newKeyMenuOpen = false;
@@ -156,9 +186,11 @@
           ? "The password will be encrypted by your operating-system keyring."
           : "Drop a private key into Keychain to copy it into the Heminus vault.";
     isError = false;
+    rememberEditorBaseline();
   }
 
-  function openGenerator() {
+  async function openGenerator() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
     keyMaterial = null;
     importOpen = false;
@@ -167,9 +199,11 @@
     message = "";
     generatedLabel = "";
     generatedPassphrase = "";
+    rememberEditorBaseline();
   }
 
-  function openImporter() {
+  async function openImporter() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
     keyMaterial = null;
     generationOpen = false;
@@ -180,6 +214,7 @@
     importPassphrase = "";
     importStatus = "";
     importError = false;
+    rememberEditorBaseline();
   }
 
   async function chooseImportFile() {
@@ -259,6 +294,7 @@
 
   async function importDroppedKeys(paths: string[]) {
     if (importing || paths.length === 0) return;
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     importing = true;
     importStatus = "Inspecting private key…";
     importError = false;
@@ -351,7 +387,8 @@
     }
   }
 
-  function choose(identity: Identity) {
+  async function choose(identity: Identity) {
+    if (selected?.id !== identity.id && !(await confirmDiscardChanges(editorDirty))) return;
     generationOpen = false;
     importOpen = false;
     newKeyMenuOpen = false;
@@ -359,6 +396,7 @@
     inspectorMenuOpen = false;
     pendingSecret = "";
     message = "";
+    rememberEditorBaseline();
     void loadMaterial(selected);
   }
 
@@ -380,7 +418,8 @@
     }
   }
 
-  function closeInspector() {
+  async function closeInspector() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
     generationOpen = false;
     importOpen = false;
@@ -388,6 +427,7 @@
     keyMaterial = null;
     materialError = "";
     message = "";
+    editorBaseline = null;
   }
 
   function showError(cause: unknown) {

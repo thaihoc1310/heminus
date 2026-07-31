@@ -116,8 +116,10 @@ fn build_detached_terminal_window(
     .title(window_title)
     .inner_size(1120.0, 720.0)
     .min_inner_size(360.0, 240.0)
+    .background_color(tauri::webview::Color(0x1f, 0x21, 0x24, 0xff))
     .decorations(false)
-    .resizable(true);
+    .resizable(true)
+    .visible(false);
     if let Some((x, y)) = position {
         builder = builder.position(x, y);
     }

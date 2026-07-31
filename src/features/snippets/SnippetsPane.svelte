@@ -6,10 +6,19 @@
   import { deleteSnippet, listSnippets, saveSnippet } from "../../lib/ipc";
   import type { Snippet } from "../../lib/types";
   import {
+    confirmDiscardChanges,
+    draftChanged,
+    draftSnapshot
+  } from "../../lib/unsavedChanges";
+  import {
     compareCollectionItems,
     type CollectionSort,
     type CollectionView
   } from "../../lib/collection";
+
+  let { ondirtychange = (_dirty: boolean) => {} } = $props<{
+    ondirtychange?: (dirty: boolean) => void;
+  }>();
 
   let snippets = $state<Snippet[]>([]);
   let selected = $state<Snippet | null>(null);
@@ -21,6 +30,8 @@
   let collectionView = $state<CollectionView>("grid");
   let collectionSort = $state<CollectionSort>("az");
   let collectionQuery = $state("");
+  let editorBaseline = $state<string | null>(null);
+  const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
   const visibleSnippets = $derived.by(() =>
     snippets
       .filter((snippet) =>
@@ -41,7 +52,10 @@
 
   onMount(() => {
     void refresh();
+    return () => ondirtychange(false);
   });
+
+  $effect(() => ondirtychange(editorDirty));
 
   async function refresh(preferredId?: string) {
     loading = true;
@@ -53,6 +67,7 @@
           ? snippets.find((snippet) => snippet.id === selected?.id) ?? null
           : null;
       selected = next ? { ...next } : null;
+      editorBaseline = selected ? draftSnapshot(selected) : null;
       isError = false;
     } catch (cause) {
       showError(cause);
@@ -61,7 +76,8 @@
     }
   }
 
-  function createSnippet() {
+  async function createSnippet() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = {
       id: crypto.randomUUID(),
       title: "",
@@ -73,16 +89,21 @@
     inspectorMenuOpen = false;
     message = "Snippets are stored only in your local vault.";
     isError = false;
+    editorBaseline = draftSnapshot(selected);
   }
 
-  function chooseSnippet(snippet: Snippet) {
+  async function chooseSnippet(snippet: Snippet) {
+    if (selected?.id !== snippet.id && !(await confirmDiscardChanges(editorDirty))) return;
     selected = { ...snippet };
     inspectorMenuOpen = false;
     message = "";
+    editorBaseline = draftSnapshot(selected);
   }
 
-  function closeInspector() {
+  async function closeInspector() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
+    editorBaseline = null;
     inspectorMenuOpen = false;
     message = "";
   }

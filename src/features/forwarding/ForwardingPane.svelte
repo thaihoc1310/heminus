@@ -15,10 +15,19 @@
   } from "../../lib/ipc";
   import type { ForwardKind, Host, PortForward } from "../../lib/types";
   import {
+    confirmDiscardChanges,
+    draftChanged,
+    draftSnapshot
+  } from "../../lib/unsavedChanges";
+  import {
     compareCollectionItems,
     type CollectionSort,
     type CollectionView
   } from "../../lib/collection";
+
+  let { ondirtychange = (_dirty: boolean) => {} } = $props<{
+    ondirtychange?: (dirty: boolean) => void;
+  }>();
 
   let hosts = $state<Host[]>([]);
   let rules = $state<PortForward[]>([]);
@@ -32,6 +41,8 @@
   let collectionView = $state<CollectionView>("grid");
   let collectionSort = $state<CollectionSort>("az");
   let collectionQuery = $state("");
+  let editorBaseline = $state<string | null>(null);
+  const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
   const visibleRules = $derived.by(() =>
     rules
       .filter((rule) => {
@@ -54,8 +65,13 @@
   onMount(() => {
     void refresh();
     const timer = window.setInterval(refreshStates, 2000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      ondirtychange(false);
+    };
   });
+
+  $effect(() => ondirtychange(editorDirty));
 
   async function refresh(preferredId?: string) {
     loading = true;
@@ -67,6 +83,7 @@
           ? rules.find((rule) => rule.id === selected?.id) ?? null
           : null;
       selected = next ? { ...next } : null;
+      editorBaseline = selected ? draftSnapshot(selected) : null;
       await refreshStates();
     } catch (cause) {
       showError(cause);
@@ -93,7 +110,8 @@
     }
   }
 
-  function createRule(kind: ForwardKind = "local") {
+  async function createRule(kind: ForwardKind = "local") {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     if (hosts.length === 0) {
       message = "Create a host before adding a forwarding rule.";
       isError = true;
@@ -114,16 +132,21 @@
     inspectorMenuOpen = false;
     message = "Forwarding uses the host and identity stored in the Heminus vault.";
     isError = false;
+    editorBaseline = draftSnapshot(selected);
   }
 
-  function chooseRule(rule: PortForward) {
+  async function chooseRule(rule: PortForward) {
+    if (selected?.id !== rule.id && !(await confirmDiscardChanges(editorDirty))) return;
     selected = { ...rule };
     inspectorMenuOpen = false;
     message = "";
+    editorBaseline = draftSnapshot(selected);
   }
 
-  function closeInspector() {
+  async function closeInspector() {
+    if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
+    editorBaseline = null;
     inspectorMenuOpen = false;
     message = "";
   }
@@ -167,6 +190,7 @@
         if (!host) throw new Error("Select a valid SSH host");
         const saved = await savePortForward(selected);
         selected = { ...saved };
+        editorBaseline = draftSnapshot(selected);
         await startTunnel(saved, host);
         message = "Tunnel started";
       }
