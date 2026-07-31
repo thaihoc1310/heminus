@@ -2,6 +2,7 @@
   import { Channel } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import Icon from "../../components/Icon.svelte";
+  import HostIcon from "../../components/HostIcon.svelte";
   import PermissionEditor from "./PermissionEditor.svelte";
   import { confirmDialog, promptDialog } from "../../lib/dialog";
   import { setElementDragPreview } from "../../lib/dragPreview";
@@ -1048,7 +1049,7 @@
                     disabled={connecting}
                     onclick={() => void connectRemote(host.id)}
                   >
-                    <span class="host-badge {host.color}"><Icon name="terminal" size={19} /></span>
+                    <span class="host-badge {host.color}"><HostIcon hostId={host.id} size={19} /></span>
                     <span>
                       <strong>{host.label}</strong>
                       <small>{host.username}@{host.address}</small>

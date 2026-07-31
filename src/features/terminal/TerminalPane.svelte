@@ -6,6 +6,7 @@
   import "@xterm/xterm/css/xterm.css";
   import { onMount, tick } from "svelte";
   import Icon from "../../components/Icon.svelte";
+  import HostIcon from "../../components/HostIcon.svelte";
   import {
     attachTerminal,
     closeTerminal,
@@ -24,6 +25,10 @@
     TerminalEvent
   } from "../../lib/types";
   import { terminalTheme } from "../../lib/terminalThemes";
+  import {
+    detectHostOperatingSystem,
+    rememberHostOperatingSystem
+  } from "../../lib/hostOperatingSystem";
   import { consumeShellCompletionMarkers } from "../../lib/terminalShellIntegration";
   import {
     buildTerminalSuggestions,
@@ -101,6 +106,8 @@
   };
   let searchMatches: TerminalSearchMatch[] = [];
   let lastCommandRequestId = "";
+  let operatingSystemDetectionBuffer = "";
+  let operatingSystemDetected = false;
   let activeTheme = $derived(terminalTheme(appearance.theme));
   let terminalStyle = $derived(
     [
@@ -361,6 +368,14 @@
           const text = outputDecoder
             .decode(new Uint8Array(event.bytes), { stream: true })
             .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+          if (host && !operatingSystemDetected) {
+            operatingSystemDetectionBuffer = `${operatingSystemDetectionBuffer}${text}`.slice(-16_384);
+            const detected = detectHostOperatingSystem(operatingSystemDetectionBuffer);
+            if (detected) {
+              rememberHostOperatingSystem(host.id, detected);
+              operatingSystemDetected = true;
+            }
+          }
           const completionScan = consumeShellCompletionMarkers(
             shellIntegrationRemainder,
             text
@@ -597,7 +612,7 @@
       onpointerdown={handleHeaderPointerDown}
     >
       <div>
-        <Icon name="terminal" size={15} />
+        <HostIcon hostId={host?.id} size={15} />
         <strong>{host?.label ?? "Local Terminal"}</strong>
         <span>{host ? `/ ${host.username}` : "~"}</span>
       </div>

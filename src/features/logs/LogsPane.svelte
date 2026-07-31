@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import CollectionControls from "../../components/CollectionControls.svelte";
   import Icon from "../../components/Icon.svelte";
+  import HostIcon from "../../components/HostIcon.svelte";
   import { disconnectSession, listHosts, listSessions } from "../../lib/ipc";
   import type { Host, SessionRecord } from "../../lib/types";
   import {
@@ -163,7 +164,7 @@
                   <span class="session-disclosure-placeholder"></span>
                 {/if}
                 <span class="host-badge mini {group.latest.host_id ? 'amber' : 'blue'}">
-                  <Icon name="terminal" size={15} />
+                  <HostIcon hostId={group.latest.host_id} size={15} />
                 </span>
                 <strong>{group.title}</strong>
                 {#if group.active.length > 1}<small>{group.active.length} tabs</small>{/if}
@@ -187,7 +188,7 @@
                 {#each group.active as session, index (session.id)}
                   <div class="session-child-row">
                     <time datetime={session.started_at}>{formatDate(session.started_at)}</time>
-                    <span class="session-child-title"><Icon name="terminal" size={14} /><strong>{session.title}</strong><small>Tab {index + 1}</small></span>
+                    <span class="session-child-title"><HostIcon hostId={session.host_id} size={14} /><strong>{session.title}</strong><small>Tab {index + 1}</small></span>
                     <span>{duration(session)}</span>
                     <button
                       class="session-disconnect-button"

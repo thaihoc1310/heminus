@@ -5,6 +5,7 @@
   import CollectionControls from "./components/CollectionControls.svelte";
   import CustomSelect from "./components/CustomSelect.svelte";
   import Icon from "./components/Icon.svelte";
+  import HostIcon from "./components/HostIcon.svelte";
   import TerminalToolsSidebar from "./features/terminal/TerminalToolsSidebar.svelte";
   import { confirmDialog, promptDialog } from "./lib/dialog";
   import {
@@ -53,6 +54,7 @@
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
   import { parseQuickConnectInput } from "./lib/quickConnect";
+  import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
     confirmDiscardChanges,
     draftChanged,
@@ -135,8 +137,14 @@
   let jumpHostDraft = $state<string[]>([]);
   let chainPickerOpen = $state(false);
   let hostContextMenu = $state<{ host: Host; x: number; y: number } | null>(null);
+  let bulkHostContextMenu = $state<{ x: number; y: number } | null>(null);
   let groupContextMenu = $state<{ group: VaultGroup; x: number; y: number } | null>(null);
-  let vaultDrag = $state<{ kind: "host" | "group"; id: string } | null>(null);
+  let selectedHostIds = $state<string[]>([]);
+  let vaultDrag = $state<
+    | { kind: "host"; ids: string[] }
+    | { kind: "group"; id: string }
+    | null
+  >(null);
   let vaultDropGroupId = $state<string | null>(null);
   let suppressVaultCardClick = false;
   let hostCollectionView = $state<CollectionView>("grid");
@@ -271,6 +279,7 @@
         toggleBroadcast();
       }
       if (event.key === "Escape") hostContextMenu = null;
+      if (event.key === "Escape") bulkHostContextMenu = null;
       if (event.key === "Escape") groupContextMenu = null;
       if (event.key === "Escape") terminalContextMenu = null;
     };
@@ -529,13 +538,24 @@
 
   async function openHostContextMenu(event: MouseEvent, host: Host) {
     event.preventDefault();
+    if (selectedHostIds.length > 1 && selectedHostIds.includes(host.id)) {
+      hostContextMenu = null;
+      groupContextMenu = null;
+      bulkHostContextMenu = {
+        x: Math.max(10, Math.min(event.clientX, window.innerWidth - 248)),
+        y: Math.max(10, Math.min(event.clientY, window.innerHeight - 272))
+      };
+      return;
+    }
     if (!(await canLeaveHostEditor())) return;
+    selectedHostIds = [host.id];
+    bulkHostContextMenu = null;
     groupContextMenu = null;
     hostEditorBaseline = null;
     selected = cloneHost(host);
     inspectorOpen = false;
     const width = 248;
-    const height = 286;
+    const height = 326;
     hostContextMenu = {
       host: cloneHost(host),
       x: Math.max(10, Math.min(event.clientX, window.innerWidth - width - 10)),
@@ -546,6 +566,7 @@
   function openGroupContextMenu(event: MouseEvent, group: VaultGroup) {
     event.preventDefault();
     hostContextMenu = null;
+    bulkHostContextMenu = null;
     const width = 248;
     const height = 184;
     groupContextMenu = {
@@ -1125,25 +1146,107 @@
     }
   }
 
+  function selectedHosts(): Host[] {
+    const ids = new Set(selectedHostIds);
+    return hosts.filter((host) => ids.has(host.id));
+  }
+
+  async function handleHostCardClick(event: MouseEvent, host: Host) {
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      selectedHostIds = selectedHostIds.includes(host.id)
+        ? selectedHostIds.filter((id) => id !== host.id)
+        : [...selectedHostIds, host.id];
+      return;
+    }
+    selectedHostIds = [host.id];
+    await chooseHost(host);
+  }
+
+  async function moveSelectedHosts(groupId: string | null) {
+    const targets = selectedHosts().filter((host) => host.group_id !== groupId);
+    bulkHostContextMenu = null;
+    if (!targets.length) return;
+    try {
+      await Promise.all(targets.map((host) => saveHost({
+        ...cloneHost(host),
+        group_id: groupId,
+        group_name: groupId ? groupPath(groupId) : null,
+        updated_at: new Date().toISOString()
+      })));
+      await refreshHosts();
+      message = `${targets.length} hosts moved${groupId ? ` to “${groupPath(groupId)}”` : " to the root"}`;
+      messageIsError = false;
+    } catch (cause) {
+      showMessage(cause, true);
+    }
+  }
+
+  async function connectSelectedHosts() {
+    const targets = selectedHosts();
+    bulkHostContextMenu = null;
+    for (const host of targets) await openTerminal(host);
+  }
+
+  async function removeSelectedHosts() {
+    const targets = selectedHosts();
+    bulkHostContextMenu = null;
+    if (!targets.length || !(await confirmDialog({
+      title: `Remove ${targets.length} hosts?`,
+      message: "Remove every selected host from this device?",
+      confirmLabel: "Remove all",
+      danger: true
+    }))) return;
+    try {
+      await Promise.all(targets.map((host) => deleteHost(host.id)));
+      if (selected && selectedHostIds.includes(selected.id)) discardHostEditor();
+      selectedHostIds = [];
+      await refreshHosts();
+    } catch (cause) {
+      showMessage(cause, true);
+    }
+  }
+
+  function startHostMarquee(event: PointerEvent) {
+    beginMarqueeSelection(
+      event,
+      event.currentTarget as HTMLElement,
+      selectedHostIds,
+      (ids) => (selectedHostIds = ids)
+    );
+  }
+
   function startVaultDrag(
     event: DragEvent,
     kind: "host" | "group",
     id: string
   ) {
     suppressVaultCardClick = true;
-    vaultDrag = { kind, id };
+    const ids = kind === "host"
+      ? selectedHostIds.includes(id) && selectedHostIds.length > 1
+        ? [...selectedHostIds]
+        : [id]
+      : [];
+    if (kind === "host") {
+      selectedHostIds = ids;
+      vaultDrag = { kind: "host", ids };
+    } else {
+      vaultDrag = { kind: "group", id };
+    }
     vaultDropGroupId = null;
     event.dataTransfer?.setData("application/x-heminus-vault-item", `${kind}:${id}`);
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
-      setElementDragPreview(event);
+      setElementDragPreview(event, kind === "host" ? ids.length : 1);
     }
   }
 
   function canDropVaultItem(groupId: string): boolean {
     if (!vaultDrag) return false;
     if (vaultDrag.kind === "host") {
-      return hosts.some((host) => host.id === vaultDrag?.id && host.group_id !== groupId);
+      return vaultDrag.ids.some((id) =>
+        hosts.some((host) => host.id === id && host.group_id !== groupId)
+      );
     }
     return (
       vaultDrag.id !== groupId &&
@@ -1165,8 +1268,8 @@
     vaultDrag = null;
     vaultDropGroupId = null;
     if (item.kind === "host") {
-      const host = hosts.find((candidate) => candidate.id === item.id);
-      if (host) await moveHost(host, group.id);
+      selectedHostIds = [...item.ids];
+      await moveSelectedHosts(group.id);
       return;
     }
     const source = groups.find((candidate) => candidate.id === item.id);
@@ -2349,6 +2452,7 @@
 <svelte:window
   onclick={() => {
     hostContextMenu = null;
+    bulkHostContextMenu = null;
     groupContextMenu = null;
     terminalContextMenu = null;
     hostEditorMenuOpen = false;
@@ -2527,7 +2631,7 @@
               if (event.button === 1) closeTerminalTab(tab.id);
             }}
           >
-            <Icon name="terminal" /><span>{tab.title}</span>
+            <HostIcon hostId={tab.host?.id} /><span>{tab.title}</span>
           </button>
           <button
             class="terminal-tab-close"
@@ -2826,12 +2930,18 @@
                       <h2>Hosts</h2>
                       <span>{visibleHosts().length} shown · {hosts.length} saved</span>
                     </header>
-                    <div class="host-grid" class:list-view={hostCollectionView === "list"}>
+                    <div
+                      class="host-grid selectable-grid"
+                      role="list"
+                      class:list-view={hostCollectionView === "list"}
+                      onpointerdown={startHostMarquee}
+                    >
                       {#each visibleHosts() as host (host.id)}
                         <article
                           class="host-card"
-                          class:selected={selected?.id === host.id}
-                          class:vault-dragging={vaultDrag?.kind === "host" && vaultDrag.id === host.id}
+                          class:selected={selectedHostIds.includes(host.id)}
+                          class:vault-dragging={vaultDrag?.kind === "host" && vaultDrag.ids.includes(host.id)}
+                          data-select-id={host.id}
                           draggable="true"
                           ondragstart={(event) => startVaultDrag(event, "host", host.id)}
                           ondragend={finishVaultDrag}
@@ -2839,24 +2949,25 @@
                         >
                           <button
                             class="host-card-main"
-                            onclick={() => {
-                              if (!suppressVaultCardClick) chooseHost(host);
+                            onclick={(event) => {
+                              if (!suppressVaultCardClick) void handleHostCardClick(event, host);
                             }}
                             ondblclick={() => void openTerminal(host)}
                           >
-                            <span class="host-badge {host.color}"><Icon name="terminal" size={21} /></span>
+                            <span class="host-badge {host.color}"><HostIcon hostId={host.id} size={21} /></span>
                             <span class="host-copy">
                               <strong>{host.label}</strong>
                               <small>{formatHostMeta(host)}</small>
                             </span>
                           </button>
-                          {#if selected?.id === host.id}
-                            <button
-                              class="host-edit"
-                              title={`Edit ${host.label}`}
-                              onclick={() => editHost(host)}
-                            ><Icon name="edit" size={17} /></button>
-                          {/if}
+                          <button
+                            class="host-edit"
+                            title={`Edit ${host.label}`}
+                            onclick={(event) => {
+                              event.stopPropagation();
+                              void editHost(host);
+                            }}
+                          ><Icon name="edit" size={17} /></button>
                         </article>
                       {/each}
                     </div>
@@ -3244,7 +3355,7 @@
                                 onclick={() => addJumpHost(host.id)}
                               >
                                 <span class="host-badge mini {host.color}">
-                                  <Icon name="server" size={15} />
+                                  <HostIcon hostId={host.id} size={15} />
                                 </span>
                                 <span>
                                   <strong>{host.label}</strong>
@@ -3267,7 +3378,7 @@
                         {#if jumpHost}
                           <article class="chain-host-card">
                             <span class="host-badge {jumpHost.color}">
-                              <Icon name="server" size={21} />
+                              <HostIcon hostId={jumpHost.id} size={21} />
                             </span>
                             <span>
                               <strong>{jumpHost.label}</strong>
@@ -3284,7 +3395,7 @@
                       {/each}
                       <article class="chain-host-card destination">
                         <span class="host-badge {selected.color}">
-                          <Icon name="server" size={21} />
+                          <HostIcon hostId={selected.id} size={21} />
                         </span>
                         <span>
                           <strong>{selected.label || "New Host"}</strong>
@@ -3423,7 +3534,7 @@
           {/if}
           {#each filteredNewTabHosts() as host (host.id)}
             <button class="recent-row" onclick={() => void openTerminal(host)}>
-              <span class="host-badge mini {host.color}"><Icon name="terminal" size={16} /></span>
+              <span class="host-badge mini {host.color}"><HostIcon hostId={host.id} size={16} /></span>
               <strong>{host.label}</strong>
               <span>{host.group_name ?? "Personal"}</span>
             </button>
@@ -3572,6 +3683,15 @@
       >
         <Icon name="edit" size={17} /><span>Edit Host Details</span><kbd>E</kbd>
       </button>
+      <button
+        role="menuitem"
+        onclick={() => {
+          const host = takeContextHost();
+          if (host) void duplicateHost(host);
+        }}
+      >
+        <Icon name="copy" size={17} /><span>Duplicate</span>
+      </button>
       <div class="context-separator"></div>
       <div class="context-submenu">
         <button role="menuitem" aria-haspopup="menu">
@@ -3612,6 +3732,43 @@
         }}
       >
         <Icon name="trash" size={17} /><span>Remove</span>
+      </button>
+    </div>
+  {/if}
+
+  {#if bulkHostContextMenu && selectedHostIds.length > 1}
+    <div
+      class="host-context-menu bulk-host-context-menu"
+      style:left={`${bulkHostContextMenu.x}px`}
+      style:top={`${bulkHostContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      oncontextmenu={(event) => event.preventDefault()}
+    >
+      <div class="bulk-menu-heading">{selectedHostIds.length} hosts selected</div>
+      <button role="menuitem" onclick={() => void connectSelectedHosts()}>
+        <Icon name="connect" size={17} /><span>Connect all</span>
+      </button>
+      <div class="context-submenu">
+        <button role="menuitem" aria-haspopup="menu">
+          <Icon name="folder" size={17} /><span>Move all to</span><Icon name="chevron-right" size={14} />
+        </button>
+        <div class="context-submenu-panel move-destination-menu" role="menu">
+          <button role="menuitem" onclick={() => void moveSelectedHosts(null)}>Root</button>
+          {#each groupRows() as row (row.group.id)}
+            <button
+              role="menuitem"
+              style:padding-left={`${10 + row.depth * 12}px`}
+              onclick={() => void moveSelectedHosts(row.group.id)}
+            >{row.group.name}</button>
+          {/each}
+        </div>
+      </div>
+      <div class="context-separator"></div>
+      <button class="danger" role="menuitem" onclick={() => void removeSelectedHosts()}>
+        <Icon name="trash" size={17} /><span>Remove all</span>
       </button>
     </div>
   {/if}

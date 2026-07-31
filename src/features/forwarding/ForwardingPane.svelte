@@ -4,6 +4,7 @@
   import CustomSelect from "../../components/CustomSelect.svelte";
   import Icon from "../../components/Icon.svelte";
   import { confirmDialog } from "../../lib/dialog";
+  import { beginMarqueeSelection } from "../../lib/marqueeSelection";
   import {
     deletePortForward,
     listHosts,
@@ -32,6 +33,10 @@
   let hosts = $state<Host[]>([]);
   let rules = $state<PortForward[]>([]);
   let selected = $state<PortForward | null>(null);
+  let focusedRuleId = $state<string | null>(null);
+  let ruleContextMenu = $state<{ rule: PortForward; x: number; y: number } | null>(null);
+  let bulkRuleContextMenu = $state<{ x: number; y: number } | null>(null);
+  let selectedRuleIds = $state<string[]>([]);
   let runningIds = $state<Set<string>>(new Set());
   let loading = $state(true);
   let busy = $state(false);
@@ -83,6 +88,8 @@
           ? rules.find((rule) => rule.id === selected?.id) ?? null
           : null;
       selected = next ? { ...next } : null;
+      if (preferredId) focusedRuleId = preferredId;
+      else if (focusedRuleId && !rules.some((rule) => rule.id === focusedRuleId)) focusedRuleId = null;
       editorBaseline = selected ? draftSnapshot(selected) : null;
       await refreshStates();
     } catch (cause) {
@@ -129,15 +136,54 @@
       enabled: false,
       created_at: new Date().toISOString()
     };
+    focusedRuleId = selected.id;
     inspectorMenuOpen = false;
     message = "Forwarding uses the host and identity stored in the Heminus vault.";
     isError = false;
     editorBaseline = draftSnapshot(selected);
   }
 
-  async function chooseRule(rule: PortForward) {
+  async function selectRule(rule: PortForward) {
+    if (selected?.id === rule.id) {
+      focusedRuleId = rule.id;
+      return;
+    }
+    if (selected && !(await confirmDiscardChanges(editorDirty))) return;
+    selected = null;
+    editorBaseline = null;
+    inspectorMenuOpen = false;
+    focusedRuleId = rule.id;
+    message = "";
+  }
+
+  async function handleRuleClick(event: MouseEvent, rule: PortForward) {
+    if (event.ctrlKey || event.metaKey) {
+      selectedRuleIds = selectedRuleIds.includes(rule.id)
+        ? selectedRuleIds.filter((id) => id !== rule.id)
+        : [...selectedRuleIds, rule.id];
+      focusedRuleId = selectedRuleIds.at(-1) ?? null;
+      return;
+    }
+    selectedRuleIds = [rule.id];
+    await selectRule(rule);
+  }
+
+  function startRuleMarquee(event: PointerEvent) {
+    beginMarqueeSelection(
+      event,
+      event.currentTarget as HTMLElement,
+      selectedRuleIds,
+      (ids) => {
+        selectedRuleIds = ids;
+        focusedRuleId = ids.at(-1) ?? null;
+      }
+    );
+  }
+
+  async function editRule(rule: PortForward) {
     if (selected?.id !== rule.id && !(await confirmDiscardChanges(editorDirty))) return;
     selected = { ...rule };
+    focusedRuleId = rule.id;
     inspectorMenuOpen = false;
     message = "";
     editorBaseline = draftSnapshot(selected);
@@ -149,6 +195,38 @@
     editorBaseline = null;
     inspectorMenuOpen = false;
     message = "";
+  }
+
+  function openRuleContextMenu(event: MouseEvent, rule: PortForward) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (selectedRuleIds.length > 1 && selectedRuleIds.includes(rule.id)) {
+      ruleContextMenu = null;
+      bulkRuleContextMenu = {
+        x: Math.max(10, Math.min(event.clientX, window.innerWidth - 220)),
+        y: Math.max(10, Math.min(event.clientY, window.innerHeight - 220))
+      };
+      return;
+    }
+    selectedRuleIds = [rule.id];
+    bulkRuleContextMenu = null;
+    focusedRuleId = rule.id;
+    ruleContextMenu = {
+      rule: { ...rule },
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - 238)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - 194))
+    };
+  }
+
+  function selectedRules(): PortForward[] {
+    const ids = new Set(selectedRuleIds);
+    return rules.filter((rule) => ids.has(rule.id));
+  }
+
+  function takeContextRule(): PortForward | null {
+    const rule = ruleContextMenu?.rule ?? null;
+    ruleContextMenu = null;
+    return rule;
   }
 
   function changeKind(kind: ForwardKind) {
@@ -163,41 +241,48 @@
     }
   }
 
-  async function persist() {
-    if (!selected || busy) return;
+  async function persist(): Promise<PortForward | null> {
+    if (!selected || busy) return null;
     busy = true;
     try {
       const saved = await savePortForward(selected);
       await refresh(saved.id);
       message = "Forwarding rule saved";
       isError = false;
+      return saved;
     } catch (cause) {
       showError(cause);
+      return null;
     } finally {
       busy = false;
     }
   }
 
-  async function toggle() {
-    if (!selected || busy) return;
+  async function toggleRule(rule: PortForward) {
+    if (busy) return;
     busy = true;
     try {
-      if (runningIds.has(selected.id)) {
-        await stopTunnel(selected.id);
-        message = "Tunnel stopped";
-      } else {
-        const host = hosts.find((candidate) => candidate.id === selected?.host_id);
-        if (!host) throw new Error("Select a valid SSH host");
-        const saved = await savePortForward(selected);
+      const draft = selected?.id === rule.id ? selected : rule;
+      const saved = await savePortForward(draft);
+      rules = rules.map((item) => item.id === saved.id ? { ...saved } : item);
+      if (selected?.id === saved.id) {
         selected = { ...saved };
         editorBaseline = draftSnapshot(selected);
+      }
+      focusedRuleId = saved.id;
+      if (runningIds.has(saved.id)) {
+        await stopTunnel(saved.id);
+        message = "Tunnel stopped";
+      } else {
+        const host = hosts.find((candidate) => candidate.id === saved.host_id);
+        if (!host) throw new Error("Select a valid SSH host");
         await startTunnel(saved, host);
         message = "Tunnel started";
       }
       isError = false;
       await new Promise((resolve) => window.setTimeout(resolve, 180));
       await refreshStates();
-      if (!runningIds.has(selected.id) && message === "Tunnel started" && !isError) {
+      if (!runningIds.has(saved.id) && message === "Tunnel started" && !isError) {
         throw new Error("SSH closed the tunnel. Connect to the host once and verify your key or agent.");
       }
     } catch (cause) {
@@ -208,19 +293,94 @@
     }
   }
 
-  async function remove() {
-    if (!selected || !rules.some((rule) => rule.id === selected?.id)) return;
+  async function duplicateRule(rule: PortForward) {
+    if (busy) return;
+    busy = true;
+    try {
+      const duplicate = await savePortForward({
+        ...rule,
+        id: crypto.randomUUID(),
+        name: `${rule.name} copy`,
+        enabled: false,
+        created_at: new Date().toISOString()
+      });
+      await refresh(duplicate.id);
+      message = "Forwarding rule duplicated";
+      isError = false;
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeRule(rule: PortForward) {
+    if (!rules.some((item) => item.id === rule.id)) return;
     if (
       !(await confirmDialog({
         title: "Remove forwarding rule?",
-        message: `Remove “${selected.name}”?`,
+        message: `Remove “${rule.name}”?`,
         confirmLabel: "Remove",
         danger: true
       }))
     ) return;
     try {
-      await stopTunnel(selected.id);
-      await deletePortForward(selected.id);
+      await stopTunnel(rule.id);
+      await deletePortForward(rule.id);
+      if (selected?.id === rule.id) selected = null;
+      if (focusedRuleId === rule.id) focusedRuleId = null;
+      await refresh();
+    } catch (cause) {
+      showError(cause);
+    }
+  }
+
+  async function toggleSelectedRules(start: boolean) {
+    bulkRuleContextMenu = null;
+    for (const rule of selectedRules()) {
+      if (runningIds.has(rule.id) !== start) await toggleRule(rule);
+    }
+  }
+
+  async function duplicateSelectedRules() {
+    const targets = selectedRules();
+    bulkRuleContextMenu = null;
+    if (!targets.length || busy) return;
+    busy = true;
+    try {
+      const duplicates = await Promise.all(targets.map((rule) => savePortForward({
+        ...rule,
+        id: crypto.randomUUID(),
+        name: `${rule.name} copy`,
+        enabled: false,
+        created_at: new Date().toISOString()
+      })));
+      await refresh();
+      selectedRuleIds = duplicates.map((rule) => rule.id);
+      message = `${duplicates.length} forwarding rules duplicated`;
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeSelectedRules() {
+    const targets = selectedRules();
+    bulkRuleContextMenu = null;
+    if (!targets.length || !(await confirmDialog({
+      title: `Remove ${targets.length} forwarding rules?`,
+      message: "Every selected tunnel will be stopped and removed.",
+      confirmLabel: "Remove all",
+      danger: true
+    }))) return;
+    try {
+      await Promise.all(targets.map(async (rule) => {
+        await stopTunnel(rule.id);
+        await deletePortForward(rule.id);
+      }));
+      if (selected && selectedRuleIds.includes(selected.id)) selected = null;
+      selectedRuleIds = [];
       await refresh();
     } catch (cause) {
       showError(cause);
@@ -232,6 +392,19 @@
     isError = true;
   }
 </script>
+
+<svelte:window
+  onclick={() => {
+    ruleContextMenu = null;
+    bulkRuleContextMenu = null;
+  }}
+  onkeydown={(event) => {
+    if (event.key === "Escape") {
+      ruleContextMenu = null;
+      bulkRuleContextMenu = null;
+    }
+  }}
+/>
 
 <section class="manager-page" class:with-inspector={Boolean(selected)}>
   <div class="manager-main">
@@ -269,20 +442,42 @@
           <p>Try another name, endpoint, or host.</p>
         </div>
       {:else}
-        <div class="manager-grid" class:list-view={collectionView === "list"}>
+        <div
+          class="manager-grid selectable-grid"
+          role="list"
+          class:list-view={collectionView === "list"}
+          onpointerdown={startRuleMarquee}
+        >
           {#each visibleRules as rule (rule.id)}
-            <button
-              class="manager-card"
-              class:selected={selected?.id === rule.id}
-              onclick={() => chooseRule(rule)}
+            <div
+              class="manager-card-shell"
+              role="group"
+              data-select-id={rule.id}
+              oncontextmenu={(event) => openRuleContextMenu(event, rule)}
             >
-              <span class="manager-icon"><Icon name="forward" /></span>
-              <span>
-                <strong>{rule.name}</strong>
-                <small>{rule.kind} · {rule.bind_host}:{rule.bind_port}</small>
-              </span>
-              <span class:running={runningIds.has(rule.id)} class="runtime-dot"></span>
-            </button>
+              <button
+                class="manager-card"
+                class:selected={selectedRuleIds.includes(rule.id)}
+                class:running-card={runningIds.has(rule.id)}
+                onclick={(event) => void handleRuleClick(event, rule)}
+                ondblclick={() => void toggleRule(rule)}
+              >
+                <span class="manager-icon"><Icon name="forward" /></span>
+                <span>
+                  <strong>{rule.name}</strong>
+                  <small>{rule.kind} · {rule.bind_host}:{rule.bind_port}</small>
+                </span>
+                <span class:running={runningIds.has(rule.id)} class="runtime-dot"></span>
+              </button>
+              <button
+                class="manager-card-edit"
+                title={`Edit ${rule.name}`}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  void editRule(rule);
+                }}
+              ><Icon name="edit" size={17} /></button>
+            </div>
           {/each}
         </div>
       {/if}
@@ -306,7 +501,10 @@
             ><Icon name="more" /></button>
             {#if inspectorMenuOpen}
               <div class="host-editor-menu">
-                <button class="danger-copy" onclick={() => void remove()}>
+                <button onclick={() => selected && void duplicateRule(selected)}>
+                  <Icon name="copy" /> Duplicate
+                </button>
+                <button class="danger-copy" onclick={() => selected && void removeRule(selected)}>
                   <Icon name="trash" /> Remove
                 </button>
               </div>
@@ -415,12 +613,9 @@
         </section>
         {#if message}<p class:error-message={isError} class="form-message">{message}</p>{/if}
       </div>
-      <footer class="manager-inspector-footer split">
-        <button class="manager-secondary-action" disabled={busy} onclick={persist}>
-          <Icon name="save" /> Save
-        </button>
-        <button class="manager-primary-action" disabled={busy} onclick={toggle}>
-          {runningIds.has(selected.id) ? "Stop Tunnel" : "Start Tunnel"}
+      <footer class="manager-inspector-footer">
+        <button class="manager-primary-action" disabled={busy} onclick={persist}>
+          <Icon name="save" /> {busy ? "Saving…" : "Save"}
         </button>
       </footer>
     {:else}
@@ -430,5 +625,77 @@
       </div>
     {/if}
   </aside>
+  {/if}
+
+  {#if ruleContextMenu}
+    <div
+      class="host-context-menu manager-context-menu"
+      style:left={`${ruleContextMenu.x}px`}
+      style:top={`${ruleContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      oncontextmenu={(event) => event.preventDefault()}
+    >
+      <button
+        role="menuitem"
+        onclick={() => {
+          const rule = takeContextRule();
+          if (rule) void toggleRule(rule);
+        }}
+      ><Icon name="connect" size={17} /><span>{runningIds.has(ruleContextMenu.rule.id) ? "Stop Tunnel" : "Start Tunnel"}</span></button>
+      <button
+        role="menuitem"
+        onclick={() => {
+          const rule = takeContextRule();
+          if (rule) void editRule(rule);
+        }}
+      ><Icon name="edit" size={17} /><span>Edit</span></button>
+      <button
+        role="menuitem"
+        onclick={() => {
+          const rule = takeContextRule();
+          if (rule) void duplicateRule(rule);
+        }}
+      ><Icon name="copy" size={17} /><span>Duplicate</span></button>
+      <div class="context-separator"></div>
+      <button
+        class="danger"
+        role="menuitem"
+        onclick={() => {
+          const rule = takeContextRule();
+          if (rule) void removeRule(rule);
+        }}
+      ><Icon name="trash" size={17} /><span>Remove</span></button>
+    </div>
+  {/if}
+
+  {#if bulkRuleContextMenu && selectedRuleIds.length > 1}
+    <div
+      class="host-context-menu manager-context-menu"
+      style:left={`${bulkRuleContextMenu.x}px`}
+      style:top={`${bulkRuleContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      oncontextmenu={(event) => event.preventDefault()}
+    >
+      <div class="bulk-menu-heading">{selectedRuleIds.length} tunnels selected</div>
+      <button role="menuitem" onclick={() => void toggleSelectedRules(true)}>
+        <Icon name="connect" size={17} /><span>Start all</span>
+      </button>
+      <button role="menuitem" onclick={() => void toggleSelectedRules(false)}>
+        <Icon name="close" size={17} /><span>Stop all</span>
+      </button>
+      <button role="menuitem" onclick={() => void duplicateSelectedRules()}>
+        <Icon name="copy" size={17} /><span>Duplicate all</span>
+      </button>
+      <div class="context-separator"></div>
+      <button class="danger" role="menuitem" onclick={() => void removeSelectedRules()}>
+        <Icon name="trash" size={17} /><span>Remove all</span>
+      </button>
+    </div>
   {/if}
 </section>

@@ -146,7 +146,7 @@ export function setNativeTabDragPreview(
  * drag images at the display scale, which can make them appear much larger
  * than their source on HiDPI displays.
  */
-export function setElementDragPreview(event: DragEvent): void {
+export function setElementDragPreview(event: DragEvent, itemCount = 1): void {
   const transfer = event.dataTransfer;
   const source = event.currentTarget;
   if (!transfer || !(source instanceof HTMLElement)) return;
@@ -163,6 +163,10 @@ export function setElementDragPreview(event: DragEvent): void {
   preview.setAttribute("aria-hidden", "true");
   preview.classList.add("heminus-drag-preview");
   preview.classList.remove("vault-dragging");
+  if (itemCount > 1) {
+    preview.classList.add("multi-drag-preview");
+    preview.dataset.count = String(itemCount);
+  }
 
   const fixedStyles: Record<string, string> = {
     position: "fixed",
@@ -177,7 +181,7 @@ export function setElementDragPreview(event: DragEvent): void {
     maxHeight: "none",
     margin: "0",
     opacity: "0.92",
-    overflow: "hidden",
+    overflow: itemCount > 1 ? "visible" : "hidden",
     pointerEvents: "none",
     transform: "none",
     transition: "none",

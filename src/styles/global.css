@@ -1284,6 +1284,17 @@ select:focus-visible {
   border-radius: 10px;
   background: #e2e8eb;
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.92);
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+
+.host-card:hover .host-edit,
+.host-card:focus-within .host-edit {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
 }
 
 .host-edit:hover {
@@ -1358,6 +1369,15 @@ select:focus-visible {
   height: 1px;
   margin: 5px 8px;
   background: #e1e7e9;
+}
+
+.bulk-menu-heading {
+  padding: 7px 10px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .context-submenu {
@@ -1479,6 +1499,52 @@ select:focus-visible {
 
 .host-badge.slate {
   background: #5b6474;
+}
+
+.host-badge:has(.host-brand-icon) {
+  color: inherit;
+  background: transparent;
+}
+
+.selection-marquee {
+  position: fixed;
+  z-index: 70;
+  pointer-events: none;
+  border: 1px solid #168dc7;
+  border-radius: 5px;
+  background: #2495e326;
+  box-shadow: inset 0 0 0 1px #ffffff80;
+}
+
+.heminus-drag-preview.multi-drag-preview::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: 1px solid #cbd6db;
+  border-radius: inherit;
+  background: white;
+  box-shadow: 5px 5px 0 white, 6px 6px 0 #d8e0e3;
+  transform: translate(6px, 6px);
+}
+
+.heminus-drag-preview.multi-drag-preview::after {
+  content: attr(data-count);
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  border: 2px solid white;
+  border-radius: 999px;
+  background: var(--accent);
+  box-sizing: border-box;
 }
 
 .host-copy {
@@ -5146,6 +5212,59 @@ select:focus-visible {
   border-radius: var(--radius-lg);
   background: white;
   cursor: pointer;
+}
+
+.manager-card-shell {
+  position: relative;
+  min-width: 0;
+}
+
+.manager-card-shell .manager-card {
+  width: 100%;
+}
+
+.manager-card-shell:has(.manager-card-edit) .manager-card {
+  padding-right: 48px;
+}
+
+.manager-card-edit {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: #53636d;
+  border: 0;
+  border-radius: 8px;
+  background: #edf2f3;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 100ms ease;
+}
+
+.manager-card-shell:hover .manager-card-edit,
+.manager-card-shell:focus-within .manager-card-edit {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.manager-card-edit:hover {
+  color: #086b9a;
+  background: #dceff7;
+}
+
+.manager-card.running-card {
+  border-color: #86d0b4;
+  background: #effaf5;
+}
+
+.manager-card.running-card .manager-icon {
+  background: #24886c;
 }
 
 .manager-card:hover {

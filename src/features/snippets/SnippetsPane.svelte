@@ -3,6 +3,7 @@
   import CollectionControls from "../../components/CollectionControls.svelte";
   import Icon from "../../components/Icon.svelte";
   import { confirmDialog } from "../../lib/dialog";
+  import { beginMarqueeSelection } from "../../lib/marqueeSelection";
   import { deleteSnippet, listSnippets, saveSnippet } from "../../lib/ipc";
   import type { Snippet } from "../../lib/types";
   import {
@@ -22,6 +23,9 @@
 
   let snippets = $state<Snippet[]>([]);
   let selected = $state<Snippet | null>(null);
+  let snippetContextMenu = $state<{ snippet: Snippet; x: number; y: number } | null>(null);
+  let bulkSnippetContextMenu = $state<{ x: number; y: number } | null>(null);
+  let selectedSnippetIds = $state<string[]>([]);
   let loading = $state(true);
   let saving = $state(false);
   let message = $state("");
@@ -100,6 +104,57 @@
     editorBaseline = draftSnapshot(selected);
   }
 
+  async function handleSnippetClick(event: MouseEvent, snippet: Snippet) {
+    if (event.ctrlKey || event.metaKey) {
+      selectedSnippetIds = selectedSnippetIds.includes(snippet.id)
+        ? selectedSnippetIds.filter((id) => id !== snippet.id)
+        : [...selectedSnippetIds, snippet.id];
+      return;
+    }
+    selectedSnippetIds = [snippet.id];
+    await chooseSnippet(snippet);
+  }
+
+  function startSnippetMarquee(event: PointerEvent) {
+    beginMarqueeSelection(
+      event,
+      event.currentTarget as HTMLElement,
+      selectedSnippetIds,
+      (ids) => (selectedSnippetIds = ids)
+    );
+  }
+
+  function openSnippetContextMenu(event: MouseEvent, snippet: Snippet) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (selectedSnippetIds.length > 1 && selectedSnippetIds.includes(snippet.id)) {
+      snippetContextMenu = null;
+      bulkSnippetContextMenu = {
+        x: Math.max(10, Math.min(event.clientX, window.innerWidth - 220)),
+        y: Math.max(10, Math.min(event.clientY, window.innerHeight - 156))
+      };
+      return;
+    }
+    selectedSnippetIds = [snippet.id];
+    bulkSnippetContextMenu = null;
+    snippetContextMenu = {
+      snippet: { ...snippet },
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - 220)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - 156))
+    };
+  }
+
+  function selectedSnippets(): Snippet[] {
+    const ids = new Set(selectedSnippetIds);
+    return snippets.filter((snippet) => ids.has(snippet.id));
+  }
+
+  function takeContextSnippet(): Snippet | null {
+    const snippet = snippetContextMenu?.snippet ?? null;
+    snippetContextMenu = null;
+    return snippet;
+  }
+
   async function closeInspector() {
     if (!(await confirmDiscardChanges(editorDirty))) return;
     selected = null;
@@ -123,20 +178,83 @@
     }
   }
 
-  async function remove() {
-    if (!selected || !snippets.some((item) => item.id === selected?.id)) return;
+  async function duplicateSnippet(snippet: Snippet) {
+    if (selected?.id !== snippet.id && !(await confirmDiscardChanges(editorDirty))) return;
+    saving = true;
+    try {
+      const duplicate = await saveSnippet({
+        ...snippet,
+        id: crypto.randomUUID(),
+        title: `${snippet.title} copy`,
+        created_at: new Date().toISOString()
+      });
+      await refresh(duplicate.id);
+      message = "Snippet duplicated";
+      isError = false;
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function removeSnippet(snippet: Snippet) {
+    if (!snippets.some((item) => item.id === snippet.id)) return;
     if (
       !(await confirmDialog({
         title: "Remove snippet?",
-        message: `Remove “${selected.title}” from your vault?`,
+        message: `Remove “${snippet.title}” from your vault?`,
         confirmLabel: "Remove",
         danger: true
       }))
     ) return;
     try {
-      await deleteSnippet(selected.id);
+      await deleteSnippet(snippet.id);
+      if (selected?.id === snippet.id) selected = null;
       await refresh();
       message = "";
+    } catch (cause) {
+      showError(cause);
+    }
+  }
+
+  async function duplicateSelectedSnippets() {
+    const targets = selectedSnippets();
+    bulkSnippetContextMenu = null;
+    if (!targets.length || saving) return;
+    saving = true;
+    try {
+      const duplicates = await Promise.all(targets.map((snippet) => saveSnippet({
+        ...snippet,
+        id: crypto.randomUUID(),
+        title: `${snippet.title} copy`,
+        created_at: new Date().toISOString()
+      })));
+      await refresh();
+      selectedSnippetIds = duplicates.map((snippet) => snippet.id);
+      message = `${duplicates.length} snippets duplicated`;
+      isError = false;
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function removeSelectedSnippets() {
+    const targets = selectedSnippets();
+    bulkSnippetContextMenu = null;
+    if (!targets.length || !(await confirmDialog({
+      title: `Remove ${targets.length} snippets?`,
+      message: "Remove every selected snippet from your vault?",
+      confirmLabel: "Remove all",
+      danger: true
+    }))) return;
+    try {
+      await Promise.all(targets.map((snippet) => deleteSnippet(snippet.id)));
+      if (selected && selectedSnippetIds.includes(selected.id)) selected = null;
+      selectedSnippetIds = [];
+      await refresh();
     } catch (cause) {
       showError(cause);
     }
@@ -154,6 +272,19 @@
     isError = true;
   }
 </script>
+
+<svelte:window
+  onclick={() => {
+    snippetContextMenu = null;
+    bulkSnippetContextMenu = null;
+  }}
+  onkeydown={(event) => {
+    if (event.key === "Escape") {
+      snippetContextMenu = null;
+      bulkSnippetContextMenu = null;
+    }
+  }}
+/>
 
 <section class="manager-page" class:with-inspector={Boolean(selected)}>
   <div class="manager-main">
@@ -191,12 +322,19 @@
           <p>Try another name, command, or description.</p>
         </div>
       {:else}
-        <div class="manager-grid" class:list-view={collectionView === "list"}>
+        <div
+          class="manager-grid selectable-grid"
+          role="list"
+          class:list-view={collectionView === "list"}
+          onpointerdown={startSnippetMarquee}
+        >
           {#each visibleSnippets as snippet (snippet.id)}
             <button
               class="manager-card"
-              class:selected={selected?.id === snippet.id}
-              onclick={() => chooseSnippet(snippet)}
+              class:selected={selectedSnippetIds.includes(snippet.id)}
+              data-select-id={snippet.id}
+              onclick={(event) => void handleSnippetClick(event, snippet)}
+              oncontextmenu={(event) => openSnippetContextMenu(event, snippet)}
             >
               <span class="manager-icon"><Icon name="code" /></span>
               <span><strong>{snippet.title}</strong><code>{snippet.command}</code></span>
@@ -229,7 +367,10 @@
                   <Icon name="copy" /> Copy command
                 </button>
                 {#if snippets.some((snippet) => snippet.id === selected?.id)}
-                  <button class="danger-copy" onclick={() => void remove()}>
+                  <button onclick={() => selected && void duplicateSnippet(selected)}>
+                    <Icon name="copy" /> Duplicate
+                  </button>
+                  <button class="danger-copy" onclick={() => selected && void removeSnippet(selected)}>
                     <Icon name="trash" /> Remove
                   </button>
                 {/if}
@@ -276,5 +417,64 @@
       </div>
     {/if}
   </aside>
+  {/if}
+
+  {#if snippetContextMenu}
+    <div
+      class="host-context-menu manager-context-menu"
+      style:left={`${snippetContextMenu.x}px`}
+      style:top={`${snippetContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      oncontextmenu={(event) => event.preventDefault()}
+    >
+      <button
+        role="menuitem"
+        onclick={() => {
+          const snippet = takeContextSnippet();
+          if (snippet) void chooseSnippet(snippet);
+        }}
+      ><Icon name="edit" size={17} /><span>Edit</span></button>
+      <button
+        role="menuitem"
+        onclick={() => {
+          const snippet = takeContextSnippet();
+          if (snippet) void duplicateSnippet(snippet);
+        }}
+      ><Icon name="copy" size={17} /><span>Duplicate</span></button>
+      <div class="context-separator"></div>
+      <button
+        class="danger"
+        role="menuitem"
+        onclick={() => {
+          const snippet = takeContextSnippet();
+          if (snippet) void removeSnippet(snippet);
+        }}
+      ><Icon name="trash" size={17} /><span>Remove</span></button>
+    </div>
+  {/if}
+
+  {#if bulkSnippetContextMenu && selectedSnippetIds.length > 1}
+    <div
+      class="host-context-menu manager-context-menu"
+      style:left={`${bulkSnippetContextMenu.x}px`}
+      style:top={`${bulkSnippetContextMenu.y}px`}
+      role="menu"
+      tabindex="-1"
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => event.stopPropagation()}
+      oncontextmenu={(event) => event.preventDefault()}
+    >
+      <div class="bulk-menu-heading">{selectedSnippetIds.length} snippets selected</div>
+      <button role="menuitem" onclick={() => void duplicateSelectedSnippets()}>
+        <Icon name="copy" size={17} /><span>Duplicate all</span>
+      </button>
+      <div class="context-separator"></div>
+      <button class="danger" role="menuitem" onclick={() => void removeSelectedSnippets()}>
+        <Icon name="trash" size={17} /><span>Remove all</span>
+      </button>
+    </div>
   {/if}
 </section>
