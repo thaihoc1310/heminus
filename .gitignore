@@ -1,0 +1,33 @@
+# Rust / Tauri build outputs
+/target/
+/src-tauri/gen/
+
+# Node / Vite outputs
+/node_modules/
+/dist/
+/coverage/
+*.tsbuildinfo
+.pnpm-store/
+
+# Local tooling and runtime state
+/.cache/
+/.local/
+/.codegraph/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
