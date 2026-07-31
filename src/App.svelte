@@ -123,7 +123,7 @@
   let hostSubeditor = $state<HostSubeditor | null>(null);
   let hostSubeditorClosing = $state(false);
   let environmentDraft = $state<Array<{ name: string; value: string }>>([]);
-  let jumpHostDraft = $state<string | null>(null);
+  let jumpHostDraft = $state<string[]>([]);
   let chainPickerOpen = $state(false);
   let hostContextMenu = $state<{ host: Host; x: number; y: number } | null>(null);
   let groupContextMenu = $state<{ group: VaultGroup; x: number; y: number } | null>(null);
@@ -578,7 +578,7 @@
       tags: [],
       color: "blue",
       identity_id: null,
-      jump_host_id: null,
+      jump_host_ids: [],
       environment: [],
       terminal_theme: "heminus_dark",
       terminal_font_size: 14,
@@ -630,6 +630,15 @@
     if (!Number.isInteger(selected.port) || selected.port < 1 || selected.port > 65535) {
       throw new Error("SSH port must be between 1 and 65535");
     }
+    if (selected.jump_host_ids.length > 16) {
+      throw new Error("A connection chain can contain at most 16 jump hosts");
+    }
+    if (
+      selected.jump_host_ids.includes(selected.id) ||
+      new Set(selected.jump_host_ids).size !== selected.jump_host_ids.length
+    ) {
+      throw new Error("A connection chain cannot contain this host or duplicate jump hosts");
+    }
     const names = new Set<string>();
     for (const variable of selected.environment) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name) || /[\0\r\n]/.test(variable.value)) {
@@ -657,7 +666,7 @@
 
   function openChainEditor() {
     if (!selected) return;
-    jumpHostDraft = selected.jump_host_id;
+    jumpHostDraft = [...selected.jump_host_ids];
     chainPickerOpen = false;
     hostSubeditorClosing = false;
     hostSubeditor = "chain";
@@ -681,7 +690,7 @@
       if (!environmentDraftValid()) return;
       selected.environment = environmentDraft.map((variable) => ({ ...variable }));
     }
-    if (save && hostSubeditor === "chain") selected.jump_host_id = jumpHostDraft;
+    if (save && hostSubeditor === "chain") selected.jump_host_ids = [...jumpHostDraft];
     hostSubeditorClosing = true;
     window.setTimeout(() => {
       hostSubeditor = null;
@@ -716,13 +725,34 @@
   }
 
   function chainSummary(): string {
-    const jumpHost = hosts.find((host) => host.id === selected?.jump_host_id);
-    return jumpHost?.label ?? "Direct";
+    if (!selected?.jump_host_ids.length) return "Direct";
+    return selected.jump_host_ids
+      .map((id) => hosts.find((host) => host.id === id)?.label ?? "Missing host")
+      .join(" → ");
   }
 
   function jumpHostOptions(): Host[] {
     if (!selected) return [];
-    return hosts.filter((host) => host.id !== selected?.id);
+    if (jumpHostDraft.length >= 16) return [];
+    const selectedId = selected.id;
+    return hosts.filter(
+      (host) => host.id !== selectedId && !jumpHostDraft.includes(host.id)
+    );
+  }
+
+  function addJumpHost(id: string) {
+    if (jumpHostDraft.length >= 16 || jumpHostDraft.includes(id)) return;
+    jumpHostDraft.unshift(id);
+    chainPickerOpen = false;
+  }
+
+  function chainEntryLabel(): string {
+    const firstJumpHost = hosts.find((host) => host.id === jumpHostDraft[0]);
+    return firstJumpHost?.label ?? selected?.label ?? selected?.address ?? "this host";
+  }
+
+  function removeJumpHost(index: number) {
+    jumpHostDraft.splice(index, 1);
   }
 
   function identitySummary(): string {
@@ -2191,6 +2221,7 @@
     return {
       ...host,
       tags: [...host.tags],
+      jump_host_ids: [...host.jump_host_ids],
       environment: host.environment.map((variable) => ({ ...variable }))
     };
   }
@@ -2951,7 +2982,7 @@
                 <h2>Connection options</h2>
                 <button class="option-row option-link" onclick={openChainEditor}>
                   <span class="option-icon"><Icon name="forward" size={17} /></span>
-                  <span><strong>Host chain</strong><small>Connect through one jump host</small></span>
+                  <span><strong>Host chain</strong><small>Connect through ordered jump hosts</small></span>
                   <span class="option-value">{chainSummary()}</span>
                   <Icon name="chevron-right" size={16} />
                 </button>
@@ -3080,17 +3111,18 @@
                   {:else if hostSubeditor === "chain"}
                     <section class="subeditor-card chain-intro">
                       <p>
-                        {jumpHostDraft
-                          ? "Change the jump host used before connecting to"
+                        {jumpHostDraft.length
+                          ? "Adding another host will create a connection to"
                           : "Adding a host will create a connection to"}
-                        <strong>{selected.label || selected.address || "this host"}</strong>.
+                        <strong>{chainEntryLabel()}</strong>.
                       </p>
                       <button
                         class="subeditor-wide-action"
                         onclick={() => (chainPickerOpen = !chainPickerOpen)}
+                        disabled={jumpHostOptions().length === 0}
                       >
                         <Icon name="plus" size={17} />
-                        {jumpHostDraft ? "Change Host" : "Add a Host"}
+                        Add a Host
                       </button>
                       {#if chainPickerOpen}
                         <div class="chain-picker">
@@ -3099,11 +3131,7 @@
                           {:else}
                             {#each jumpHostOptions() as host (host.id)}
                               <button
-                                class:selected={jumpHostDraft === host.id}
-                                onclick={() => {
-                                  jumpHostDraft = host.id;
-                                  chainPickerOpen = false;
-                                }}
+                                onclick={() => addJumpHost(host.id)}
                               >
                                 <span class="host-badge mini {host.color}">
                                   <Icon name="server" size={15} />
@@ -3112,7 +3140,7 @@
                                   <strong>{host.label}</strong>
                                   <small>{host.username}@{host.address} · {jumpHostCredentialLabel(host)}</small>
                                 </span>
-                                {#if jumpHostDraft === host.id}<Icon name="shield" size={16} />{/if}
+                                <Icon name="plus" size={16} />
                               </button>
                             {/each}
                           {/if}
@@ -3121,8 +3149,11 @@
                     </section>
 
                     <div class="chain-path">
-                      {#if jumpHostDraft}
-                        {@const jumpHost = hosts.find((host) => host.id === jumpHostDraft)}
+                      {#if jumpHostDraft.length > 0}
+                        <Icon name="arrow-down" size={24} />
+                      {/if}
+                      {#each jumpHostDraft as jumpHostId, index (jumpHostId)}
+                        {@const jumpHost = hosts.find((host) => host.id === jumpHostId)}
                         {#if jumpHost}
                           <article class="chain-host-card">
                             <span class="host-badge {jumpHost.color}">
@@ -3134,13 +3165,13 @@
                             </span>
                             <button
                               class="icon-button danger"
-                              title="Remove jump host"
-                              onclick={() => (jumpHostDraft = null)}
+                              title={`Remove jump host ${index + 1}`}
+                              onclick={() => removeJumpHost(index)}
                             ><Icon name="close" size={16} /></button>
                           </article>
                           <Icon name="arrow-down" size={24} />
                         {/if}
-                      {/if}
+                      {/each}
                       <article class="chain-host-card destination">
                         <span class="host-badge {selected.color}">
                           <Icon name="server" size={21} />
@@ -3151,8 +3182,8 @@
                         </span>
                       </article>
                       <p class="chain-security-note">
-                        The jump host uses its saved Password or Key. Connect to it directly once
-                        to trust its host key in the Heminus vault.
+                        Each jump host uses its own saved Password or Key. Connect to every hop
+                        directly once to trust its host key in the Heminus vault.
                       </p>
                     </div>
                   {:else}
@@ -3190,8 +3221,8 @@
                   <footer>
                     <button
                       class="subeditor-clear"
-                      disabled={!jumpHostDraft}
-                      onclick={() => (jumpHostDraft = null)}
+                      disabled={jumpHostDraft.length === 0}
+                      onclick={() => (jumpHostDraft = [])}
                     >Clear chain</button>
                   </footer>
                 {/if}

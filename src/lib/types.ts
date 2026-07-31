@@ -36,7 +36,7 @@ export interface Host {
   tags: string[];
   color: HostColor;
   identity_id: string | null;
-  jump_host_id: string | null;
+  jump_host_ids: string[];
   environment: EnvironmentVariable[];
   terminal_theme: TerminalTheme;
   terminal_font_size: number;

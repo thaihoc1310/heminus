@@ -56,27 +56,28 @@ pub fn connection_askpass_environment(
 ) -> Result<Option<(String, String)>, String> {
     let mut candidates = Vec::new();
     if let Some(candidate) = target_identity.and_then(|identity| candidate(identity, host)) {
-        candidates.push(candidate);
+        push_candidate(&mut candidates, candidate);
     }
-    if let Some(jump_host_id) = host.jump_host_id {
-        let jump_host = database
-            .find_host(jump_host_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "The selected jump host no longer exists".to_string())?;
+    for (index, jump_host) in crate::ssh_runtime::jump_hosts(database, host)?
+        .into_iter()
+        .enumerate()
+    {
         let jump_identity = jump_host
             .identity_id
             .map(|id| {
                 database
                     .find_identity(id)
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "The jump host identity no longer exists".to_string())
+                    .ok_or_else(|| {
+                        format!("The identity for jump host {} no longer exists", index + 1)
+                    })
             })
             .transpose()?;
         if let Some(candidate) = jump_identity
             .as_ref()
             .and_then(|identity| candidate(identity, &jump_host))
         {
-            candidates.push(candidate);
+            push_candidate(&mut candidates, candidate);
         }
     }
     if candidates.is_empty() {
@@ -87,6 +88,21 @@ pub fn connection_askpass_environment(
     let encoded = serde_json::to_string(&candidates)
         .map_err(|error| format!("Could not prepare SSH credentials: {error}"))?;
     Ok(Some((executable.to_string_lossy().into_owned(), encoded)))
+}
+
+fn push_candidate(candidates: &mut Vec<AskpassCandidate>, candidate: AskpassCandidate) {
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|existing| existing.id == candidate.id)
+    {
+        for needle in candidate.needles {
+            if !existing.needles.contains(&needle) {
+                existing.needles.push(needle);
+            }
+        }
+    } else {
+        candidates.push(candidate);
+    }
 }
 
 fn candidate(identity: &Identity, host: &Host) -> Option<AskpassCandidate> {
@@ -186,6 +202,42 @@ mod tests {
             )
             .unwrap(),
             jump.id
+        );
+    }
+
+    #[test]
+    fn askpass_environment_includes_every_unique_chain_identity() {
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let mut shared_identity = Identity::new("Shared password", IdentityKind::Password);
+        shared_identity.secret_stored = true;
+        database.save_identity(&shared_identity).unwrap();
+        let mut relay_identity = Identity::new("Relay password", IdentityKind::Password);
+        relay_identity.secret_stored = true;
+        database.save_identity(&relay_identity).unwrap();
+
+        let mut first_jump = Host::new("Edge", "192.0.2.10", "edge");
+        first_jump.identity_id = Some(shared_identity.id);
+        database.save_host(&first_jump).unwrap();
+        let mut second_jump = Host::new("Relay", "10.0.0.10", "relay");
+        second_jump.identity_id = Some(relay_identity.id);
+        database.save_host(&second_jump).unwrap();
+        let mut target = Host::new("Target", "10.0.1.20", "deploy");
+        target.identity_id = Some(shared_identity.id);
+        target.jump_host_ids = vec![first_jump.id, second_jump.id];
+
+        let (_, encoded) =
+            connection_askpass_environment(&database, &target, Some(&shared_identity))
+                .unwrap()
+                .unwrap();
+        let candidates = serde_json::from_str::<Vec<AskpassCandidate>>(&encoded).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, shared_identity.id);
+        assert_eq!(candidates[1].id, relay_identity.id);
+        assert!(
+            candidates[0]
+                .needles
+                .iter()
+                .any(|needle| needle == "edge@192.0.2.10")
         );
     }
 

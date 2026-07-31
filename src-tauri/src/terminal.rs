@@ -160,8 +160,9 @@ fn successful_command_prompt(shell: &str, original: Option<&str>) -> Option<Stri
     )
 }
 
-fn remote_shell_bootstrap() -> &'static str {
-    r#"case "${SHELL:-}" in */bash) exec env PROMPT_COMMAND="__heminus_status=\$?; builtin printf '\033]633;D;%s\007' \"\$__heminus_status\"; (exit \"\$__heminus_status\")" "$SHELL" -l ;; *) exec "${SHELL:-/bin/sh}" -l ;; esac"#
+fn append_remote_login_target(command: &mut CommandBuilder, username: &str, address: &str) {
+    command.arg("--");
+    command.arg(format!("{username}@{address}"));
 }
 
 fn local_shell_command(environment: &[EnvironmentVariable]) -> CommandBuilder {
@@ -292,12 +293,11 @@ pub fn terminal_open(
                 ssh.arg("-o");
                 ssh.arg("NumberOfPasswordPrompts=1");
             }
-            ssh.arg("--");
-            ssh.arg(format!(
-                "{username}@{}",
-                crate::ssh_runtime::effective_address(&host)
-            ));
-            ssh.arg(remote_shell_bootstrap());
+            append_remote_login_target(
+                &mut ssh,
+                username,
+                crate::ssh_runtime::effective_address(&host),
+            );
             ssh
         }
     } else {
@@ -557,7 +557,18 @@ mod tests {
         assert!(prompt.contains("633;D;%s"));
         assert!(prompt.ends_with("; update_terminal_title"));
         assert!(successful_command_prompt("/bin/zsh", None).is_none());
-        assert!(remote_shell_bootstrap().contains("*/bash)"));
-        assert!(remote_shell_bootstrap().contains("633;D;%s"));
+    }
+
+    #[test]
+    fn remote_sessions_use_the_servers_interactive_login() {
+        let mut command = CommandBuilder::new("ssh");
+        append_remote_login_target(&mut command, "deploy", "192.0.2.10");
+        let arguments = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arguments, ["ssh", "--", "deploy@192.0.2.10"]);
     }
 }

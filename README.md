@@ -9,7 +9,7 @@ The interface and all user-facing messages are in English.
 ## Current features
 
 - Saved hosts with search, nested/movable groups, tags, and reusable identities
-- Structured host profiles with environment variables, one app-owned jump host,
+- Structured host profiles with environment variables, ordered app-owned jump-host chains,
   and per-host terminal themes
 - Multiple persistent local or SSH terminal panes, closable/reorderable tabs,
   drag-to-split nested layouts, guarded broadcast input, and workspace restoration

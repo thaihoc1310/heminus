@@ -16,7 +16,7 @@ pub struct Host {
     pub color: HostColor,
     pub identity_id: Option<Uuid>,
     #[serde(default)]
-    pub jump_host_id: Option<Uuid>,
+    pub jump_host_ids: Vec<Uuid>,
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
     #[serde(default)]
@@ -49,7 +49,7 @@ impl Host {
             tags: Vec::new(),
             color: HostColor::Amber,
             identity_id: None,
-            jump_host_id: None,
+            jump_host_ids: Vec::new(),
             environment: Vec::new(),
             terminal_theme: TerminalTheme::default(),
             terminal_font_size: default_terminal_font_size(),
@@ -78,8 +78,17 @@ impl Host {
         if !(9..=32).contains(&self.terminal_font_size) {
             return Err(ValidationError::InvalidTerminalFontSize);
         }
-        if self.jump_host_id == Some(self.id) {
-            return Err(ValidationError::RecursiveJumpHost);
+        if self.jump_host_ids.len() > 16 {
+            return Err(ValidationError::TooManyJumpHosts);
+        }
+        let mut jump_host_ids = std::collections::HashSet::new();
+        for jump_host_id in &self.jump_host_ids {
+            if *jump_host_id == self.id {
+                return Err(ValidationError::RecursiveJumpHost);
+            }
+            if !jump_host_ids.insert(jump_host_id) {
+                return Err(ValidationError::DuplicateJumpHost);
+            }
         }
         let mut environment_names = std::collections::HashSet::new();
         for variable in &self.environment {
@@ -457,6 +466,10 @@ pub enum ValidationError {
     InvalidTerminalFontSize,
     #[error("A host cannot use itself as its jump host")]
     RecursiveJumpHost,
+    #[error("A jump host can appear only once in a connection chain")]
+    DuplicateJumpHost,
+    #[error("A connection chain can contain at most 16 jump hosts")]
+    TooManyJumpHosts,
     #[error("Environment variable names must use letters, digits, and underscores")]
     InvalidEnvironmentVariable,
     #[error("Environment variable names must be unique")]
@@ -529,6 +542,20 @@ mod tests {
             host.validate(),
             Err(ValidationError::InvalidEnvironmentVariable)
         );
+    }
+
+    #[test]
+    fn jump_chains_reject_self_references_duplicates_and_excessive_hops() {
+        let mut host = Host::new("production", "10.0.0.5", "ubuntu");
+        host.jump_host_ids = vec![host.id];
+        assert_eq!(host.validate(), Err(ValidationError::RecursiveJumpHost));
+
+        let jump_host_id = Uuid::new_v4();
+        host.jump_host_ids = vec![jump_host_id, jump_host_id];
+        assert_eq!(host.validate(), Err(ValidationError::DuplicateJumpHost));
+
+        host.jump_host_ids = (0..17).map(|_| Uuid::new_v4()).collect();
+        assert_eq!(host.validate(), Err(ValidationError::TooManyJumpHosts));
     }
 
     #[test]

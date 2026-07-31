@@ -108,83 +108,97 @@ impl SshRuntime {
             )));
         }
 
-        let Some(jump_host_id) = host.jump_host_id else {
-            return Ok(arguments);
-        };
-        let jump_host = database
-            .find_host(jump_host_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "The selected jump host no longer exists".to_string())?;
-        let jump_identity = jump_host
-            .identity_id
-            .map(|id| {
-                database
-                    .find_identity(id)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "The jump host identity no longer exists".to_string())
-            })
-            .transpose()?;
-        let jump_identity = jump_identity.ok_or_else(|| {
-            "Save a password or key identity on the jump host before using it in a chain"
-                .to_string()
-        })?;
-        let username = jump_identity
-            .username
-            .as_deref()
-            .unwrap_or(&jump_host.username);
-        let mut proxy_parts = vec![OsString::from("ssh")];
-        proxy_parts.extend(self.arguments_with_host_key_policy(host_key_policy));
-        match jump_identity.kind {
-            IdentityKind::KeyFile => {
-                let key_path = jump_identity
-                    .key_path
-                    .as_deref()
-                    .ok_or_else(|| "The jump host key is missing".to_string())?;
+        let mut proxy_command: Option<String> = None;
+        for (index, jump_host) in jump_hosts(database, host)?.into_iter().enumerate() {
+            let jump_identity = jump_host
+                .identity_id
+                .map(|id| {
+                    database
+                        .find_identity(id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| {
+                            format!("The identity for jump host {} no longer exists", index + 1)
+                        })
+                })
+                .transpose()?
+                .ok_or_else(|| {
+                    format!(
+                        "Save a password or key identity on jump host {} before using it in a chain",
+                        index + 1
+                    )
+                })?;
+            let username = jump_identity
+                .username
+                .as_deref()
+                .unwrap_or(&jump_host.username);
+            let mut proxy_parts = vec![OsString::from("ssh")];
+            proxy_parts.extend(self.arguments_with_host_key_policy(host_key_policy));
+            if let Some(previous_proxy) = proxy_command.as_deref() {
+                let escaped_previous_proxy = previous_proxy.replace('%', "%%");
                 proxy_parts.extend([
                     OsString::from("-o"),
-                    OsString::from(if jump_identity.secret_stored {
-                        "BatchMode=no"
-                    } else {
-                        "BatchMode=yes"
-                    }),
-                    OsString::from("-i"),
-                    OsString::from(key_path),
+                    OsString::from(format!("ProxyCommand={escaped_previous_proxy}")),
                 ]);
             }
-            IdentityKind::Password => {
-                if !jump_identity.secret_stored {
-                    return Err("The jump host password has not been saved".to_string());
+            match jump_identity.kind {
+                IdentityKind::KeyFile => {
+                    let key_path = jump_identity
+                        .key_path
+                        .as_deref()
+                        .ok_or_else(|| format!("The key for jump host {} is missing", index + 1))?;
+                    proxy_parts.extend([
+                        OsString::from("-o"),
+                        OsString::from(if jump_identity.secret_stored {
+                            "BatchMode=no"
+                        } else {
+                            "BatchMode=yes"
+                        }),
+                        OsString::from("-i"),
+                        OsString::from(key_path),
+                    ]);
                 }
-                proxy_parts.extend([
-                    OsString::from("-o"),
-                    OsString::from("BatchMode=no"),
-                    OsString::from("-o"),
-                    OsString::from("PreferredAuthentications=keyboard-interactive,password"),
-                    OsString::from("-o"),
-                    OsString::from("PubkeyAuthentication=no"),
-                    OsString::from("-o"),
-                    OsString::from("NumberOfPasswordPrompts=1"),
-                ]);
+                IdentityKind::Password => {
+                    if !jump_identity.secret_stored {
+                        return Err(format!(
+                            "The password for jump host {} has not been saved",
+                            index + 1
+                        ));
+                    }
+                    proxy_parts.extend([
+                        OsString::from("-o"),
+                        OsString::from("BatchMode=no"),
+                        OsString::from("-o"),
+                        OsString::from("PreferredAuthentications=keyboard-interactive,password"),
+                        OsString::from("-o"),
+                        OsString::from("PubkeyAuthentication=no"),
+                        OsString::from("-o"),
+                        OsString::from("NumberOfPasswordPrompts=1"),
+                    ]);
+                }
+                IdentityKind::Agent => {
+                    return Err("System SSH-agent identities are not supported".to_string());
+                }
             }
-            IdentityKind::Agent => {
-                return Err("System SSH-agent identities are not supported".to_string());
-            }
+            proxy_parts.extend([
+                OsString::from("-p"),
+                OsString::from(jump_host.port.to_string()),
+                OsString::from("-W"),
+                OsString::from("%h:%p"),
+                OsString::from("--"),
+                OsString::from(format!("{username}@{}", effective_address(&jump_host))),
+            ]);
+            proxy_command = Some(
+                proxy_parts
+                    .iter()
+                    .map(|part| shell_quote(&part.to_string_lossy()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
         }
-        proxy_parts.extend([
-            OsString::from("-p"),
-            OsString::from(jump_host.port.to_string()),
-            OsString::from("-W"),
-            OsString::from("%h:%p"),
-            OsString::from("--"),
-            OsString::from(format!("{username}@{}", effective_address(&jump_host))),
-        ]);
-        let proxy_command = proxy_parts
-            .iter()
-            .map(|part| shell_quote(&part.to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        arguments.push(OsString::from("-o"));
-        arguments.push(OsString::from(format!("ProxyCommand={proxy_command}")));
+        if let Some(proxy_command) = proxy_command {
+            arguments.push(OsString::from("-o"));
+            arguments.push(OsString::from(format!("ProxyCommand={proxy_command}")));
+        }
         Ok(arguments)
     }
 
@@ -212,6 +226,22 @@ pub fn effective_address(host: &Host) -> &str {
         .iter()
         .find_map(|tag| tag.strip_prefix("hostname:"))
         .unwrap_or(&host.address)
+}
+
+pub(crate) fn jump_hosts(
+    database: &heminus_storage::Database,
+    host: &Host,
+) -> Result<Vec<Host>, String> {
+    host.jump_host_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            database
+                .find_host(*id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Jump host {} no longer exists", index + 1))
+        })
+        .collect()
 }
 
 pub fn migrate_legacy_hosts(database: &heminus_storage::Database) -> Result<usize, String> {
@@ -365,7 +395,7 @@ mod tests {
         jump_host.identity_id = Some(identity.id);
         database.save_host(&jump_host).unwrap();
         let mut target = Host::new("Private node", "10.0.0.20", "deploy");
-        target.jump_host_id = Some(jump_host.id);
+        target.jump_host_ids = vec![jump_host.id];
         target.environment.push(EnvironmentVariable {
             name: "LANG".into(),
             value: "en_US.UTF-8".into(),
@@ -401,7 +431,7 @@ mod tests {
         jump_host.identity_id = Some(identity.id);
         database.save_host(&jump_host).unwrap();
         let mut target = Host::new("Private node", "10.0.0.20", "deploy");
-        target.jump_host_id = Some(jump_host.id);
+        target.jump_host_ids = vec![jump_host.id];
 
         let arguments = runtime
             .host_arguments(&database, &target)
@@ -422,6 +452,49 @@ mod tests {
     }
 
     #[test]
+    fn host_chain_nests_multiple_jump_hosts_in_order() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let database = heminus_storage::Database::in_memory().unwrap();
+
+        let mut first_identity = Identity::new("Edge key", IdentityKind::KeyFile);
+        first_identity.key_path = Some(runtime.keys_directory().join("edge").display().to_string());
+        database.save_identity(&first_identity).unwrap();
+        let mut first_jump = Host::new("Edge", "192.0.2.10", "edge");
+        first_jump.identity_id = Some(first_identity.id);
+        database.save_host(&first_jump).unwrap();
+
+        let mut second_identity = Identity::new("Relay password", IdentityKind::Password);
+        second_identity.secret_stored = true;
+        database.save_identity(&second_identity).unwrap();
+        let mut second_jump = Host::new("Relay", "10.0.0.10", "relay");
+        second_jump.identity_id = Some(second_identity.id);
+        database.save_host(&second_jump).unwrap();
+
+        let mut target = Host::new("Private node", "10.0.1.20", "deploy");
+        target.jump_host_ids = vec![first_jump.id, second_jump.id];
+        let arguments = runtime
+            .host_arguments(&database, &target)
+            .unwrap()
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let proxy = arguments
+            .iter()
+            .find(|argument| argument.starts_with("ProxyCommand="))
+            .unwrap();
+        let first_position = proxy.find("edge@192.0.2.10").unwrap();
+        let second_position = proxy.find("relay@10.0.0.10").unwrap();
+        assert!(first_position < second_position);
+        assert!(proxy.matches("ProxyCommand=").count() >= 2);
+        assert!(proxy.contains("'%%h:%%p'"));
+        assert!(proxy.contains("'%h:%p'"));
+        assert!(proxy.contains("'PreferredAuthentications=keyboard-interactive,password'"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn host_chain_enables_askpass_for_a_protected_jump_key() {
         let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
         let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
@@ -435,7 +508,7 @@ mod tests {
         jump_host.identity_id = Some(identity.id);
         database.save_host(&jump_host).unwrap();
         let mut target = Host::new("Private node", "10.0.0.20", "deploy");
-        target.jump_host_id = Some(jump_host.id);
+        target.jump_host_ids = vec![jump_host.id];
 
         let arguments = runtime
             .host_arguments(&database, &target)

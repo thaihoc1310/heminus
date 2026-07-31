@@ -109,7 +109,7 @@ remain because the selected architecture requires them.
 - [x] Identity selection per host.
 - [x] Explicit host creation independent of local OpenSSH configuration.
 - [x] Structured host details with environment variables,
-      one app-owned jump host, and a per-host terminal theme.
+      an ordered app-owned jump-host chain, and a per-host terminal theme.
 - [x] Recent connection metadata and session status.
 - [x] One local host is seeded on a fresh database; fake remote hosts are not.
 

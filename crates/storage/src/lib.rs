@@ -259,6 +259,19 @@ impl Database {
                 [],
             )?;
         }
+        if !self.table_has_column("hosts", "jump_host_ids_json")? {
+            self.connection.execute(
+                "ALTER TABLE hosts ADD COLUMN jump_host_ids_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+            self.connection.execute(
+                "UPDATE hosts
+                 SET jump_host_ids_json = '[\"' || jump_host_id || '\"]'
+                 WHERE jump_host_id IS NOT NULL
+                   AND jump_host_ids_json = '[]'",
+                [],
+            )?;
+        }
         if !self.table_has_column("hosts", "environment_json")? {
             self.connection.execute(
                 "ALTER TABLE hosts ADD COLUMN environment_json TEXT NOT NULL DEFAULT '[]'",
@@ -280,7 +293,7 @@ impl Database {
         }
         self.migrate_legacy_groups()?;
         self.connection.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '8')",
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '9')",
             [],
         )?;
         Ok(())
@@ -361,7 +374,7 @@ impl Database {
         let sql = if search.is_some() {
             "
             SELECT id, label, address, port, username, group_name, tags_json, color,
-                   identity_id, group_id, jump_host_id,
+                   identity_id, group_id, jump_host_id, jump_host_ids_json,
                    environment_json, terminal_theme, terminal_font_size,
                    created_at, updated_at
             FROM hosts
@@ -376,7 +389,7 @@ impl Database {
         } else {
             "
             SELECT id, label, address, port, username, group_name, tags_json, color,
-                   identity_id, group_id, jump_host_id,
+                   identity_id, group_id, jump_host_id, jump_host_ids_json,
                    environment_json, terminal_theme, terminal_font_size,
                    created_at, updated_at
             FROM hosts
@@ -392,10 +405,18 @@ impl Database {
             let identity_id: Option<String> = row.get(8)?;
             let group_id: Option<String> = row.get(9)?;
             let jump_host_id: Option<String> = row.get(10)?;
-            let environment_json: String = row.get(11)?;
-            let terminal_theme: String = row.get(12)?;
-            let created_at: String = row.get(14)?;
-            let updated_at: String = row.get(15)?;
+            let jump_host_ids_json: String = row.get(11)?;
+            let environment_json: String = row.get(12)?;
+            let terminal_theme: String = row.get(13)?;
+            let created_at: String = row.get(15)?;
+            let updated_at: String = row.get(16)?;
+            let mut jump_host_ids =
+                serde_json::from_str::<Vec<Uuid>>(&jump_host_ids_json).unwrap_or_default();
+            if jump_host_ids.is_empty()
+                && let Some(jump_host_id) = jump_host_id.as_deref().map(parse_uuid).transpose()?
+            {
+                jump_host_ids.push(jump_host_id);
+            }
             Ok(Host {
                 id: parse_uuid(&id)?,
                 label: row.get(1)?,
@@ -407,11 +428,11 @@ impl Database {
                 tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                 color: parse_color(&color),
                 identity_id: identity_id.as_deref().map(parse_uuid).transpose()?,
-                jump_host_id: jump_host_id.as_deref().map(parse_uuid).transpose()?,
+                jump_host_ids,
                 environment: serde_json::from_str::<Vec<EnvironmentVariable>>(&environment_json)
                     .unwrap_or_default(),
                 terminal_theme: parse_terminal_theme(&terminal_theme),
-                terminal_font_size: row.get::<_, u16>(13)?,
+                terminal_font_size: row.get::<_, u16>(14)?,
                 created_at: parse_datetime(&created_at)?,
                 updated_at: parse_datetime(&updated_at)?,
             })
@@ -437,7 +458,7 @@ impl Database {
             .query_row(
                 "
                 SELECT id, label, address, port, username, group_name, tags_json, color,
-                       identity_id, group_id, jump_host_id,
+                       identity_id, group_id, jump_host_id, jump_host_ids_json,
                        environment_json, terminal_theme, terminal_font_size,
                        created_at, updated_at
                 FROM hosts WHERE id = ?1
@@ -450,10 +471,19 @@ impl Database {
                     let identity_id: Option<String> = row.get(8)?;
                     let group_id: Option<String> = row.get(9)?;
                     let jump_host_id: Option<String> = row.get(10)?;
-                    let environment_json: String = row.get(11)?;
-                    let terminal_theme: String = row.get(12)?;
-                    let created_at: String = row.get(14)?;
-                    let updated_at: String = row.get(15)?;
+                    let jump_host_ids_json: String = row.get(11)?;
+                    let environment_json: String = row.get(12)?;
+                    let terminal_theme: String = row.get(13)?;
+                    let created_at: String = row.get(15)?;
+                    let updated_at: String = row.get(16)?;
+                    let mut jump_host_ids =
+                        serde_json::from_str::<Vec<Uuid>>(&jump_host_ids_json).unwrap_or_default();
+                    if jump_host_ids.is_empty()
+                        && let Some(jump_host_id) =
+                            jump_host_id.as_deref().map(parse_uuid).transpose()?
+                    {
+                        jump_host_ids.push(jump_host_id);
+                    }
                     Ok(Host {
                         id: parse_uuid(&raw_id)?,
                         label: row.get(1)?,
@@ -465,13 +495,13 @@ impl Database {
                         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
                         color: parse_color(&color),
                         identity_id: identity_id.as_deref().map(parse_uuid).transpose()?,
-                        jump_host_id: jump_host_id.as_deref().map(parse_uuid).transpose()?,
+                        jump_host_ids,
                         environment: serde_json::from_str::<Vec<EnvironmentVariable>>(
                             &environment_json,
                         )
                         .unwrap_or_default(),
                         terminal_theme: parse_terminal_theme(&terminal_theme),
-                        terminal_font_size: row.get::<_, u16>(13)?,
+                        terminal_font_size: row.get::<_, u16>(14)?,
                         created_at: parse_datetime(&created_at)?,
                         updated_at: parse_datetime(&updated_at)?,
                     })
@@ -483,16 +513,21 @@ impl Database {
 
     pub fn save_host(&self, host: &Host) -> Result<()> {
         host.validate()?;
+        for (index, jump_host_id) in host.jump_host_ids.iter().enumerate() {
+            if self.find_host(*jump_host_id)?.is_none() {
+                anyhow::bail!("Jump host {} no longer exists", index + 1);
+            }
+        }
         self.connection.execute(
             "
             INSERT INTO hosts (
                 id, label, address, port, username, group_name, tags_json, color,
-                identity_id, group_id, jump_host_id,
+                identity_id, group_id, jump_host_id, jump_host_ids_json,
                 environment_json, terminal_theme, terminal_font_size,
                 created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16
+                ?15, ?16, ?17
             )
             ON CONFLICT(id) DO UPDATE SET
                 label = excluded.label,
@@ -506,6 +541,7 @@ impl Database {
                 group_id = excluded.group_id,
                 startup_snippet_id = NULL,
                 jump_host_id = excluded.jump_host_id,
+                jump_host_ids_json = excluded.jump_host_ids_json,
                 environment_json = excluded.environment_json,
                 terminal_theme = excluded.terminal_theme,
                 terminal_font_size = excluded.terminal_font_size,
@@ -522,7 +558,8 @@ impl Database {
                 color_name(host.color),
                 host.identity_id.map(|id| id.to_string()),
                 host.group_id.map(|id| id.to_string()),
-                host.jump_host_id.map(|id| id.to_string()),
+                host.jump_host_ids.first().map(Uuid::to_string),
+                serde_json::to_string(&host.jump_host_ids)?,
                 serde_json::to_string(&host.environment)?,
                 terminal_theme_name(host.terminal_theme),
                 host.terminal_font_size,
@@ -534,6 +571,13 @@ impl Database {
     }
 
     pub fn delete_host(&self, id: Uuid) -> Result<bool> {
+        for mut host in self.list_hosts(None)? {
+            if host.id != id && host.jump_host_ids.contains(&id) {
+                host.jump_host_ids
+                    .retain(|jump_host_id| *jump_host_id != id);
+                self.save_host(&host)?;
+            }
+        }
         let affected = self
             .connection
             .execute("DELETE FROM hosts WHERE id = ?1", [id.to_string()])?;
@@ -1336,11 +1380,13 @@ mod tests {
     #[test]
     fn host_round_trip_and_search() {
         let database = Database::in_memory().unwrap();
-        let jump_host = Host::new("Gateway", "10.42.0.1", "bastion");
-        database.save_host(&jump_host).unwrap();
+        let first_jump_host = Host::new("Gateway", "10.42.0.1", "bastion");
+        let second_jump_host = Host::new("Relay", "10.42.0.2", "relay");
+        database.save_host(&first_jump_host).unwrap();
+        database.save_host(&second_jump_host).unwrap();
         let mut host = Host::new("Kubernetes control plane", "10.42.0.10", "ubuntu");
         host.tags = vec!["k8s".into(), "production".into()];
-        host.jump_host_id = Some(jump_host.id);
+        host.jump_host_ids = vec![first_jump_host.id, second_jump_host.id];
         host.environment = vec![EnvironmentVariable {
             name: "LANG".into(),
             value: "en_US.UTF-8".into(),
@@ -1351,7 +1397,10 @@ mod tests {
         let loaded = database.find_host(host.id).unwrap().unwrap();
         assert_eq!(loaded.label, host.label);
         assert_eq!(loaded.tags, host.tags);
-        assert_eq!(loaded.jump_host_id, Some(jump_host.id));
+        assert_eq!(
+            loaded.jump_host_ids,
+            vec![first_jump_host.id, second_jump_host.id]
+        );
         assert_eq!(loaded.environment, host.environment);
         assert_eq!(loaded.terminal_theme, TerminalTheme::KanagawaWave);
         assert_eq!(database.list_hosts(Some("control")).unwrap().len(), 1);
@@ -1373,12 +1422,75 @@ mod tests {
     }
 
     #[test]
+    fn legacy_single_jump_host_migrates_to_an_ordered_chain() {
+        let path = std::env::temp_dir().join(format!("heminus-storage-test-{}.db", Uuid::new_v4()));
+        let first_jump_host_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE hosts (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        label TEXT NOT NULL,
+                        address TEXT NOT NULL,
+                        port INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        group_name TEXT,
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        color TEXT NOT NULL DEFAULT 'amber',
+                        jump_host_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO hosts (
+                        id, label, address, port, username, jump_host_id, created_at, updated_at
+                     ) VALUES (?1, 'Gateway', '192.0.2.10', 22, 'edge', NULL, ?3, ?3),
+                              (?2, 'Target', '10.0.0.20', 22, 'deploy', ?1, ?3, ?3)",
+                    params![first_jump_host_id.to_string(), target_id.to_string(), now],
+                )
+                .unwrap();
+        }
+
+        let database = Database::open(&path).unwrap();
+        assert_eq!(
+            database
+                .find_host(target_id)
+                .unwrap()
+                .unwrap()
+                .jump_host_ids,
+            vec![first_jump_host_id]
+        );
+        drop(database);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn delete_host_is_idempotent() {
         let database = Database::in_memory().unwrap();
-        let host = Host::new("Temporary", "10.0.0.1", "root");
-        database.save_host(&host).unwrap();
-        assert!(database.delete_host(host.id).unwrap());
-        assert!(!database.delete_host(host.id).unwrap());
+        let first_jump_host = Host::new("Gateway", "10.0.0.1", "root");
+        let second_jump_host = Host::new("Relay", "10.0.0.2", "root");
+        database.save_host(&first_jump_host).unwrap();
+        database.save_host(&second_jump_host).unwrap();
+        let mut target = Host::new("Target", "10.0.0.3", "root");
+        target.jump_host_ids = vec![first_jump_host.id, second_jump_host.id];
+        database.save_host(&target).unwrap();
+
+        assert!(database.delete_host(first_jump_host.id).unwrap());
+        assert_eq!(
+            database
+                .find_host(target.id)
+                .unwrap()
+                .unwrap()
+                .jump_host_ids,
+            vec![second_jump_host.id]
+        );
+        assert!(!database.delete_host(first_jump_host.id).unwrap());
     }
 
     #[test]

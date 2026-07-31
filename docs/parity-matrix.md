@@ -10,11 +10,11 @@
 | Key generation and PEM import | Ed25519 generation plus drag-and-drop OpenSSH/RSA/DSA/EC/PKCS#8 PEM import into the private vault |
 | Strict known-host verification | Implemented through an app-private known-host file |
 | Local OpenSSH config integration | Intentionally unsupported; Heminus never reads it |
-| Proxy/jump chains | Implemented as an explicit app-owned single jump host with saved password or vault-key authentication |
+| Proxy/jump chains | Implemented as an ordered app-owned multi-hop chain with per-hop saved password or vault-key authentication |
 | SFTP browse/upload/download/rename/delete/mkdir | Implemented with partial-file publication |
 | Local/remote/dynamic forwarding | Implemented with SSH failure diagnostics |
 | Host search/groups/tags | Implemented with nested, movable groups |
-| Host connection profiles | Address/general/credentials, one jump host, environment variables, and terminal theme |
+| Host connection profiles | Address/general/credentials, ordered jump hosts, environment variables, and terminal theme |
 | Snippets | Implemented with inline terminal completion |
 | Session and command history | Connection metadata plus per-host command completion history; terminal output is not recorded |
 | Split terminal workspaces and broadcast input | Closable/reorderable tabs, nested drag-to-split layout, restore, and safety confirmations |
