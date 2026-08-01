@@ -113,17 +113,6 @@ pub fn run() {
             tunnel::tunnel_port_processes,
             tunnel::tunnel_stop_port_processes,
         ])
-        .on_window_event(|window, event| {
-            if window.label() == "main"
-                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
-            {
-                for (label, child) in window.app_handle().webview_windows() {
-                    if label.starts_with("detached-") {
-                        let _ = child.destroy();
-                    }
-                }
-            }
-        })
         .run(tauri::generate_context!())
         .expect("failed to run Heminus");
 }
