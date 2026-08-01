@@ -1640,8 +1640,15 @@ mod tests {
     fn active_session_title_can_be_renamed() {
         let database = Database::in_memory().unwrap();
         let session = database.start_session(None, "Local Terminal").unwrap();
-        assert!(database.rename_session(session, "Database migration").unwrap());
-        assert_eq!(database.list_sessions(10).unwrap()[0].title, "Database migration");
+        assert!(
+            database
+                .rename_session(session, "Database migration")
+                .unwrap()
+        );
+        assert_eq!(
+            database.list_sessions(10).unwrap()[0].title,
+            "Database migration"
+        );
     }
 
     #[test]

@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::Read;
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 use heminus_domain::{ForwardKind, Host, IdentityKind, PortForward};
 use serde::Serialize;
@@ -26,6 +31,15 @@ pub struct TunnelState {
     running: bool,
     exit_code: Option<i32>,
     message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelPortProcess {
+    pid: u32,
+    name: String,
+    command: String,
+    requires_elevation: bool,
 }
 
 impl TunnelManager {
@@ -254,6 +268,150 @@ pub fn tunnel_states(manager: State<'_, TunnelManager>) -> Result<Vec<TunnelStat
     manager.reap()
 }
 
+#[tauri::command]
+pub fn tunnel_port_processes(port: u16) -> Result<Vec<TunnelPortProcess>, String> {
+    let own_pid = std::process::id();
+    let own_uid = process_uid(own_pid);
+    Ok(listener_pids(port)?
+        .into_iter()
+        .filter(|pid| *pid != own_pid)
+        .map(|pid| TunnelPortProcess {
+            pid,
+            name: process_name(pid),
+            command: process_command(pid),
+            requires_elevation: process_uid(pid)
+                .zip(own_uid)
+                .is_none_or(|(uid, own)| uid != own),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
+    let own_pid = std::process::id();
+    let mut current = listener_pids(port)?;
+    current.retain(|pid| *pid != own_pid);
+    let mut targets = pids;
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.iter().any(|pid| !current.contains(pid)) {
+        return Err("The process using this port changed. Try starting the tunnel again.".into());
+    }
+
+    let status = if targets.is_empty() {
+        Command::new("pkexec")
+            .arg("/usr/bin/fuser")
+            .args(["-k", "-TERM", "-n", "tcp"])
+            .arg(port.to_string())
+            .status()
+            .map_err(|error| format!("Could not open the administrator prompt: {error}"))?
+    } else {
+        let own_uid = process_uid(own_pid);
+        let needs_elevation = targets.iter().any(|pid| {
+            process_uid(*pid)
+                .zip(own_uid)
+                .is_none_or(|(uid, own)| uid != own)
+        });
+        let mut command = if needs_elevation {
+            let mut command = Command::new("pkexec");
+            command.arg("/usr/bin/kill");
+            command
+        } else {
+            Command::new("/usr/bin/kill")
+        };
+        command.arg("-TERM").arg("--");
+        for pid in &targets {
+            command.arg(pid.to_string());
+        }
+        command
+            .status()
+            .map_err(|error| format!("Could not stop the process using port {port}: {error}"))?
+    };
+    if !status.success() {
+        return Err(
+            if status.code() == Some(126) || status.code() == Some(127) {
+                "Administrator authentication was cancelled or denied.".into()
+            } else {
+                format!("The process using port {port} could not be stopped.")
+            },
+        );
+    }
+
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(100));
+        let remaining = listener_pids(port)?;
+        let target_still_listening = if targets.is_empty() {
+            !remaining.is_empty()
+        } else {
+            targets.iter().any(|pid| remaining.contains(pid))
+        };
+        if !target_still_listening {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "The process did not release port {port} after receiving the stop request."
+    ))
+}
+
+fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    let output = Command::new("fuser")
+        .args(["-n", "tcp"])
+        .arg(port.to_string())
+        .output()
+        .map_err(|error| format!("Could not inspect port {port}: {error}"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(format!("Could not inspect port {port}."));
+    }
+    let mut pids = parse_fuser_pids(&output.stdout);
+    pids.extend(parse_fuser_pids(&output.stderr));
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
+fn parse_fuser_pids(bytes: &[u8]) -> Vec<u32> {
+    String::from_utf8_lossy(bytes)
+        .split_whitespace()
+        .filter_map(|token| token.parse::<u32>().ok())
+        .collect()
+}
+
+fn process_name(pid: u32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|name| name.trim().to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("Process {pid}"))
+}
+
+fn process_command(pid: u32) -> String {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .replace('\0', " ")
+                .trim()
+                .chars()
+                .take(240)
+                .collect::<String>()
+        })
+        .filter(|command| !command.is_empty())
+        .unwrap_or_else(|| process_name(pid))
+}
+
+#[cfg(target_family = "unix")]
+fn process_uid(pid: u32) -> Option<u32> {
+    fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|metadata| metadata.uid())
+}
+
+#[cfg(not(target_family = "unix"))]
+fn process_uid(_pid: u32) -> Option<u32> {
+    None
+}
+
 fn normalize_ssh_error(bytes: &[u8]) -> Option<String> {
     let message = String::from_utf8_lossy(bytes)
         .replace(['\r', '\n'], " ")
@@ -277,5 +435,13 @@ mod tests {
     #[test]
     fn empty_ssh_errors_are_omitted() {
         assert_eq!(normalize_ssh_error(b" \n\r "), None);
+    }
+
+    #[test]
+    fn fuser_pid_output_ignores_the_port_label() {
+        assert_eq!(
+            parse_fuser_pids(b"6443/tcp:  14714 20500\n"),
+            vec![14714, 20500]
+        );
     }
 }

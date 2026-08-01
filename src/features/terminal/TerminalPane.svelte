@@ -679,9 +679,9 @@
       <div class="terminal-suggestion-list">
         {#each suggestions as suggestion, index (`${suggestion.kind}:${suggestion.command}:${index}`)}
           <button
-            class:selected={suggestionIndex === index}
+            class:selected={suggestionIndex === index || (suggestionIndex < 0 && index === 0)}
             role="option"
-            aria-selected={suggestionIndex === index}
+            aria-selected={suggestionIndex === index || (suggestionIndex < 0 && index === 0)}
             onclick={() => chooseSuggestion(index)}
           >
             <span class="suggestion-kind">

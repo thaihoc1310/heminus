@@ -56,6 +56,14 @@
   import { parseQuickConnectInput } from "./lib/quickConnect";
   import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
+    cleanHostTag,
+    collectHostTags,
+    dedupeHostTags,
+    hostHasSelectedTags,
+    removeHostTag,
+    renameHostTag
+  } from "./lib/hostTags";
+  import {
     confirmDiscardChanges,
     draftChanged,
     draftSnapshot
@@ -149,6 +157,11 @@
   let suppressVaultCardClick = false;
   let hostCollectionView = $state<CollectionView>("grid");
   let hostCollectionSort = $state<CollectionSort>("az");
+  let hostTagFilterOpen = $state(false);
+  let hostTagFilterQuery = $state("");
+  let selectedHostTags = $state<string[]>([]);
+  let hostTagDraft = $state("");
+  let hostTagInputFocused = $state(false);
   let terminalContextMenu = $state<{ tab: TerminalTab; x: number; y: number } | null>(null);
   let query = $state("");
   let newTabQuery = $state("");
@@ -214,7 +227,6 @@
     merge: boolean;
   } | null>(null);
   let suppressTopTabClick = false;
-  let searchTimer: number | null = null;
   let detachedInitialized = $state(!detachedMode);
   let managerEditorDirty = $state<Record<string, boolean>>({});
   const appearanceSaveTimers = new Map<string, number>();
@@ -443,7 +455,7 @@
     loading = true;
     try {
       [hosts, identities, groups] = await Promise.all([
-        listHosts(query),
+        listHosts(""),
         listIdentities(),
         listGroups()
       ]);
@@ -453,11 +465,6 @@
     } finally {
       loading = false;
     }
-  }
-
-  function scheduleSearch() {
-    if (searchTimer !== null) window.clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(refreshHosts, 120);
   }
 
   async function openQuickConnectEditor() {
@@ -511,6 +518,8 @@
     themeSubeditorBaseline = null;
     inspectorOpen = false;
     hostEditorMenuOpen = false;
+    hostTagDraft = "";
+    hostTagInputFocused = false;
     hostEditorBaseline = null;
     if (selected && !hosts.some((host) => host.id === selected?.id)) selected = null;
   }
@@ -531,6 +540,8 @@
     hostSubeditor = null;
     inspectorOpen = true;
     hostEditorMenuOpen = false;
+    hostTagDraft = "";
+    hostTagInputFocused = false;
     message = `${host.username}@${host.address}:${host.port}`;
     messageIsError = false;
     rememberHostEditorBaseline();
@@ -658,6 +669,8 @@
     hostSubeditor = null;
     inspectorOpen = true;
     hostEditorMenuOpen = false;
+    hostTagDraft = "";
+    hostTagInputFocused = false;
     message = "Connection details stay on this device.";
     messageIsError = false;
     rememberHostEditorBaseline();
@@ -983,6 +996,23 @@
       const ids = groupAndDescendantIds(selectedGroupId);
       candidates = hosts.filter((host) => host.group_id && ids.has(host.group_id));
     }
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (normalizedQuery) {
+      candidates = candidates.filter((host) =>
+        [
+          host.label,
+          host.address,
+          host.username,
+          `${host.username}@${host.address}`,
+          `${host.address}@${host.username}`,
+          host.group_name ?? "",
+          ...host.tags
+        ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery))
+      );
+    }
+    if (selectedHostTags.length) {
+      candidates = candidates.filter((host) => hostHasSelectedTags(host, selectedHostTags));
+    }
     return [...candidates].sort((left, right) =>
       compareCollectionItems(
         left.label,
@@ -992,6 +1022,106 @@
         hostCollectionSort
       )
     );
+  }
+
+  function allHostTags(): string[] {
+    return collectHostTags(hosts);
+  }
+
+  function visibleHostTagFilters(): string[] {
+    const needle = hostTagFilterQuery.trim().toLocaleLowerCase();
+    return allHostTags().filter((tag) => !needle || tag.toLocaleLowerCase().includes(needle));
+  }
+
+  function editorHostTagSuggestions(): string[] {
+    if (!selected) return [];
+    const selectedKeys = new Set(selected.tags.map((tag) => tag.toLocaleLowerCase()));
+    const needle = cleanHostTag(hostTagDraft).toLocaleLowerCase();
+    return allHostTags()
+      .filter((tag) => !selectedKeys.has(tag.toLocaleLowerCase()))
+      .filter((tag) => !needle || tag.toLocaleLowerCase().includes(needle))
+      .slice(0, 6);
+  }
+
+  function addTagToSelected(tag: string) {
+    if (!selected) return;
+    selected.tags = dedupeHostTags([...selected.tags, tag]);
+    hostTagDraft = "";
+  }
+
+  function acceptHostTagDraft() {
+    const tag = cleanHostTag(hostTagDraft);
+    if (!tag) return;
+    const existing = allHostTags().find(
+      (candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase()
+    );
+    addTagToSelected(existing ?? tag);
+  }
+
+  function removeTagFromSelected(tag: string) {
+    if (!selected) return;
+    selected.tags = removeHostTag(selected.tags, tag);
+  }
+
+  function toggleHostTagFilter(tag: string) {
+    const active = selectedHostTags.some(
+      (candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase()
+    );
+    selectedHostTags = active
+      ? removeHostTag(selectedHostTags, tag)
+      : dedupeHostTags([...selectedHostTags, tag]);
+    selectedHostIds = [];
+  }
+
+  async function renameSavedHostTag(tag: string) {
+    const next = cleanHostTag(
+      (await promptDialog({
+        title: "Rename tag",
+        label: "Tag name",
+        initialValue: tag,
+        confirmLabel: "Rename"
+      })) ?? ""
+    );
+    if (!next || next === tag) return;
+    try {
+      const affected = hosts.filter((host) => hostHasSelectedTags(host, [tag]));
+      await Promise.all(affected.map((host) => saveHost({
+        ...cloneHost(host),
+        tags: renameHostTag(host.tags, tag, next),
+        updated_at: new Date().toISOString()
+      })));
+      if (selected) selected.tags = renameHostTag(selected.tags, tag, next);
+      selectedHostTags = renameHostTag(selectedHostTags, tag, next);
+      await refreshHosts();
+      message = `Tag renamed to “${next}”`;
+      messageIsError = false;
+    } catch (cause) {
+      showMessage(cause, true);
+    }
+  }
+
+  async function deleteSavedHostTag(tag: string) {
+    const affected = hosts.filter((host) => hostHasSelectedTags(host, [tag]));
+    if (!(await confirmDialog({
+      title: `Delete “${tag}”?`,
+      message: `Remove this tag from ${affected.length} host${affected.length === 1 ? "" : "s"}?`,
+      confirmLabel: "Delete tag",
+      danger: true
+    }))) return;
+    try {
+      await Promise.all(affected.map((host) => saveHost({
+        ...cloneHost(host),
+        tags: removeHostTag(host.tags, tag),
+        updated_at: new Date().toISOString()
+      })));
+      if (selected) selected.tags = removeHostTag(selected.tags, tag);
+      selectedHostTags = removeHostTag(selectedHostTags, tag);
+      await refreshHosts();
+      message = `Tag “${tag}” deleted`;
+      messageIsError = false;
+    } catch (cause) {
+      showMessage(cause, true);
+    }
   }
 
   function directChildGroups(): VaultGroup[] {
@@ -2457,6 +2587,8 @@
     terminalContextMenu = null;
     hostEditorMenuOpen = false;
     newHostMenuOpen = false;
+    hostTagFilterOpen = false;
+    hostTagInputFocused = false;
   }}
   onpointermove={handleGlobalPointerMove}
   onpointerup={handleGlobalPointerEnd}
@@ -2817,7 +2949,6 @@
               aria-label="Find a host"
               placeholder="Find a host or type user@hostname…"
               bind:value={query}
-              oninput={scheduleSearch}
               onkeydown={(event) => {
                 if (event.key === "Enter" && query.trim()) {
                   event.preventDefault();
@@ -2863,9 +2994,86 @@
               onviewchange={(view) => (hostCollectionView = view)}
               onsortchange={(sort) => (hostCollectionSort = sort)}
             />
-            <button class="icon-button" title="Tags"><Icon name="tag" /></button>
+            <div class="host-tag-filter-anchor">
+              <button
+                class="icon-button"
+                class:active={hostTagFilterOpen || selectedHostTags.length > 0}
+                title="Filter by tags"
+                aria-label="Filter hosts by tags"
+                aria-expanded={hostTagFilterOpen}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  hostTagFilterOpen = !hostTagFilterOpen;
+                }}
+              >
+                <Icon name="tag" />
+                {#if selectedHostTags.length > 0}
+                  <span class="tag-filter-count">{selectedHostTags.length}</span>
+                {/if}
+              </button>
+              {#if hostTagFilterOpen}
+                <div
+                  class="host-tag-filter-menu"
+                  role="dialog"
+                  aria-label="Filter hosts by tags"
+                  tabindex="-1"
+                  onclick={(event) => event.stopPropagation()}
+                  onkeydown={(event) => event.stopPropagation()}
+                >
+                  <label class="tag-filter-search">
+                    <Icon name="search" size={17} />
+                    <input
+                      aria-label="Search tags"
+                      placeholder="Search tags"
+                      bind:value={hostTagFilterQuery}
+                    />
+                  </label>
+                  <div class="tag-filter-list">
+                    {#each visibleHostTagFilters() as tag (tag)}
+                      <div class="tag-filter-row">
+                        <button
+                          class="tag-filter-toggle"
+                          class:active={selectedHostTags.some((candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase())}
+                          onclick={() => toggleHostTagFilter(tag)}
+                        >
+                          <span class="tag-filter-check">
+                            {#if selectedHostTags.some((candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase())}
+                              <Icon name="check" size={14} strokeWidth={2.4} />
+                            {/if}
+                          </span>
+                          <strong>{tag}</strong>
+                        </button>
+                        <div class="tag-filter-actions">
+                          <button title={`Rename ${tag}`} aria-label={`Rename ${tag}`} onclick={() => void renameSavedHostTag(tag)}>
+                            <Icon name="edit" size={16} />
+                          </button>
+                          <button class="danger" title={`Delete ${tag}`} aria-label={`Delete ${tag}`} onclick={() => void deleteSavedHostTag(tag)}>
+                            <Icon name="trash" size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    {:else}
+                      <p class="tag-filter-empty">No tags found</p>
+                    {/each}
+                  </div>
+                  <button
+                    class="tag-filter-clear"
+                    disabled={selectedHostTags.length === 0}
+                    onclick={() => {
+                      selectedHostTags = [];
+                      selectedHostIds = [];
+                    }}
+                  >Clear selection</button>
+                </div>
+              {/if}
+            </div>
           </div>
-          <div class="host-scroll">
+          <div
+            class="host-scroll"
+            role="region"
+            aria-label="Host selection area"
+            onpointerdown={startHostMarquee}
+          >
             <div class="host-content">
               {#if selectedGroupId}
                 <nav class="group-breadcrumb" aria-label="Group path">
@@ -2934,7 +3142,6 @@
                       class="host-grid selectable-grid"
                       role="list"
                       class:list-view={hostCollectionView === "list"}
-                      onpointerdown={startHostMarquee}
                     >
                       {#each visibleHosts() as host (host.id)}
                         <article
@@ -3076,21 +3283,68 @@
                     onchange={(value) => assignSelectedGroup(value || null)}
                   />
                 </div>
-                <div class="editor-control with-icon">
+                <div
+                  class="editor-control with-icon host-tags-control"
+                  role="group"
+                  aria-label="Host tags"
+                >
                   <Icon name="tag" size={16} />
-                  <input
-                    id="host-tags"
-                    aria-label="Tags"
-                    value={selected.tags.join(", ")}
-                    oninput={(event) =>
-                      selected &&
-                      (selected.tags = event.currentTarget.value
-                        .split(",")
-                        .map((tag) => tag.trim())
-                        .filter(Boolean))}
-                    placeholder="Tags · comma separated"
-                  />
+                  <div class="host-tags-input">
+                    {#each selected.tags as tag (tag.toLocaleLowerCase())}
+                      <span class="host-tag-chip">
+                        {tag}
+                        <button
+                          title={`Remove ${tag}`}
+                          aria-label={`Remove ${tag}`}
+                          onclick={(event) => {
+                            event.stopPropagation();
+                            removeTagFromSelected(tag);
+                          }}
+                        ><Icon name="close" size={12} strokeWidth={2.4} /></button>
+                      </span>
+                    {/each}
+                    <input
+                      id="host-tags"
+                      aria-label="Add a tag"
+                      bind:value={hostTagDraft}
+                      placeholder={selected.tags.length ? "Add tag" : "Tags"}
+                      onfocus={() => (hostTagInputFocused = true)}
+                      onclick={(event) => event.stopPropagation()}
+                      onkeydown={(event) => {
+                        if (event.key === "Enter" || event.key === ",") {
+                          event.preventDefault();
+                          acceptHostTagDraft();
+                        } else if (event.key === "Backspace" && !hostTagDraft && selected?.tags.length) {
+                          removeTagFromSelected(selected.tags[selected.tags.length - 1]);
+                        } else if (event.key === "Escape") {
+                          hostTagInputFocused = false;
+                        }
+                      }}
+                    />
+                  </div>
                 </div>
+                {#if hostTagInputFocused && (hostTagDraft.trim() || editorHostTagSuggestions().length > 0)}
+                  {@const cleanDraftTag = cleanHostTag(hostTagDraft)}
+                  <div
+                    class="host-tag-editor-menu"
+                    role="listbox"
+                    aria-label="Available tags"
+                    tabindex="-1"
+                    onclick={(event) => event.stopPropagation()}
+                    onkeydown={(event) => event.stopPropagation()}
+                  >
+                    {#each editorHostTagSuggestions() as tag (tag)}
+                      <button role="option" aria-selected="false" onclick={() => addTagToSelected(tag)}>
+                        <span>Add tag</span><strong>{tag}</strong>
+                      </button>
+                    {/each}
+                    {#if cleanDraftTag && !allHostTags().some((tag) => tag.toLocaleLowerCase() === cleanDraftTag.toLocaleLowerCase())}
+                      <button class="create-tag-option" role="option" aria-selected="false" onclick={acceptHostTagDraft}>
+                        <span>Create Tag</span><strong>{cleanDraftTag}</strong>
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
                 <div class="host-color-row">
                   <span>Host color</span>
                   <div>

@@ -14,6 +14,12 @@ export interface ConfirmDialogOptions {
   danger?: boolean;
 }
 
+export interface AlertDialogOptions {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+}
+
 export type AppDialogRequest =
   | (PromptDialogOptions & {
       kind: "prompt";
@@ -22,6 +28,10 @@ export type AppDialogRequest =
   | (ConfirmDialogOptions & {
       kind: "confirm";
       resolve: (value: boolean) => void;
+    })
+  | (AlertDialogOptions & {
+      kind: "alert";
+      resolve: () => void;
     });
 
 let listener: ((request: AppDialogRequest) => void) | null = null;
@@ -52,5 +62,15 @@ export function confirmDialog(options: ConfirmDialogOptions): Promise<boolean> {
       return;
     }
     listener({ ...options, kind: "confirm", resolve });
+  });
+}
+
+export function alertDialog(options: AlertDialogOptions): Promise<void> {
+  return new Promise((resolve) => {
+    if (!listener) {
+      resolve();
+      return;
+    }
+    listener({ ...options, kind: "alert", resolve });
   });
 }

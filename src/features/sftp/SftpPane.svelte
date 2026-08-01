@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Channel } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Icon from "../../components/Icon.svelte";
   import HostIcon from "../../components/HostIcon.svelte";
   import PermissionEditor from "./PermissionEditor.svelte";
@@ -8,6 +8,7 @@
   import { setElementDragPreview } from "../../lib/dragPreview";
   import { humanFileSize } from "../../lib/format";
   import {
+    cancelSftpTransfer,
     closeSftpSession,
     createLocalDirectory,
     createRemoteDirectory,
@@ -25,6 +26,7 @@
     renameRemoteEntry,
     setLocalPermissions,
     setRemotePermissions,
+    transferRemoteFile,
     uploadFile
   } from "../../lib/ipc";
   import type {
@@ -51,9 +53,9 @@
   let selectedHostId = $state("");
   let selectedHostGroupId = $state<string | null>(null);
   let hostQuery = $state("");
-  let localEntries = $state<LocalEntry[]>([]);
+  let localEntries = $state<BrowserEntry[]>([]);
   let remoteEntries = $state<RemoteEntry[]>([]);
-  let selectedLocal = $state<LocalEntry | null>(null);
+  let selectedLocal = $state<BrowserEntry | null>(null);
   let selectedRemote = $state<RemoteEntry | null>(null);
   let localLoading = $state(true);
   let remoteLoading = $state(false);
@@ -64,6 +66,11 @@
   let remotePath = $state("");
   let remoteHome = $state("");
   let session = $state<SftpOpenResult | null>(null);
+  let leftSession = $state<SftpOpenResult | null>(null);
+  let leftHostId = $state("");
+  let leftHostMenuOpen = $state(false);
+  let leftHostQuery = $state("");
+  let leftConnecting = $state(false);
   let localQuery = $state("");
   let remoteQuery = $state("");
   let showHidden = $state(false);
@@ -73,7 +80,9 @@
   let transferTransferred = $state(0);
   let transferTotal = $state(0);
   let transferStartedAt = $state(0);
-  let transferStatus = $state<"idle" | "running" | "completed" | "failed">("idle");
+  let transferId = $state("");
+  let activityKind = $state<"transfer" | "delete">("transfer");
+  let transferStatus = $state<"idle" | "running" | "cancelling" | "cancelled" | "completed" | "failed">("idle");
   let transferFailure = $state("");
   let transferDismissTimer: number | null = null;
   let localActionsOpen = $state(false);
@@ -88,7 +97,7 @@
   let remoteSortDirection = $state<SortDirection>("ascending");
   let contextMenu = $state<{
     pane: PaneName;
-    entry: BrowserEntry;
+    entry: BrowserEntry | null;
     x: number;
     y: number;
   } | null>(null);
@@ -99,6 +108,10 @@
     pane: PaneName;
     entry: BrowserEntry;
   } | null>(null);
+  let localFileListElement = $state<HTMLDivElement>();
+  let remoteFileListElement = $state<HTMLDivElement>();
+  const localScrollPositions = new Map<string, number>();
+  const remoteScrollPositions = new Map<string, number>();
 
   const visibleLocalEntries = $derived(
     sortEntries(
@@ -131,7 +144,10 @@
   );
 
   onMount(() => {
-    const closeContextMenu = () => (contextMenu = null);
+    const closeContextMenu = () => {
+      contextMenu = null;
+      leftHostMenuOpen = false;
+    };
     const closeContextMenuOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") contextMenu = null;
     };
@@ -159,6 +175,8 @@
       window.removeEventListener("click", closeContextMenu);
       window.removeEventListener("keydown", closeContextMenuOnEscape);
       if (transferDismissTimer !== null) window.clearTimeout(transferDismissTimer);
+      if (transferId) void cancelSftpTransfer(transferId);
+      if (leftSession) void closeSftpSession(leftSession.id);
       if (session) void closeSftpSession(session.id);
     };
   });
@@ -185,10 +203,15 @@
   }
 
   async function openLocalDirectory(path: string, remember = true) {
+    if (currentPath && localFileListElement) {
+      localScrollPositions.set(currentPath, localFileListElement.scrollTop);
+    }
     localLoading = true;
     error = "";
     try {
-      localEntries = await listLocalEntries(path);
+      localEntries = leftSession
+        ? await listRemoteEntries(leftSession.id, path)
+        : await listLocalEntries(path);
       currentPath = path;
       selectedLocal = null;
       if (remember) {
@@ -200,6 +223,10 @@
       error = errorMessage(cause);
     } finally {
       localLoading = false;
+    }
+    await tick();
+    if (currentPath === path && localFileListElement) {
+      localFileListElement.scrollTop = localScrollPositions.get(path) ?? 0;
     }
   }
 
@@ -240,6 +267,59 @@
     });
   }
 
+  function selectableLeftHosts(): Host[] {
+    const normalized = leftHostQuery.trim().toLocaleLowerCase();
+    return hosts.filter(
+      (host) =>
+        !normalized ||
+        [host.label, host.address, host.username].some((value) =>
+          value.toLocaleLowerCase().includes(normalized)
+        )
+    );
+  }
+
+  function selectedLeftHost(): Host | undefined {
+    return hosts.find((host) => host.id === leftHostId);
+  }
+
+  async function selectLeftHost(hostId: string | null) {
+    if (leftConnecting) return;
+    if (transferStatus === "running" || transferStatus === "cancelling") {
+      error = "Stop the current transfer before changing the left source.";
+      return;
+    }
+    leftHostMenuOpen = false;
+    leftConnecting = true;
+    error = "";
+    try {
+      if (leftSession) await closeSftpSession(leftSession.id);
+      leftSession = null;
+      leftHostId = "";
+      localScrollPositions.clear();
+      currentPath = "";
+      localHistory = [];
+      localHistoryIndex = -1;
+      if (hostId) {
+        const host = hosts.find((candidate) => candidate.id === hostId);
+        if (!host) throw new Error("The selected host no longer exists.");
+        const opened = await openSftpSession(host);
+        leftSession = opened;
+        leftHostId = host.id;
+        await openLocalDirectory(opened.homePath);
+      } else {
+        await openLocalDirectory(homePath);
+      }
+    } catch (cause) {
+      const failure = errorMessage(cause);
+      leftSession = null;
+      leftHostId = "";
+      await openLocalDirectory(homePath);
+      error = failure;
+    } finally {
+      leftConnecting = false;
+    }
+  }
+
   function groupHostCount(id: string): number {
     const ids = groupAndDescendantIds(id);
     return hosts.filter((host) => host.group_id && ids.has(host.group_id)).length;
@@ -263,6 +343,8 @@
       if (session) await closeSftpSession(session.id);
       session = await openSftpSession(host);
       remoteHome = session.homePath;
+      remoteScrollPositions.clear();
+      remotePath = "";
       remoteHistory = [];
       remoteHistoryIndex = -1;
       await openRemoteDirectory(remoteHome);
@@ -275,16 +357,35 @@
   }
 
   async function disconnectRemote() {
+    if (transferStatus === "running" || transferStatus === "cancelling") {
+      error = "Stop the current transfer before closing the remote host.";
+      return;
+    }
     if (session) await closeSftpSession(session.id);
     session = null;
     remoteEntries = [];
     selectedRemote = null;
     remoteHistory = [];
     remoteHistoryIndex = -1;
+    remoteScrollPositions.clear();
+    remotePath = "";
+  }
+
+  async function chooseAnotherHost() {
+    if (transferStatus === "running" || transferStatus === "cancelling") {
+      error = "Stop the current transfer before changing the remote host.";
+      return;
+    }
+    await disconnectRemote();
+    selectedHostGroupId = null;
+    hostQuery = "";
   }
 
   async function openRemoteDirectory(path: string, remember = true) {
     if (!session) return;
+    if (remotePath && remoteFileListElement) {
+      remoteScrollPositions.set(remotePath, remoteFileListElement.scrollTop);
+    }
     remoteLoading = true;
     error = "";
     try {
@@ -300,6 +401,10 @@
       error = errorMessage(cause);
     } finally {
       remoteLoading = false;
+    }
+    await tick();
+    if (remotePath === path && remoteFileListElement) {
+      remoteFileListElement.scrollTop = remoteScrollPositions.get(path) ?? 0;
     }
   }
 
@@ -454,6 +559,20 @@
     };
   }
 
+  function showBackgroundContextMenu(event: MouseEvent, pane: PaneName) {
+    event.preventDefault();
+    if (pane === "local") selectedLocal = null;
+    else selectedRemote = null;
+    const width = 230;
+    const height = 104;
+    contextMenu = {
+      pane,
+      entry: null,
+      x: Math.min(event.clientX, window.innerWidth - width - 8),
+      y: Math.min(event.clientY, window.innerHeight - height - 8)
+    };
+  }
+
   function startEntryDrag(
     event: DragEvent,
     pane: PaneName,
@@ -533,7 +652,7 @@
     await uploadEntry(selectedLocal);
   }
 
-  async function uploadEntry(entry: LocalEntry) {
+  async function uploadEntry(entry: BrowserEntry) {
     if (!session) return;
     const destination = joinRemote(remotePath, entry.name);
     if (
@@ -546,10 +665,17 @@
     ) {
       return;
     }
+    const sourceSession = leftSession;
+    const sourceLabel = sourceSession
+      ? (hosts.find((host) => host.id === leftHostId)?.label ?? "Remote")
+      : "Local";
+    const targetLabel = hosts.find((host) => host.id === selectedHostId)?.label ?? "Remote";
     await runTransfer(
       `Uploading ${entry.name}`,
-      "Local → Remote",
-      (channel) => uploadFile(session!.id, entry.path, destination, channel),
+      `${sourceLabel} → ${targetLabel}`,
+      (channel, id) => sourceSession
+        ? transferRemoteFile(sourceSession.id, session!.id, id, entry.path, destination, channel)
+        : uploadFile(session!.id, id, entry.path, destination, channel),
       () => openRemoteDirectory(remotePath)
     );
   }
@@ -564,23 +690,32 @@
     openAfter: string | null | undefined = undefined
   ) {
     if (!session) return;
-    const destination = `${currentPath}/${entry.name}`;
+    const targetSession = leftSession;
+    const destination = targetSession
+      ? joinRemote(currentPath, entry.name)
+      : `${currentPath}/${entry.name}`;
     if (
       localEntries.some((candidate) => candidate.name === entry.name) &&
       !(await confirmDialog({
         title: "Replace local item?",
-        message: `Merge or replace “${entry.name}” in the local folder?`,
+        message: `Merge or replace “${entry.name}” in the ${targetSession ? "left remote" : "local"} folder?`,
         confirmLabel: "Replace"
       }))
     ) {
       return;
     }
+    const sourceLabel = hosts.find((host) => host.id === selectedHostId)?.label ?? "Remote";
+    const targetLabel = targetSession
+      ? (hosts.find((host) => host.id === leftHostId)?.label ?? "Remote")
+      : "Local";
     await runTransfer(
       `Downloading ${entry.name}`,
-      "Remote → Local",
-      (channel) => downloadFile(session!.id, entry.path, destination, channel),
+      `${sourceLabel} → ${targetLabel}`,
+      (channel, id) => targetSession
+        ? transferRemoteFile(session!.id, targetSession.id, id, entry.path, destination, channel)
+        : downloadFile(session!.id, id, entry.path, destination, channel),
       () => openLocalDirectory(currentPath),
-      openAfter === undefined || entry.isDirectory
+      targetSession || openAfter === undefined || entry.isDirectory
         ? undefined
         : () => openLocalEntry(destination, openAfter)
     );
@@ -589,11 +724,11 @@
   async function runTransfer(
     label: string,
     direction: string,
-    action: (channel: Channel<TransferEvent>) => Promise<void>,
+    action: (channel: Channel<TransferEvent>, transferId: string) => Promise<void>,
     refresh: () => Promise<void>,
     afterSuccess?: () => Promise<void>
   ) {
-    if (transferStatus === "running") {
+    if (transferStatus === "running" || transferStatus === "cancelling") {
       error = "Wait for the current transfer to finish before starting another one.";
       return;
     }
@@ -607,6 +742,8 @@
     transferTransferred = 0;
     transferTotal = 0;
     transferStartedAt = Date.now();
+    transferId = crypto.randomUUID();
+    activityKind = "transfer";
     transferStatus = "running";
     transferFailure = "";
     error = "";
@@ -617,12 +754,59 @@
       transferProgress = event.total > 0 ? event.transferred / event.total : 1;
     };
     try {
-      await action(channel);
+      await action(channel, transferId);
       transferProgress = 1;
       transferTransferred = transferTotal || transferTransferred;
       transferStatus = "completed";
       await refresh();
       await afterSuccess?.();
+      transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
+    } catch (cause) {
+      const failure = errorMessage(cause);
+      if (failure.toLocaleLowerCase().includes("transfer cancelled")) {
+        transferStatus = "cancelled";
+        transferFailure = "";
+        await refresh();
+        transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
+      } else {
+        transferFailure = failure;
+        transferStatus = "failed";
+        error = transferFailure;
+      }
+    }
+    transferId = "";
+  }
+
+  async function runDelete(
+    label: string,
+    location: string,
+    action: () => Promise<void>,
+    refresh: () => Promise<void>
+  ) {
+    if (transferStatus === "running" || transferStatus === "cancelling") {
+      error = "Wait for the current file operation to finish.";
+      return;
+    }
+    if (transferDismissTimer !== null) {
+      window.clearTimeout(transferDismissTimer);
+      transferDismissTimer = null;
+    }
+    transferLabel = label;
+    transferProgress = 0;
+    transferDirection = location;
+    transferTransferred = 0;
+    transferTotal = 0;
+    transferStartedAt = Date.now();
+    transferId = "";
+    activityKind = "delete";
+    transferStatus = "running";
+    transferFailure = "";
+    error = "";
+    try {
+      await action();
+      transferProgress = 1;
+      transferStatus = "completed";
+      await refresh();
       transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
     } catch (cause) {
       transferFailure = errorMessage(cause);
@@ -631,14 +815,32 @@
     }
   }
 
+  async function cancelTransfer() {
+    if (transferStatus !== "running" || !transferId) return;
+    const id = transferId;
+    transferStatus = "cancelling";
+    try {
+      const found = await cancelSftpTransfer(id);
+      if (!found && transferId === id && transferStatus === "cancelling") {
+        transferStatus = "running";
+      }
+    } catch (cause) {
+      if (transferId === id && transferStatus === "cancelling") {
+        transferStatus = "running";
+        error = errorMessage(cause);
+      }
+    }
+  }
+
   function dismissTransfer() {
-    if (transferStatus === "running") return;
+    if (transferStatus === "running" || transferStatus === "cancelling") return;
     transferLabel = "";
     transferProgress = 0;
     transferDirection = "";
     transferTransferred = 0;
     transferTotal = 0;
     transferStartedAt = 0;
+    transferId = "";
     transferStatus = "idle";
     transferFailure = "";
     transferDismissTimer = null;
@@ -649,6 +851,10 @@
     if (entry.isDirectory) {
       if (pane === "local") await openLocalDirectory(entry.path);
       else await openRemoteDirectory(entry.path);
+      return;
+    }
+    if (pane === "local" && leftSession) {
+      error = "Copy the remote file to Local before opening it with a desktop application.";
       return;
     }
     let application: string | null = null;
@@ -675,8 +881,8 @@
   async function contextCopy() {
     const menu = contextMenu;
     contextMenu = null;
-    if (!menu) return;
-    if (menu.pane === "local") await uploadEntry(menu.entry as LocalEntry);
+    if (!menu?.entry) return;
+    if (menu.pane === "local") await uploadEntry(menu.entry);
     else await downloadEntry(menu.entry as RemoteEntry);
   }
 
@@ -733,15 +939,17 @@
   }
 
   async function newLocalFolder() {
+    const remote = leftSession;
     const name = await promptDialog({
-      title: "New local folder",
+      title: remote ? "New remote folder" : "New local folder",
       label: "Folder name",
       placeholder: "New folder",
       confirmLabel: "Create"
     });
     if (!name || name.includes("/")) return;
     try {
-      await createLocalDirectory(`${currentPath}/${name}`);
+      if (remote) await createRemoteDirectory(remote.id, joinRemote(currentPath, name));
+      else await createLocalDirectory(`${currentPath}/${name}`);
       await openLocalDirectory(currentPath);
     } catch (cause) {
       error = errorMessage(cause);
@@ -750,15 +958,20 @@
 
   async function renameSelectedLocal() {
     if (!selectedLocal) return;
+    const remote = leftSession;
     const name = await promptDialog({
-      title: "Rename local item",
+      title: remote ? "Rename remote item" : "Rename local item",
       label: "New name",
       initialValue: selectedLocal.name,
       confirmLabel: "Rename"
     });
     if (!name || name.includes("/") || name === selectedLocal.name) return;
     try {
-      await renameLocalEntry(selectedLocal.path, `${currentPath}/${name}`);
+      if (remote) {
+        await renameRemoteEntry(remote.id, selectedLocal.path, joinRemote(currentPath, name));
+      } else {
+        await renameLocalEntry(selectedLocal.path, `${currentPath}/${name}`);
+      }
       await openLocalDirectory(currentPath);
     } catch (cause) {
       error = errorMessage(cause);
@@ -767,20 +980,24 @@
 
   async function deleteSelectedLocal() {
     if (!selectedLocal) return;
+    const remote = leftSession;
+    const entry = selectedLocal;
     if (
       !(await confirmDialog({
-        title: "Delete local item?",
-        message: `Delete “${selectedLocal.name}” from this device?`,
+        title: remote ? "Delete remote item?" : "Delete local item?",
+        message: `Delete “${entry.name}” from ${remote ? "the remote host" : "this device"}?`,
         confirmLabel: "Delete",
         danger: true
       }))
     ) return;
-    try {
-      await removeLocalEntry(selectedLocal.path, selectedLocal.isDirectory);
-      await openLocalDirectory(currentPath);
-    } catch (cause) {
-      error = errorMessage(cause);
-    }
+    await runDelete(
+      `Deleting ${entry.name}`,
+      remote ? (selectedLeftHost()?.label ?? "Remote host") : "This device",
+      () => remote
+        ? removeRemoteEntry(remote.id, entry.path, entry.isDirectory)
+        : removeLocalEntry(entry.path, entry.isDirectory),
+      () => openLocalDirectory(currentPath)
+    );
   }
 
   async function editLocalPermissions() {
@@ -798,7 +1015,8 @@
     if (!target) return;
     try {
       if (target.pane === "local") {
-        await setLocalPermissions(target.entry.path, mode);
+        if (leftSession) await setRemotePermissions(leftSession.id, target.entry.path, mode);
+        else await setLocalPermissions(target.entry.path, mode);
         await openLocalDirectory(currentPath);
       } else {
         if (!session) throw new Error("The SFTP session is no longer connected.");
@@ -835,24 +1053,22 @@
 
   async function deleteSelectedRemote() {
     if (!session || !selectedRemote) return;
+    const activeSession = session;
+    const entry = selectedRemote;
     if (
       !(await confirmDialog({
         title: "Delete remote item?",
-        message: `Delete “${selectedRemote.name}” from the remote host?`,
+        message: `Delete “${entry.name}” from the remote host?`,
         confirmLabel: "Delete",
         danger: true
       }))
     ) return;
-    try {
-      await removeRemoteEntry(
-        session.id,
-        selectedRemote.path,
-        selectedRemote.isDirectory
-      );
-      await openRemoteDirectory(remotePath);
-    } catch (cause) {
-      error = errorMessage(cause);
-    }
+    await runDelete(
+      `Deleting ${entry.name}`,
+      hosts.find((host) => host.id === selectedHostId)?.label ?? "Remote host",
+      () => removeRemoteEntry(activeSession.id, entry.path, entry.isDirectory),
+      () => openRemoteDirectory(remotePath)
+    );
   }
 
   function joinRemote(parent: string, child: string): string {
@@ -872,20 +1088,67 @@
       class="file-pane"
       class:drop-active={dropTarget === "local"}
       role="region"
-      aria-label="Local files"
+      aria-label={leftSession ? "Left remote files" : "Local files"}
       ondragover={(event) => dragOverPane(event, "local")}
       ondragleave={(event) => dragLeavePane(event, "local")}
       ondrop={(event) => void dropOnPane(event, "local")}
     >
       <div class="file-pane-header">
-        <div class="pane-identity">
-          <span class="host-badge mini blue"><Icon name="folder" size={16} /></span>
-          <strong>Local</strong>
+        <div class="left-source-anchor">
+          <button
+            class="pane-identity remote-host-switch"
+            class:active={leftHostMenuOpen}
+            title="Choose Local or another host"
+            disabled={leftConnecting}
+            onclick={(event) => {
+              event.stopPropagation();
+              leftHostMenuOpen = !leftHostMenuOpen;
+            }}
+          >
+            {#if leftSession}
+              <span class="host-badge mini {selectedLeftHost()?.color ?? 'amber'}">
+                <HostIcon hostId={selectedLeftHost()?.id} size={16} />
+              </span>
+            {:else}
+              <span class="host-badge mini blue"><Icon name="folder" size={16} /></span>
+            {/if}
+            <strong>{leftConnecting ? "Connecting…" : (selectedLeftHost()?.label ?? "Local")}</strong>
+            <Icon name="chevron" size={13} />
+          </button>
+          {#if leftHostMenuOpen}
+            <div
+              class="left-source-menu"
+              role="dialog"
+              aria-label="Choose left file source"
+              tabindex="-1"
+              onclick={(event) => event.stopPropagation()}
+              onkeydown={(event) => event.stopPropagation()}
+            >
+              <label>
+                <Icon name="search" size={16} />
+                <input aria-label="Search left hosts" placeholder="Search hosts" bind:value={leftHostQuery} />
+              </label>
+              <div>
+                <button class:selected={!leftSession} onclick={() => void selectLeftHost(null)}>
+                  <span class="host-badge mini blue"><Icon name="folder" size={16} /></span>
+                  <span><strong>Local</strong><small>This device</small></span>
+                  {#if !leftSession}<Icon name="check" size={15} />{/if}
+                </button>
+                {#each selectableLeftHosts() as host (host.id)}
+                  <button class:selected={leftHostId === host.id} onclick={() => void selectLeftHost(host.id)}>
+                    <span class="host-badge mini {host.color}"><HostIcon hostId={host.id} size={16} /></span>
+                    <span><strong>{host.label}</strong><small>{host.username}@{host.address}</small></span>
+                    {#if leftHostId === host.id}<Icon name="check" size={15} />{/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
         </div>
         <div class="toolbar-spacer"></div>
         <label class="file-filter">
           <Icon name="search" size={16} />
-          <input aria-label="Filter local files" placeholder="Filter" bind:value={localQuery} />
+          <input aria-label="Filter left files" placeholder="Filter" bind:value={localQuery} />
         </label>
         <div class="file-actions">
           <button
@@ -942,7 +1205,13 @@
           Kind <span>{sortMarker("local", "kind")}</span>
         </button>
       </div>
-      <div class="file-list">
+      <div
+        class="file-list"
+        role="group"
+        aria-label={leftSession ? "Left remote directory contents" : "Local directory contents"}
+        bind:this={localFileListElement}
+        oncontextmenu={(event) => showBackgroundContextMenu(event, "local")}
+      >
         {#if localLoading}
           <div class="loading-row">Reading local files…</div>
         {:else}
@@ -1063,11 +1332,19 @@
           </div>
         </div>
       {:else}
+        {@const connectedHost = hosts.find((host) => host.id === selectedHostId)}
         <div class="file-pane-header">
-          <div class="pane-identity">
-            <span class="host-badge mini amber"><Icon name="terminal" size={16} /></span>
-            <strong>{hosts.find((host) => host.id === selectedHostId)?.label ?? "Remote"}</strong>
-          </div>
+          <button
+            class="pane-identity remote-host-switch"
+            title="Choose another host"
+            onclick={() => void chooseAnotherHost()}
+          >
+            <span class="host-badge mini {connectedHost?.color ?? 'amber'}">
+              <HostIcon hostId={connectedHost?.id} size={16} />
+            </span>
+            <strong>{connectedHost?.label ?? "Remote"}</strong>
+            <Icon name="chevron" size={13} />
+          </button>
           <div class="toolbar-spacer"></div>
           <label class="file-filter">
             <Icon name="search" size={16} />
@@ -1134,7 +1411,13 @@
             Kind <span>{sortMarker("remote", "kind")}</span>
           </button>
         </div>
-        <div class="file-list">
+        <div
+          class="file-list"
+          role="group"
+          aria-label="Remote directory contents"
+          bind:this={remoteFileListElement}
+          oncontextmenu={(event) => showBackgroundContextMenu(event, "remote")}
+        >
           {#if remoteLoading}
             <div class="loading-row">Reading remote files…</div>
           {:else}
@@ -1186,9 +1469,20 @@
   </div>
 
   {#if transferLabel}
-    <div class="transfer-shelf" class:failed={transferStatus === "failed"}>
+    <div
+      class="transfer-shelf"
+      class:failed={transferStatus === "failed"}
+      class:cancelled={transferStatus === "cancelled"}
+    >
       <span class="transfer-job-icon">
-        <Icon name={transferStatus === "completed" ? "shield" : "forward"} size={19} />
+        <Icon
+          name={activityKind === "delete"
+            ? "trash"
+            : transferStatus === "completed"
+              ? "shield"
+              : "forward"}
+          size={19}
+        />
       </span>
       <div class="transfer-job-copy">
         <header>
@@ -1196,23 +1490,37 @@
           <span>{transferDirection}</span>
           <b>
             {transferStatus === "completed"
-              ? "Completed"
+              ? activityKind === "delete" ? "Deleted" : "Completed"
+              : transferStatus === "cancelled"
+                ? "Cancelled"
+                : transferStatus === "cancelling"
+                  ? "Stopping…"
               : transferStatus === "failed"
                 ? "Failed"
-                : transferTotal > 0
+                : activityKind === "delete"
+                  ? "Deleting…"
+                  : transferTotal > 0
                   ? `${Math.round(transferProgress * 100)}%`
                   : "Preparing…"}
           </b>
         </header>
         <div
           class="transfer-progress-track"
-          class:indeterminate={transferStatus === "running" && transferTotal === 0}
+          class:indeterminate={(transferStatus === "running" || transferStatus === "cancelling") && transferTotal === 0}
         >
           <i style:width={`${Math.round(transferProgress * 100)}%`}></i>
         </div>
         <footer>
           {#if transferStatus === "failed"}
             <span title={transferFailure}>{transferFailure}</span>
+          {:else if transferStatus === "cancelled"}
+            <span>Transfer stopped</span>
+          {:else if transferStatus === "cancelling"}
+            <span>Stopping safely and removing the partial file…</span>
+          {:else if activityKind === "delete" && transferStatus === "running"}
+            <span>Removing the selected item…</span>
+          {:else if activityKind === "delete" && transferStatus === "completed"}
+            <span>The selected item was deleted</span>
           {:else if transferTotal > 0}
             <span>{humanFileSize(transferTransferred)} of {humanFileSize(transferTotal)}</span>
             {#if transferStatus === "running" && transferRate > 0}
@@ -1225,10 +1533,22 @@
           {/if}
         </footer>
       </div>
-      {#if transferStatus !== "running"}
+      {#if activityKind === "transfer" && (transferStatus === "running" || transferStatus === "cancelling")}
+        <button
+          class="transfer-stop"
+          title="Stop transfer"
+          aria-label="Stop transfer"
+          disabled={transferStatus === "cancelling"}
+          onclick={() => void cancelTransfer()}
+        >
+          <Icon name="stop" size={15} />
+        </button>
+      {:else if transferStatus !== "running" && transferStatus !== "cancelling"}
         <button class="transfer-dismiss" title="Dismiss" onclick={dismissTransfer}>
           <Icon name="close" size={16} />
         </button>
+      {:else}
+        <span class="transfer-operation-busy" aria-label="Deleting"></span>
       {/if}
     </div>
   {/if}
@@ -1253,21 +1573,25 @@
       role="menu"
       tabindex="-1"
     >
-      <button onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry)}>Open</button>
-      <button
-        disabled={contextMenu.entry.isDirectory}
-        onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry, true)}
-      >Open with…</button>
-      <div></div>
-      <button disabled={!session} onclick={() => void contextCopy()}>
-        Copy to target directory
-      </button>
-      <button onclick={() => void contextRename()}>Rename</button>
-      <button class="danger" onclick={() => void contextDelete()}>Delete</button>
-      <div></div>
+      {#if contextMenu.entry}
+        <button onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry!)}>Open</button>
+        <button
+          disabled={contextMenu.entry.isDirectory}
+          onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry!, true)}
+        >Open with…</button>
+        <div></div>
+        <button disabled={!session} onclick={() => void contextCopy()}>
+          Copy to target directory
+        </button>
+        <button onclick={() => void contextRename()}>Rename</button>
+        <button class="danger" onclick={() => void contextDelete()}>Delete</button>
+        <div></div>
+      {/if}
       <button onclick={() => void contextRefresh()}>Refresh</button>
       <button onclick={() => void contextNewFolder()}>New Folder</button>
-      <button onclick={() => void contextPermissions()}>Edit Permissions</button>
+      {#if contextMenu.entry}
+        <button onclick={() => void contextPermissions()}>Edit Permissions</button>
+      {/if}
     </div>
   {/if}
 </section>

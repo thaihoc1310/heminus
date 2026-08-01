@@ -302,7 +302,12 @@
       />
       <span class="manager-count">{snippets.length} saved</span>
     </header>
-    <div class="manager-scroll">
+    <div
+      class="manager-scroll"
+      role="region"
+      aria-label="Snippet selection area"
+      onpointerdown={startSnippetMarquee}
+    >
       <div class="page-heading">
         <div><h1>Snippets</h1><p>Keep commands you use often within easy reach.</p></div>
       </div>
@@ -326,7 +331,6 @@
           class="manager-grid selectable-grid"
           role="list"
           class:list-view={collectionView === "list"}
-          onpointerdown={startSnippetMarquee}
         >
           {#each visibleSnippets as snippet (snippet.id)}
             <button

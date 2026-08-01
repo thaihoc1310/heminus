@@ -18,6 +18,7 @@ import type {
   TerminalTabTransferResult,
   TerminalEvent,
   TransferEvent,
+  TunnelPortProcess,
   TunnelState,
   VaultGroup
 } from "./types";
@@ -281,6 +282,15 @@ export async function tunnelStates(): Promise<TunnelState[]> {
   return invoke<TunnelState[]>("tunnel_states");
 }
 
+export async function tunnelPortProcesses(port: number): Promise<TunnelPortProcess[]> {
+  if (!isTauri) return [];
+  return invoke<TunnelPortProcess[]>("tunnel_port_processes", { port });
+}
+
+export async function stopTunnelPortProcesses(port: number, pids: number[]): Promise<void> {
+  return invoke("tunnel_stop_port_processes", { port, pids });
+}
+
 export async function listLocalEntries(path?: string): Promise<LocalEntry[]> {
   if (!isTauri) return [];
   return invoke<LocalEntry[]>("list_local_entries", { path: path ?? null });
@@ -425,20 +435,44 @@ export async function setRemotePermissions(
 
 export async function uploadFile(
   id: string,
+  transferId: string,
   localPath: string,
   remotePath: string,
   channel: Channel<TransferEvent>
 ): Promise<void> {
-  return invoke("sftp_upload", { id, localPath, remotePath, onProgress: channel });
+  return invoke("sftp_upload", { id, transferId, localPath, remotePath, onProgress: channel });
 }
 
 export async function downloadFile(
   id: string,
+  transferId: string,
   remotePath: string,
   localPath: string,
   channel: Channel<TransferEvent>
 ): Promise<void> {
-  return invoke("sftp_download", { id, remotePath, localPath, onProgress: channel });
+  return invoke("sftp_download", { id, transferId, remotePath, localPath, onProgress: channel });
+}
+
+export async function cancelSftpTransfer(transferId: string): Promise<boolean> {
+  return invoke<boolean>("sftp_cancel_transfer", { transferId });
+}
+
+export async function transferRemoteFile(
+  sourceId: string,
+  targetId: string,
+  transferId: string,
+  sourcePath: string,
+  targetPath: string,
+  channel: Channel<TransferEvent>
+): Promise<void> {
+  return invoke("sftp_transfer_remote", {
+    sourceId,
+    targetId,
+    transferId,
+    sourcePath,
+    targetPath,
+    onProgress: channel
+  });
 }
 
 function searchable(host: Host, query: string): boolean {

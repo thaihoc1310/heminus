@@ -545,10 +545,7 @@ pub fn record_command_history(
 }
 
 #[tauri::command]
-pub fn delete_command_history(
-    state: State<'_, AppState>,
-    command: String,
-) -> Result<bool, String> {
+pub fn delete_command_history(state: State<'_, AppState>, command: String) -> Result<bool, String> {
     state
         .database
         .lock()

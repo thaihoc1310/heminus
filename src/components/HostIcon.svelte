@@ -1,15 +1,12 @@
 <script lang="ts">
-  import {
-    siAlpinelinux,
-    siArchlinux,
-    siDebian,
-    siFedora,
-    siLinux,
-    siOpensuse,
-    siRedhat,
-    siUbuntu,
-    type SimpleIcon
-  } from "simple-icons";
+  import alpineLogo from "../../os-image/alpine.png";
+  import archLogo from "../../os-image/arch.png";
+  import debianLogo from "../../os-image/debian.png";
+  import fedoraLogo from "../../os-image/fedora.png";
+  import linuxLogo from "../../os-image/linux.png";
+  import redhatLogo from "../../os-image/redhat.png";
+  import suseLogo from "../../os-image/suse.png";
+  import ubuntuLogo from "../../os-image/ubuntu.png";
   import Icon from "./Icon.svelte";
   import {
     hostOperatingSystems,
@@ -17,32 +14,28 @@
   } from "../lib/hostOperatingSystem";
 
   let { hostId, size = 18 }: { hostId?: string | null; size?: number } = $props();
-  const brandIcons: Record<HostOperatingSystem, SimpleIcon> = {
-    ubuntu: siUbuntu,
-    debian: siDebian,
-    fedora: siFedora,
-    redhat: siRedhat,
-    arch: siArchlinux,
-    alpine: siAlpinelinux,
-    suse: siOpensuse,
-    linux: siLinux
+  const brandIcons: Record<HostOperatingSystem, { src: string; title: string }> = {
+    ubuntu: { src: ubuntuLogo, title: "Ubuntu" },
+    debian: { src: debianLogo, title: "Debian" },
+    fedora: { src: fedoraLogo, title: "Fedora" },
+    redhat: { src: redhatLogo, title: "Red Hat" },
+    arch: { src: archLogo, title: "Arch Linux" },
+    alpine: { src: alpineLogo, title: "Alpine Linux" },
+    suse: { src: suseLogo, title: "SUSE" },
+    linux: { src: linuxLogo, title: "Linux" }
   };
   const operatingSystem = $derived(hostId ? $hostOperatingSystems[hostId] : null);
   const brandIcon = $derived(operatingSystem ? brandIcons[operatingSystem] : null);
 </script>
 
 {#if brandIcon}
-  <svg
+  <img
     class="host-brand-icon"
+    src={brandIcon.src}
+    alt={brandIcon.title}
     width={size}
     height={size}
-    viewBox="0 0 24 24"
-    fill={`#${brandIcon.hex}`}
-    role="img"
-    aria-label={brandIcon.title}
-  >
-    <path d={brandIcon.path}></path>
-  </svg>
+  />
 {:else}
   <Icon name="terminal" {size} />
 {/if}

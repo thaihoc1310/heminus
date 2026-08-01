@@ -20,14 +20,16 @@
   function cancel() {
     if (!request) return;
     if (request.kind === "prompt") request.resolve(null);
-    else request.resolve(false);
+    else if (request.kind === "confirm") request.resolve(false);
+    else request.resolve();
     request = null;
   }
 
   function accept() {
     if (!request) return;
     if (request.kind === "prompt") request.resolve(value);
-    else request.resolve(true);
+    else if (request.kind === "confirm") request.resolve(true);
+    else request.resolve();
     request = null;
   }
 
@@ -74,12 +76,14 @@
           />
         {/if}
         <footer>
-          <button type="button" class="quiet-button" onclick={cancel}>Cancel</button>
+          {#if request.kind !== "alert"}
+            <button type="button" class="quiet-button" onclick={cancel}>Cancel</button>
+          {/if}
           <button
             type="submit"
             class:danger={request.kind === "confirm" && request.danger}
             class="dialog-primary"
-          >{request.confirmLabel ?? (request.kind === "prompt" ? "Save" : "Confirm")}</button>
+          >{request.confirmLabel ?? (request.kind === "prompt" ? "Save" : request.kind === "alert" ? "OK" : "Confirm")}</button>
         </footer>
       </form>
     </div>

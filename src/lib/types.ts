@@ -214,6 +214,13 @@ export interface TunnelState {
   message: string | null;
 }
 
+export interface TunnelPortProcess {
+  pid: number;
+  name: string;
+  command: string;
+  requiresElevation: boolean;
+}
+
 export interface KnownHostEntry {
   hosts: string;
   keyType: string;

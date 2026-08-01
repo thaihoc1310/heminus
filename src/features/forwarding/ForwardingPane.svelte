@@ -3,7 +3,7 @@
   import CollectionControls from "../../components/CollectionControls.svelte";
   import CustomSelect from "../../components/CustomSelect.svelte";
   import Icon from "../../components/Icon.svelte";
-  import { confirmDialog } from "../../lib/dialog";
+  import { alertDialog, confirmDialog } from "../../lib/dialog";
   import { beginMarqueeSelection } from "../../lib/marqueeSelection";
   import {
     deletePortForward,
@@ -11,7 +11,9 @@
     listPortForwards,
     savePortForward,
     startTunnel,
+    stopTunnelPortProcesses,
     stopTunnel,
+    tunnelPortProcesses,
     tunnelStates
   } from "../../lib/ipc";
   import type { ForwardKind, Host, PortForward } from "../../lib/types";
@@ -47,6 +49,7 @@
   let collectionSort = $state<CollectionSort>("az");
   let collectionQuery = $state("");
   let editorBaseline = $state<string | null>(null);
+  const activePortConflictDialogs = new Set<string>();
   const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
   const visibleRules = $derived.by(() =>
     rules
@@ -102,18 +105,83 @@
   async function refreshStates() {
     try {
       const states = await tunnelStates();
+      const previouslyRunning = runningIds;
       runningIds = new Set(states.filter((state) => state.running).map((state) => state.id));
       const failed = states.find(
-        (state) => !state.running && state.id === selected?.id && state.exitCode !== 0
+        (state) =>
+          !state.running &&
+          state.exitCode !== 0 &&
+          (previouslyRunning.has(state.id) || state.id === focusedRuleId || state.id === selected?.id)
       );
       if (failed) {
-        message =
+        const failureMessage =
           failed.message ||
           `SSH forwarding stopped${failed.exitCode === null ? "" : ` with exit code ${failed.exitCode}`}.`;
-        isError = true;
+        const rule = rules.find((candidate) => candidate.id === failed.id);
+        if (
+          rule &&
+          rule.kind !== "remote" &&
+          failureMessage.toLowerCase().includes("address already in use")
+        ) {
+          message = "";
+          isError = false;
+          void resolveLocalPortConflict(rule);
+        } else {
+          message = failureMessage;
+          isError = true;
+        }
       }
     } catch {
       // The next explicit action will surface a useful error.
+    }
+  }
+
+  async function resolveLocalPortConflict(rule: PortForward) {
+    if (activePortConflictDialogs.has(rule.id)) return;
+    activePortConflictDialogs.add(rule.id);
+    try {
+      const processes = await tunnelPortProcesses(rule.bind_port);
+      const processDetails = processes.length > 0
+        ? processes
+            .map((process) =>
+              `${process.name} (PID ${process.pid})${process.requiresElevation ? " — administrator permission required" : ""}`
+            )
+            .join("\n")
+        : "The owning process is protected, so administrator permission is required to identify and stop it.";
+      const accepted = await confirmDialog({
+        title: `Port ${rule.bind_port} is already in use`,
+        message:
+          `${processDetails}\n\nStop the process using ${rule.bind_host}:${rule.bind_port} and retry “${rule.name}”? ` +
+          "The process may have unsaved work. Heminus never stores administrator passwords.",
+        confirmLabel: "Stop process & retry",
+        danger: true
+      });
+      if (!accepted) return;
+
+      busy = true;
+      await stopTunnelPortProcesses(rule.bind_port, processes.map((process) => process.pid));
+      const host = hosts.find((candidate) => candidate.id === rule.host_id);
+      if (!host) throw new Error("The SSH host for this tunnel no longer exists.");
+      await startTunnel(rule, host);
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
+      await refreshStates();
+      if (runningIds.has(rule.id)) {
+        message = `Stopped the process using port ${rule.bind_port} and started the tunnel.`;
+        isError = false;
+      } else if (!isError) {
+        throw new Error("SSH stopped again after the port was released.");
+      }
+    } catch (cause) {
+      message = "";
+      isError = false;
+      await alertDialog({
+        title: "Could not start the tunnel",
+        message: cause instanceof Error ? cause.message : String(cause),
+        confirmLabel: "Close"
+      });
+    } finally {
+      busy = false;
+      activePortConflictDialogs.delete(rule.id);
     }
   }
 
@@ -239,6 +307,24 @@
       selected.destination_host ??= "127.0.0.1";
       selected.destination_port ??= 80;
     }
+  }
+
+  function forwardKindLetter(kind: ForwardKind): string {
+    return kind === "local" ? "L" : kind === "remote" ? "R" : "D";
+  }
+
+  function forwardingRoute(rule: PortForward): string {
+    const host = hosts.find((candidate) => candidate.id === rule.host_id);
+    const hostLabel = host?.label ?? "SSH host";
+    const bindAddress = ["127.0.0.1", "localhost", "::1"].includes(rule.bind_host)
+      ? `${rule.kind === "dynamic" ? "SOCKS" : "Local"}:${rule.bind_port}`
+      : `${rule.bind_host}:${rule.bind_port}`;
+    if (rule.kind === "dynamic") return `${bindAddress} → ${hostLabel} → Internet`;
+    const destination = `${rule.destination_host ?? "Destination"}:${rule.destination_port ?? "—"}`;
+    if (rule.kind === "remote") {
+      return `Port ${rule.bind_port} on ${hostLabel} → This device → ${destination}`;
+    }
+    return `${bindAddress} → ${hostLabel} → ${destination}`;
   }
 
   async function persist(): Promise<PortForward | null> {
@@ -422,10 +508,18 @@
       />
       <span class="manager-count">{runningIds.size} active</span>
     </header>
-    <div class="manager-scroll">
+    <div
+      class="manager-scroll"
+      role="region"
+      aria-label="Port forwarding selection area"
+      onpointerdown={startRuleMarquee}
+    >
       <div class="page-heading">
         <div><h1>Port Forwarding</h1><p>Reach private services through trusted SSH hosts.</p></div>
       </div>
+      {#if message && isError}
+        <div class="error-row forwarding-error-row">{message}</div>
+      {/if}
       {#if loading}
         <div class="loading-row">Loading forwarding rules…</div>
       {:else if rules.length === 0}
@@ -446,7 +540,6 @@
           class="manager-grid selectable-grid"
           role="list"
           class:list-view={collectionView === "list"}
-          onpointerdown={startRuleMarquee}
         >
           {#each visibleRules as rule (rule.id)}
             <div
@@ -456,18 +549,17 @@
               oncontextmenu={(event) => openRuleContextMenu(event, rule)}
             >
               <button
-                class="manager-card"
+                class="manager-card forwarding-card"
                 class:selected={selectedRuleIds.includes(rule.id)}
                 class:running-card={runningIds.has(rule.id)}
                 onclick={(event) => void handleRuleClick(event, rule)}
                 ondblclick={() => void toggleRule(rule)}
               >
-                <span class="manager-icon"><Icon name="forward" /></span>
+                <span class="manager-icon forwarding-kind-icon">{forwardKindLetter(rule.kind)}</span>
                 <span>
                   <strong>{rule.name}</strong>
-                  <small>{rule.kind} · {rule.bind_host}:{rule.bind_port}</small>
+                  <small>{forwardingRoute(rule)}</small>
                 </span>
-                <span class:running={runningIds.has(rule.id)} class="runtime-dot"></span>
               </button>
               <button
                 class="manager-card-edit"

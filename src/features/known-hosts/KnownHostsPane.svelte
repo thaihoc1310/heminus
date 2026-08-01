@@ -16,8 +16,8 @@
   let loading = $state(true);
   let error = $state("");
   let showUnmatched = $state(false);
-  let expandedId = $state<string | null>(null);
   let removingId = $state<string | null>(null);
+  let contextMenu = $state<{ group: KnownHostGroup; x: number; y: number } | null>(null);
   let message = $state("");
   let collectionView = $state<CollectionView>("grid");
   let collectionSort = $state<CollectionSort>("az");
@@ -70,10 +70,6 @@
     );
   });
 
-  function friendlyKeyType(keyType: string): string {
-    return keyType.replace("ssh-", "").replace("ecdsa-sha2-", "").toUpperCase();
-  }
-
   async function refresh() {
     loading = true;
     try {
@@ -98,11 +94,11 @@
       return;
     }
     removingId = group.id;
+    contextMenu = null;
     try {
       const removed = await deleteKnownHostEntries(
         group.entries.map((entry) => entry.lineNumber)
       );
-      if (expandedId === group.id) expandedId = null;
       await refresh();
       message = `${removed} fingerprint${removed === 1 ? "" : "s"} removed from the Heminus vault`;
     } catch (cause) {
@@ -112,8 +108,24 @@
     }
   }
 
+  function openContextMenu(event: MouseEvent, group: KnownHostGroup) {
+    event.preventDefault();
+    contextMenu = {
+      group,
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - 248)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - 62))
+    };
+  }
+
   onMount(refresh);
 </script>
+
+<svelte:window
+  onclick={() => (contextMenu = null)}
+  onkeydown={(event) => {
+    if (event.key === "Escape") contextMenu = null;
+  }}
+/>
 
 <section class="known-hosts-page">
   <header class="content-toolbar">
@@ -156,37 +168,16 @@
     {:else}
       <div class="known-host-grid" class:list-view={collectionView === "list"}>
         {#each filtered as group (group.id)}
-          <article class="known-host-card" class:expanded={expandedId === group.id}>
-            <button
-              class="known-host-card-main"
-              title="Show trusted fingerprints"
-              onclick={() => (expandedId = expandedId === group.id ? null : group.id)}
-            >
+          <article
+            class="known-host-card"
+            oncontextmenu={(event) => openContextMenu(event, group)}
+          >
+            <div class="known-host-card-main">
               <span class="manager-icon known-host-icon"><Icon name="fingerprint" /></span>
               <span class="known-host-copy">
                 <strong class:unresolved-host={group.unresolved}>{group.hosts}</strong>
-                <small>
-                  {[...new Set(group.entries.map((entry) => friendlyKeyType(entry.keyType)))].join(" · ")}
-                  · {group.entries.length} trusted
-                </small>
               </span>
-            </button>
-            <button
-              class="known-host-remove"
-              disabled={removingId === group.id}
-              title={`Forget ${group.hosts}`}
-              onclick={() => void removeGroup(group)}
-            ><Icon name="trash" size={16} /></button>
-            {#if expandedId === group.id}
-              <div class="known-host-fingerprints">
-                {#each group.entries as entry (`${entry.lineNumber}-${entry.fingerprint}`)}
-                  <div>
-                    <span>{friendlyKeyType(entry.keyType)}</span>
-                    <code>{entry.fingerprint}</code>
-                  </div>
-                {/each}
-              </div>
-            {/if}
+            </div>
           </article>
         {/each}
       </div>
@@ -194,3 +185,27 @@
     {/if}
   </div>
 </section>
+
+{#if contextMenu}
+  <div
+    class="host-context-menu known-host-context-menu"
+    style:left={`${contextMenu.x}px`}
+    style:top={`${contextMenu.y}px`}
+    role="menu"
+    tabindex="-1"
+    onclick={(event) => event.stopPropagation()}
+    onkeydown={(event) => event.stopPropagation()}
+    oncontextmenu={(event) => event.preventDefault()}
+  >
+    <button
+      class="danger"
+      role="menuitem"
+      disabled={removingId === contextMenu.group.id}
+      onclick={() => {
+        const group = contextMenu?.group;
+        contextMenu = null;
+        if (group) void removeGroup(group);
+      }}
+    ><Icon name="trash" size={17} /><span>Remove</span></button>
+  </div>
+{/if}

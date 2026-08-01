@@ -98,6 +98,8 @@ pub fn run() {
             sftp::sftp_set_permissions,
             sftp::sftp_upload,
             sftp::sftp_download,
+            sftp::sftp_transfer_remote,
+            sftp::sftp_cancel_transfer,
             terminal::terminal_open,
             terminal::terminal_attach,
             terminal::terminal_write,
@@ -108,6 +110,8 @@ pub fn run() {
             tunnel::tunnel_start,
             tunnel::tunnel_stop,
             tunnel::tunnel_states,
+            tunnel::tunnel_port_processes,
+            tunnel::tunnel_stop_port_processes,
         ])
         .on_window_event(|window, event| {
             if window.label() == "main"
