@@ -112,6 +112,9 @@
   let remoteFileListElement = $state<HTMLDivElement>();
   const localScrollPositions = new Map<string, number>();
   const remoteScrollPositions = new Map<string, number>();
+  let componentDisposed = false;
+  let localDirectoryRequestId = 0;
+  let remoteDirectoryRequestId = 0;
 
   const visibleLocalEntries = $derived(
     sortEntries(
@@ -144,6 +147,7 @@
   );
 
   onMount(() => {
+    componentDisposed = false;
     const closeContextMenu = () => {
       contextMenu = null;
       leftHostMenuOpen = false;
@@ -155,23 +159,30 @@
     window.addEventListener("keydown", closeContextMenuOnEscape);
     void (async () => {
       try {
-        [homePath, hosts, groups] = await Promise.all([
+        const [resolvedHomePath, loadedHosts, loadedGroups] = await Promise.all([
           homeDirectory(),
           listHosts(),
           listGroups()
         ]);
+        if (componentDisposed) return;
+        homePath = resolvedHomePath;
+        hosts = loadedHosts;
+        groups = loadedGroups;
         selectedHostId = hosts.some((host) => host.id === initialHostId)
           ? initialHostId
           : (hosts[0]?.id ?? "");
         await openLocalDirectory(homePath);
         if (autoConnect && selectedHostId) await connectRemote();
       } catch (cause) {
-        error = errorMessage(cause);
+        if (!componentDisposed) error = errorMessage(cause);
       } finally {
         localLoading = false;
       }
     })();
     return () => {
+      componentDisposed = true;
+      localDirectoryRequestId += 1;
+      remoteDirectoryRequestId += 1;
       window.removeEventListener("click", closeContextMenu);
       window.removeEventListener("keydown", closeContextMenuOnEscape);
       if (transferDismissTimer !== null) window.clearTimeout(transferDismissTimer);
@@ -206,12 +217,16 @@
     if (currentPath && localFileListElement) {
       localScrollPositions.set(currentPath, localFileListElement.scrollTop);
     }
+    const requestId = ++localDirectoryRequestId;
+    const sourceSession = leftSession;
     localLoading = true;
     error = "";
     try {
-      localEntries = leftSession
-        ? await listRemoteEntries(leftSession.id, path)
+      const entries = sourceSession
+        ? await listRemoteEntries(sourceSession.id, path)
         : await listLocalEntries(path);
+      if (componentDisposed || requestId !== localDirectoryRequestId) return;
+      localEntries = entries;
       currentPath = path;
       selectedLocal = null;
       if (remember) {
@@ -220,12 +235,15 @@
         localHistoryIndex = next.index;
       }
     } catch (cause) {
-      error = errorMessage(cause);
+      if (!componentDisposed && requestId === localDirectoryRequestId) {
+        error = errorMessage(cause);
+      }
     } finally {
-      localLoading = false;
+      if (requestId === localDirectoryRequestId) localLoading = false;
     }
+    if (componentDisposed || requestId !== localDirectoryRequestId) return;
     await tick();
-    if (currentPath === path && localFileListElement) {
+    if (requestId === localDirectoryRequestId && currentPath === path && localFileListElement) {
       localFileListElement.scrollTop = localScrollPositions.get(path) ?? 0;
     }
   }
@@ -290,6 +308,7 @@
     }
     leftHostMenuOpen = false;
     leftConnecting = true;
+    localDirectoryRequestId += 1;
     error = "";
     try {
       if (leftSession) await closeSftpSession(leftSession.id);
@@ -303,6 +322,10 @@
         const host = hosts.find((candidate) => candidate.id === hostId);
         if (!host) throw new Error("The selected host no longer exists.");
         const opened = await openSftpSession(host);
+        if (componentDisposed) {
+          await closeSftpSession(opened.id);
+          return;
+        }
         leftSession = opened;
         leftHostId = host.id;
         await openLocalDirectory(opened.homePath);
@@ -310,13 +333,14 @@
         await openLocalDirectory(homePath);
       }
     } catch (cause) {
+      if (componentDisposed) return;
       const failure = errorMessage(cause);
       leftSession = null;
       leftHostId = "";
       await openLocalDirectory(homePath);
       error = failure;
     } finally {
-      leftConnecting = false;
+      if (!componentDisposed) leftConnecting = false;
     }
   }
 
@@ -341,18 +365,25 @@
     error = "";
     try {
       if (session) await closeSftpSession(session.id);
-      session = await openSftpSession(host);
-      remoteHome = session.homePath;
+      remoteDirectoryRequestId += 1;
+      const opened = await openSftpSession(host);
+      if (componentDisposed) {
+        await closeSftpSession(opened.id);
+        return;
+      }
+      session = opened;
+      remoteHome = opened.homePath;
       remoteScrollPositions.clear();
       remotePath = "";
       remoteHistory = [];
       remoteHistoryIndex = -1;
       await openRemoteDirectory(remoteHome);
     } catch (cause) {
+      if (componentDisposed) return;
       session = null;
       error = errorMessage(cause);
     } finally {
-      connecting = false;
+      if (!componentDisposed) connecting = false;
     }
   }
 
@@ -361,6 +392,7 @@
       error = "Stop the current transfer before closing the remote host.";
       return;
     }
+    remoteDirectoryRequestId += 1;
     if (session) await closeSftpSession(session.id);
     session = null;
     remoteEntries = [];
@@ -382,14 +414,18 @@
   }
 
   async function openRemoteDirectory(path: string, remember = true) {
-    if (!session) return;
+    const activeSession = session;
+    if (!activeSession) return;
     if (remotePath && remoteFileListElement) {
       remoteScrollPositions.set(remotePath, remoteFileListElement.scrollTop);
     }
+    const requestId = ++remoteDirectoryRequestId;
     remoteLoading = true;
     error = "";
     try {
-      remoteEntries = await listRemoteEntries(session.id, path);
+      const entries = await listRemoteEntries(activeSession.id, path);
+      if (componentDisposed || requestId !== remoteDirectoryRequestId) return;
+      remoteEntries = entries;
       remotePath = path;
       selectedRemote = null;
       if (remember) {
@@ -398,12 +434,15 @@
         remoteHistoryIndex = next.index;
       }
     } catch (cause) {
-      error = errorMessage(cause);
+      if (!componentDisposed && requestId === remoteDirectoryRequestId) {
+        error = errorMessage(cause);
+      }
     } finally {
-      remoteLoading = false;
+      if (requestId === remoteDirectoryRequestId) remoteLoading = false;
     }
+    if (componentDisposed || requestId !== remoteDirectoryRequestId) return;
     await tick();
-    if (remotePath === path && remoteFileListElement) {
+    if (requestId === remoteDirectoryRequestId && remotePath === path && remoteFileListElement) {
       remoteFileListElement.scrollTop = remoteScrollPositions.get(path) ?? 0;
     }
   }

@@ -180,6 +180,7 @@ pub fn tunnel_start(
     command
         .arg("-N")
         .arg("-T")
+        .env("LC_ALL", "C")
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("SSH_ASKPASS")
         .env_remove("SSH_ASKPASS_REQUIRE")

@@ -5639,6 +5639,14 @@ select:focus-visible {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.manager-grid.forwarding-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(480px, 100%), 1fr));
+}
+
+.manager-grid.forwarding-grid.list-view {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .manager-card {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) auto;

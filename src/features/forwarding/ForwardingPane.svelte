@@ -50,6 +50,7 @@
   let collectionQuery = $state("");
   let editorBaseline = $state<string | null>(null);
   const activePortConflictDialogs = new Set<string>();
+  let statesRefreshPromise: Promise<void> | null = null;
   const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
   const visibleRules = $derived.by(() =>
     rules
@@ -102,11 +103,19 @@
     }
   }
 
-  async function refreshStates() {
-    try {
+  function refreshStates(): Promise<void> {
+    if (statesRefreshPromise) return statesRefreshPromise;
+    const refreshPromise = (async () => {
+      try {
       const states = await tunnelStates();
       const previouslyRunning = runningIds;
-      runningIds = new Set(states.filter((state) => state.running).map((state) => state.id));
+      const nextRunningIds = new Set(states.filter((state) => state.running).map((state) => state.id));
+      if (
+        nextRunningIds.size !== runningIds.size ||
+        [...nextRunningIds].some((id) => !runningIds.has(id))
+      ) {
+        runningIds = nextRunningIds;
+      }
       const failed = states.find(
         (state) =>
           !state.running &&
@@ -131,9 +140,14 @@
           isError = true;
         }
       }
-    } catch {
-      // The next explicit action will surface a useful error.
-    }
+      } catch {
+        // The next explicit action will surface a useful error.
+      }
+    })();
+    statesRefreshPromise = refreshPromise;
+    return refreshPromise.finally(() => {
+      if (statesRefreshPromise === refreshPromise) statesRefreshPromise = null;
+    });
   }
 
   async function resolveLocalPortConflict(rule: PortForward) {
@@ -537,7 +551,7 @@
         </div>
       {:else}
         <div
-          class="manager-grid selectable-grid"
+          class="manager-grid forwarding-grid selectable-grid"
           role="list"
           class:list-view={collectionView === "list"}
         >

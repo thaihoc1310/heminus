@@ -415,18 +415,10 @@ pub async fn sftp_remove(
     manager: State<'_, SftpManager>,
     id: Uuid,
     path: String,
-    is_directory: bool,
+    _is_directory: bool,
 ) -> Result<(), String> {
     let connection = manager.get(id)?;
-    if is_directory {
-        remove_remote_tree(&connection, path).await
-    } else {
-        connection
-            .session
-            .remove_file(path)
-            .await
-            .map_err(|error| error.to_string())
-    }
+    remove_remote_entry(&connection, path).await
 }
 
 async fn remove_remote_tree(connection: &SftpConnection, path: String) -> Result<(), String> {
@@ -662,40 +654,7 @@ async fn upload_single_file(
         let _ = connection.session.remove_file(&temporary_path).await;
         return Err(error.to_string());
     }
-    let existing_backup = if connection
-        .session
-        .metadata(remote_path.clone())
-        .await
-        .is_ok()
-    {
-        let backup_path = remote_hidden_sibling(&remote_path, "backup")?;
-        connection
-            .session
-            .rename(remote_path.clone(), backup_path.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        Some(backup_path)
-    } else {
-        None
-    };
-    if let Err(error) = connection
-        .session
-        .rename(temporary_path.clone(), remote_path.clone())
-        .await
-    {
-        if let Some(backup_path) = &existing_backup {
-            let _ = connection
-                .session
-                .rename(backup_path.clone(), remote_path)
-                .await;
-        }
-        let _ = connection.session.remove_file(&temporary_path).await;
-        return Err(error.to_string());
-    }
-    if let Some(backup_path) = existing_backup {
-        let _ = connection.session.remove_file(backup_path).await;
-    }
-    Ok(())
+    commit_remote_staging(connection, temporary_path, remote_path, cancelled).await
 }
 
 #[tauri::command]
@@ -841,14 +800,12 @@ async fn download_single_file(
         let _ = tokio::fs::remove_file(&temporary_path).await;
         return Err(error);
     }
-    destination
-        .flush()
-        .await
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = destination.flush().await {
+        let _ = tokio::fs::remove_file(&temporary_path).await;
+        return Err(error.to_string());
+    }
     drop(destination);
-    tokio::fs::rename(&temporary_path, &local_path)
-        .await
-        .map_err(|error| error.to_string())
+    commit_local_staging(temporary_path, local_path, cancelled).await
 }
 
 #[tauri::command]
@@ -1006,44 +963,13 @@ async fn transfer_remote_single_file(
         let _ = transfer.target.session.remove_file(&temporary_path).await;
         return Err(error.to_string());
     }
-    let existing_backup = if transfer
-        .target
-        .session
-        .metadata(target_path.clone())
-        .await
-        .is_ok()
-    {
-        let backup_path = remote_hidden_sibling(&target_path, "backup")?;
-        transfer
-            .target
-            .session
-            .rename(target_path.clone(), backup_path.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        Some(backup_path)
-    } else {
-        None
-    };
-    if let Err(error) = transfer
-        .target
-        .session
-        .rename(temporary_path.clone(), target_path.clone())
-        .await
-    {
-        if let Some(backup_path) = &existing_backup {
-            let _ = transfer
-                .target
-                .session
-                .rename(backup_path.clone(), target_path)
-                .await;
-        }
-        let _ = transfer.target.session.remove_file(&temporary_path).await;
-        return Err(error.to_string());
-    }
-    if let Some(backup_path) = existing_backup {
-        let _ = transfer.target.session.remove_file(backup_path).await;
-    }
-    Ok(())
+    commit_remote_staging(
+        transfer.target,
+        temporary_path,
+        target_path,
+        transfer.cancelled,
+    )
+    .await
 }
 
 async fn copy_with_progress<R, W>(

@@ -305,6 +305,8 @@
       if (terminalToolsCloseTimer !== null) {
         window.clearTimeout(terminalToolsCloseTimer);
       }
+      for (const timer of appearanceSaveTimers.values()) window.clearTimeout(timer);
+      appearanceSaveTimers.clear();
     };
   });
 
@@ -990,7 +992,7 @@
     return groupRows().filter((row) => !blocked.has(row.group.id));
   }
 
-  function visibleHosts(): Host[] {
+  const visibleHostList = $derived.by(() => {
     let candidates = hosts;
     if (selectedGroupId) {
       const ids = groupAndDescendantIds(selectedGroupId);
@@ -1022,7 +1024,7 @@
         hostCollectionSort
       )
     );
-  }
+  });
 
   function allHostTags(): string[] {
     return collectHostTags(hosts);
@@ -3132,18 +3134,18 @@
                   </section>
                 {/if}
 
-                {#if visibleHosts().length > 0}
+                {#if visibleHostList.length > 0}
                   <section class="vault-section">
                     <header>
                       <h2>Hosts</h2>
-                      <span>{visibleHosts().length} shown · {hosts.length} saved</span>
+                      <span>{visibleHostList.length} shown · {hosts.length} saved</span>
                     </header>
                     <div
                       class="host-grid selectable-grid"
                       role="list"
                       class:list-view={hostCollectionView === "list"}
                     >
-                      {#each visibleHosts() as host (host.id)}
+                      {#each visibleHostList as host (host.id)}
                         <article
                           class="host-card"
                           class:selected={selectedHostIds.includes(host.id)}
@@ -3181,7 +3183,7 @@
                   </section>
                 {/if}
 
-                {#if directChildGroups().length === 0 && visibleHosts().length === 0}
+                {#if directChildGroups().length === 0 && visibleHostList.length === 0}
                   <div class="empty-page compact-empty">
                     <div class="empty-glyph"><Icon name={query.trim() ? "search" : "server"} size={30} /></div>
                     <h2>{query.trim() ? "No matching hosts" : "This group is empty"}</h2>

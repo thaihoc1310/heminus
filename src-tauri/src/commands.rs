@@ -619,8 +619,8 @@ pub fn list_local_entries(path: Option<PathBuf>) -> Result<Vec<LocalEntry>, Stri
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
         .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            let file_type = entry.file_type().ok()?;
+            let metadata = entry.path().symlink_metadata().ok()?;
+            let file_type = metadata.file_type();
             Some(LocalEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 path: entry.path(),
@@ -674,19 +674,24 @@ pub fn create_local_directory(path: PathBuf) -> Result<(), String> {
 
 #[tauri::command]
 pub fn rename_local_entry(old_path: PathBuf, new_path: PathBuf) -> Result<(), String> {
-    let source = canonical_local_path(&old_path)?;
+    let source = safe_existing_local_entry(&old_path)?;
     let target = safe_local_destination(&new_path)?;
     fs::rename(source, target).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn remove_local_entry(path: PathBuf, is_directory: bool) -> Result<(), String> {
+pub fn remove_local_entry(path: PathBuf, _is_directory: bool) -> Result<(), String> {
     let home = fs::canonicalize(home_dir()?).map_err(|error| error.to_string())?;
-    let target = canonical_local_path(&path)?;
-    if target == home || target.parent().is_none() {
+    remove_local_entry_at(&path, &home)
+}
+
+fn remove_local_entry_at(path: &Path, protected_home: &Path) -> Result<(), String> {
+    let target = safe_existing_local_entry(path)?;
+    if target == protected_home || target.parent().is_none() {
         return Err("The home and root directories cannot be removed".into());
     }
-    if is_directory {
+    let metadata = fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(target).map_err(|error| error.to_string())
     } else {
         fs::remove_file(target).map_err(|error| error.to_string())
@@ -698,7 +703,14 @@ pub fn set_local_permissions(path: PathBuf, mode: u32) -> Result<(), String> {
     if mode > 0o7777 {
         return Err("Permissions must be an octal mode between 0000 and 7777".into());
     }
-    let target = canonical_local_path(&path)?;
+    let target = safe_existing_local_entry(&path)?;
+    if fs::symlink_metadata(&target)
+        .map_err(|error| error.to_string())?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Changing permissions through a symbolic link is not supported".into());
+    }
     #[cfg(unix)]
     {
         fs::set_permissions(target, fs::Permissions::from_mode(mode))
@@ -920,6 +932,21 @@ fn canonical_local_path(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
+fn safe_existing_local_entry(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "Choose a valid file or folder".to_string())?;
+    if file_name == "." || file_name == ".." {
+        return Err("Choose a valid file or folder".into());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Choose a valid parent directory".to_string())?;
+    let target = canonical_local_path(parent)?.join(file_name);
+    fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+    Ok(target)
+}
+
 fn safe_local_destination(path: &Path) -> Result<PathBuf, String> {
     let file_name = path
         .file_name()
@@ -990,5 +1017,49 @@ mod tests {
             safe_local_destination(Path::new("/tmp/heminus-file")).unwrap(),
             PathBuf::from("/tmp/heminus-file")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_directory_symlink_keeps_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("heminus-symlink-remove-{}", Uuid::new_v4()));
+        let target = root.join("target");
+        let link = root.join("link");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+        symlink(&target, &link).unwrap();
+
+        remove_local_entry_at(&link, &root.join("protected-home")).unwrap();
+
+        assert!(!link.exists());
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_symlink_moves_the_link_not_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("heminus-symlink-rename-{}", Uuid::new_v4()));
+        let target = root.join("target");
+        let source = root.join("source-link");
+        let renamed = root.join("renamed-link");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+        symlink(&target, &source).unwrap();
+
+        fs::rename(
+            safe_existing_local_entry(&source).unwrap(),
+            safe_local_destination(&renamed).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!source.exists());
+        assert!(renamed.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Channel } from "@tauri-apps/api/core";
   import { FitAddon } from "@xterm/addon-fit";
+  import { SearchAddon } from "@xterm/addon-search";
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
@@ -99,12 +100,7 @@
   let searchResultIndex = $state(-1);
   let searchResultCount = $state(0);
   let searchInput = $state<HTMLInputElement>();
-  type TerminalSearchMatch = {
-    row: number;
-    column: number;
-    length: number;
-  };
-  let searchMatches: TerminalSearchMatch[] = [];
+  let searchAddonApi: SearchAddon | null = null;
   let lastCommandRequestId = "";
   let operatingSystemDetectionBuffer = "";
   let operatingSystemDetected = false;
@@ -187,92 +183,29 @@
     onHeaderPointerDown(event);
   }
 
-  function collectTerminalSearchMatches(query: string): TerminalSearchMatch[] {
-    const terminal = terminalApi;
-    if (!terminal || !query) return [];
-    const needle = query.toLowerCase();
-    const matches: TerminalSearchMatch[] = [];
-    const buffer = terminal.buffer.active;
-
-    for (let row = 0; row < buffer.length; row += 1) {
-      const line = buffer.getLine(row);
-      if (!line) continue;
-      let text = "";
-      const columns: number[] = [];
-
-      for (let column = 0; column < terminal.cols; column += 1) {
-        const cell = line.getCell(column);
-        if (!cell || cell.getWidth() === 0) continue;
-        const characters = cell.getChars() || " ";
-        text += characters;
-        for (let index = 0; index < characters.length; index += 1) {
-          columns.push(column);
-        }
-      }
-
-      const haystack = text.toLowerCase();
-      let offset = 0;
-      while (offset <= haystack.length - needle.length) {
-        const matchOffset = haystack.indexOf(needle, offset);
-        if (matchOffset < 0) break;
-        const startColumn = columns[matchOffset] ?? matchOffset;
-        const finalCharacter = matchOffset + needle.length - 1;
-        const finalColumn = columns[finalCharacter] ?? startColumn;
-        const finalCellWidth = line.getCell(finalColumn)?.getWidth() ?? 1;
-        matches.push({
-          row,
-          column: startColumn,
-          length: Math.max(1, finalColumn + finalCellWidth - startColumn)
-        });
-        offset = matchOffset + Math.max(1, needle.length);
-      }
-    }
-
-    return matches;
-  }
-
-  function selectTerminalSearchMatch(match: TerminalSearchMatch) {
-    const terminal = terminalApi;
-    if (!terminal) return;
-    terminal.select(match.column, match.row, match.length);
-    terminal.scrollToLine(
-      Math.max(0, match.row - Math.floor(terminal.rows / 2))
-    );
-  }
-
   function findInTerminal(
     direction: "next" | "previous",
     query = searchQuery
   ) {
-    const queryChanged = query !== searchQuery;
     searchQuery = query;
-    if (!query) {
-      terminalApi?.clearSelection();
-      searchMatches = [];
+    const addon = searchAddonApi;
+    if (!query || !addon) {
+      addon?.clearDecorations();
       searchResultIndex = -1;
       searchResultCount = 0;
       return;
     }
-
-    if (queryChanged || searchMatches.length === 0) {
-      searchMatches = collectTerminalSearchMatches(query);
-      searchResultCount = searchMatches.length;
-      searchResultIndex =
-        searchMatches.length === 0
-          ? -1
-          : direction === "previous"
-            ? searchMatches.length - 1
-            : 0;
-    } else if (direction === "previous") {
-      searchResultIndex =
-        (searchResultIndex - 1 + searchMatches.length) % searchMatches.length;
-    } else {
-      searchResultIndex = (searchResultIndex + 1) % searchMatches.length;
-    }
-
-    const match = searchMatches[searchResultIndex];
-    if (match) selectTerminalSearchMatch(match);
-    else terminalApi?.clearSelection();
+    const options = {
+      incremental: true,
+      decorations: {
+        matchBackground: "#465363",
+        matchOverviewRuler: "#718096",
+        activeMatchBackground: "#278fe8",
+        activeMatchColorOverviewRuler: "#278fe8"
+      }
+    };
+    if (direction === "previous") addon.findPrevious(query, options);
+    else addon.findNext(query, options);
   }
 
   function handleSearchInput(event: Event) {
@@ -292,8 +225,7 @@
 
   function closeTerminalSearch() {
     searchOpen = false;
-    terminalApi?.clearSelection();
-    searchMatches = [];
+    searchAddonApi?.clearDecorations();
     searchResultIndex = -1;
     searchResultCount = 0;
     terminalApi?.focus();
@@ -328,6 +260,7 @@
     let terminal: Terminal | null = null;
     let fitAddon: FitAddon | null = null;
     let webLinksAddon: WebLinksAddon | null = null;
+    let searchAddon: SearchAddon | null = null;
     let pendingCommands: string[] = [];
     let shellIntegrationRemainder = "";
     let outputTail = "";
@@ -355,8 +288,16 @@
       terminalApi = terminal;
       fitAddon = new FitAddon();
       webLinksAddon = new WebLinksAddon();
+      searchAddon = new SearchAddon({ highlightLimit: 2_000 });
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
+      terminal.loadAddon(searchAddon);
+      searchAddonApi = searchAddon;
+      searchAddon.onDidChangeResults((result) => {
+        if (disposed) return;
+        searchResultIndex = result.resultIndex;
+        searchResultCount = result.resultCount;
+      });
       terminal.open(container);
       container.addEventListener("focusin", activate);
       fitAddon.fit();
@@ -428,12 +369,28 @@
             resumeSessionId,
             handleTerminalEvent
           );
+          if (disposed) {
+            attachedEventUnlisten();
+            attachedEventUnlisten = null;
+            return;
+          }
           sessionId = resumeSessionId;
         } catch {
-          sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+          if (disposed) return;
+          const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+          if (disposed) {
+            void closeTerminal(openedSessionId);
+            return;
+          }
+          sessionId = openedSessionId;
         }
       } else {
-        sessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+        const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+        if (disposed) {
+          void closeTerminal(openedSessionId);
+          return;
+        }
+        sessionId = openedSessionId;
       }
       let lastPtyRows = terminal.rows;
       let lastPtyCols = terminal.cols;
@@ -571,7 +528,7 @@
     }
 
     void start().catch((cause: unknown) => {
-      error = cause instanceof Error ? cause.message : String(cause);
+      if (!disposed) error = cause instanceof Error ? cause.message : String(cause);
     });
 
     return () => {
@@ -583,9 +540,11 @@
       attachedEventUnlisten?.();
       attachedEventUnlisten = null;
       container?.removeEventListener("focusin", activate);
-      terminal?.dispose();
+      const mountedTerminal = terminal;
+      terminal = null;
+      mountedTerminal?.dispose();
       terminalApi = null;
-      searchMatches = [];
+      searchAddonApi = null;
       refitTerminal = null;
       externalCommandHandler = null;
       commandHandlerVersion += 1;

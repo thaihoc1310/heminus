@@ -8,29 +8,49 @@
   let request = $state<AppDialogRequest | null>(null);
   let value = $state("");
   let inputElement = $state<HTMLInputElement>();
+  const pendingRequests: AppDialogRequest[] = [];
 
-  onMount(() =>
-    registerDialogListener((next) => {
-      request = next;
-      value = next.kind === "prompt" ? (next.initialValue ?? "") : "";
-      requestAnimationFrame(() => inputElement?.focus());
-    })
-  );
+  function showNextRequest() {
+    if (request || pendingRequests.length === 0) return;
+    const next = pendingRequests.shift() ?? null;
+    request = next;
+    value = next?.kind === "prompt" ? (next.initialValue ?? "") : "";
+    requestAnimationFrame(() => inputElement?.focus());
+  }
+
+  function resolveRequest(target: AppDialogRequest, accepted: boolean) {
+    if (target.kind === "prompt") target.resolve(accepted ? value : null);
+    else if (target.kind === "confirm") target.resolve(accepted);
+    else target.resolve();
+  }
+
+  onMount(() => {
+    const unregister = registerDialogListener((next) => {
+      pendingRequests.push(next);
+      showNextRequest();
+    });
+    return () => {
+      unregister();
+      if (request) resolveRequest(request, false);
+      request = null;
+      for (const pending of pendingRequests.splice(0)) resolveRequest(pending, false);
+    };
+  });
 
   function cancel() {
     if (!request) return;
-    if (request.kind === "prompt") request.resolve(null);
-    else if (request.kind === "confirm") request.resolve(false);
-    else request.resolve();
+    const current = request;
     request = null;
+    resolveRequest(current, false);
+    showNextRequest();
   }
 
   function accept() {
     if (!request) return;
-    if (request.kind === "prompt") request.resolve(value);
-    else if (request.kind === "confirm") request.resolve(true);
-    else request.resolve();
+    const current = request;
     request = null;
+    resolveRequest(current, true);
+    showNextRequest();
   }
 
   function handleKeydown(event: KeyboardEvent) {

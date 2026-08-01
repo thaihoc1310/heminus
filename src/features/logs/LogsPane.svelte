@@ -26,6 +26,8 @@
   let collectionSort = $state<CollectionSort>("newest");
   let expanded = $state<Record<string, boolean>>({});
   let disconnecting = $state<Set<string>>(new Set());
+  let refreshPromise: Promise<void> | null = null;
+  let disposed = false;
 
   const visibleGroups = $derived.by(() => {
     const grouped = new Map<string, SessionRecord[]>();
@@ -57,22 +59,37 @@
   });
 
   onMount(() => {
-    void listHosts("").then((items) => (hosts = items));
+    disposed = false;
+    void listHosts("").then((items) => {
+      if (!disposed) hosts = items;
+    });
     void refresh();
     const timer = window.setInterval(() => void refresh(true), 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   });
 
-  async function refresh(silent = false) {
+  function refresh(silent = false): Promise<void> {
+    if (refreshPromise) return refreshPromise;
     if (!silent) loading = true;
-    try {
-      sessions = await listSessions();
-      error = "";
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      if (!silent) loading = false;
-    }
+    const current = (async () => {
+      try {
+        const nextSessions = await listSessions();
+        if (disposed) return;
+        sessions = nextSessions;
+        error = "";
+      } catch (cause) {
+        if (!disposed) error = cause instanceof Error ? cause.message : String(cause);
+      } finally {
+        if (!disposed && !silent) loading = false;
+      }
+    })();
+    refreshPromise = current;
+    return current.finally(() => {
+      if (refreshPromise === current) refreshPromise = null;
+    });
   }
 
   function formatDate(value: string): string {
