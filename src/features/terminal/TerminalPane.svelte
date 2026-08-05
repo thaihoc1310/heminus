@@ -102,9 +102,15 @@
   let snippetCatalog = $state<Snippet[]>([]);
   let commandHistory: string[] = [];
   let searchOpen = $state(false);
+  let searchSettingsOpen = $state(false);
   let searchQuery = $state("");
   let searchResultIndex = $state(-1);
   let searchResultCount = $state(0);
+  let searchCaseSensitive = $state(false);
+  let searchWholeWord = $state(false);
+  let searchRegex = $state(false);
+  let searchWrapAround = $state(true);
+  let searchError = $state("");
   let searchInput = $state<HTMLInputElement>();
   let searchAddonApi: SearchAddon | null = null;
   let lastCommandRequestId = "";
@@ -196,17 +202,28 @@
 
   function findInTerminal(
     direction: "next" | "previous",
-    query = searchQuery
+    query = searchQuery,
+    force = false
   ) {
+    const queryChanged = query !== searchQuery;
     searchQuery = query;
     const addon = searchAddonApi;
     if (!query || !addon) {
       addon?.clearDecorations();
       searchResultIndex = -1;
       searchResultCount = 0;
+      searchError = "";
       return;
     }
+    if (!force && !queryChanged && !searchWrapAround && searchResultCount > 0) {
+      const reachedStart = direction === "previous" && searchResultIndex <= 0;
+      const reachedEnd = direction === "next" && searchResultIndex >= searchResultCount - 1;
+      if (reachedStart || reachedEnd) return;
+    }
     const options = {
+      caseSensitive: searchCaseSensitive,
+      wholeWord: searchWholeWord,
+      regex: searchRegex,
       incremental: true,
       decorations: {
         matchBackground: "#465363",
@@ -215,8 +232,24 @@
         activeMatchColorOverviewRuler: "#278fe8"
       }
     };
-    if (direction === "previous") addon.findPrevious(query, options);
-    else addon.findNext(query, options);
+    try {
+      if (direction === "previous") addon.findPrevious(query, options);
+      else addon.findNext(query, options);
+      searchError = "";
+    } catch {
+      addon.clearDecorations();
+      searchResultIndex = -1;
+      searchResultCount = 0;
+      searchError = "Invalid regular expression";
+    }
+  }
+
+  function refreshTerminalSearch() {
+    searchAddonApi?.clearDecorations();
+    searchResultIndex = -1;
+    searchResultCount = 0;
+    findInTerminal("next", searchQuery, true);
+    searchInput?.focus();
   }
 
   function handleSearchInput(event: Event) {
@@ -236,9 +269,11 @@
 
   function closeTerminalSearch() {
     searchOpen = false;
+    searchSettingsOpen = false;
     searchAddonApi?.clearDecorations();
     searchResultIndex = -1;
     searchResultCount = 0;
+    searchError = "";
     terminalApi?.focus();
   }
 
@@ -653,37 +688,97 @@
   {#if searchOpen}
     <div
       class="terminal-search"
+      class:expanded={searchSettingsOpen}
       role="search"
       onpointerdown={(event) => event.stopPropagation()}
     >
-      <Icon name="search" size={15} />
-      <input
-        bind:this={searchInput}
-        value={searchQuery}
-        aria-label="Find in terminal"
-        placeholder="Find"
-        spellcheck="false"
-        oninput={handleSearchInput}
-        onkeydown={handleSearchKeydown}
-      />
-      <span class="terminal-search-count">
-        {searchResultCount > 0 ? searchResultIndex + 1 : 0}/{searchResultCount}
-      </span>
-      <button
-        class="terminal-search-previous"
-        title="Previous match (Shift+Enter)"
-        disabled={!searchQuery}
-        onclick={() => findInTerminal("previous")}
-      ><Icon name="chevron" size={15} /></button>
-      <button
-        class="terminal-search-next"
-        title="Next match (Enter)"
-        disabled={!searchQuery}
-        onclick={() => findInTerminal("next")}
-      ><Icon name="chevron" size={15} /></button>
-      <button title="Close (Escape)" onclick={closeTerminalSearch}>
-        <Icon name="close" size={14} />
-      </button>
+      <div class="terminal-search-bar">
+        <Icon name="search" size={15} />
+        <input
+          bind:this={searchInput}
+          class:invalid={Boolean(searchError)}
+          value={searchQuery}
+          aria-label="Find in terminal"
+          aria-invalid={Boolean(searchError)}
+          title={searchError}
+          placeholder="Find"
+          spellcheck="false"
+          oninput={handleSearchInput}
+          onkeydown={handleSearchKeydown}
+        />
+        <span class="terminal-search-count">
+          {searchResultCount > 0 ? searchResultIndex + 1 : 0}/{searchResultCount}
+        </span>
+        <button
+          class="terminal-search-settings-toggle"
+          class:active={searchSettingsOpen}
+          title="Search settings"
+          aria-label="Search settings"
+          aria-expanded={searchSettingsOpen}
+          onclick={() => searchSettingsOpen = !searchSettingsOpen}
+        ><Icon name="appearance" size={15} /></button>
+        <button
+          class="terminal-search-previous"
+          title="Previous match (Shift+Enter)"
+          disabled={!searchQuery}
+          onclick={() => findInTerminal("previous")}
+        ><Icon name="chevron" size={15} /></button>
+        <button
+          class="terminal-search-next"
+          title="Next match (Enter)"
+          disabled={!searchQuery}
+          onclick={() => findInTerminal("next")}
+        ><Icon name="chevron" size={15} /></button>
+        <button title="Close (Escape)" onclick={closeTerminalSearch}>
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+      {#if searchSettingsOpen}
+        <div class="terminal-search-options">
+          <label>
+            <input
+              type="checkbox"
+              checked={searchCaseSensitive}
+              onchange={() => {
+                searchCaseSensitive = !searchCaseSensitive;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match case</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchWholeWord}
+              onchange={() => {
+                searchWholeWord = !searchWholeWord;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match entire word only</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchRegex}
+              onchange={() => {
+                searchRegex = !searchRegex;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match as regular expression</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchWrapAround}
+              onchange={() => searchWrapAround = !searchWrapAround}
+            />
+            <span>Wrap around</span>
+          </label>
+          {#if searchError}<small role="alert">{searchError}</small>{/if}
+        </div>
+      {/if}
     </div>
   {/if}
   <div class="terminal-mount" bind:this={container}></div>

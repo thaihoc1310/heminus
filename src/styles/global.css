@@ -3589,12 +3589,11 @@ select:focus-visible {
 }
 
 .terminal-config-copy small {
-  overflow: hidden;
   color: var(--terminal-tool-muted);
   font-size: 9px;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .terminal-shortcut-button {
@@ -4082,12 +4081,10 @@ select:focus-visible {
   z-index: 35;
   top: 10px;
   right: 14px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  width: min(370px, calc(100% - 28px));
-  height: 38px;
-  padding: 0 5px 0 10px;
+  display: grid;
+  width: min(410px, calc(100% - 28px));
+  min-height: 38px;
+  padding: 0 5px;
   color: var(--terminal-header-foreground, var(--terminal-foreground));
   border: 1px solid var(--terminal-header-border, #30363d);
   border-radius: 10px;
@@ -4096,16 +4093,29 @@ select:focus-visible {
   animation: terminal-search-in 120ms ease-out both;
 }
 
+.terminal-search.expanded {
+  padding-bottom: 9px;
+}
+
+.terminal-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 38px;
+  padding-left: 5px;
+}
+
 .terminal-pane.workspace-pane .terminal-search {
   top: 43px;
 }
 
-.terminal-search > svg {
+.terminal-search-bar > svg {
   flex: 0 0 auto;
   color: var(--terminal-header-muted, #8b949e);
 }
 
-.terminal-search input {
+.terminal-search-bar > input {
   flex: 1 1 auto;
   min-width: 36px;
   height: 100%;
@@ -4118,13 +4128,13 @@ select:focus-visible {
   box-shadow: none;
 }
 
-.terminal-search input:focus,
-.terminal-search input:focus-visible {
+.terminal-search-bar > input:focus,
+.terminal-search-bar > input:focus-visible {
   outline: 0;
   box-shadow: none;
 }
 
-.terminal-search input::placeholder {
+.terminal-search-bar > input::placeholder {
   color: var(--terminal-header-muted, #8b949e);
 }
 
@@ -4136,7 +4146,7 @@ select:focus-visible {
   text-align: right;
 }
 
-.terminal-search button {
+.terminal-search-bar > button {
   display: grid;
   flex: 0 0 27px;
   width: 27px;
@@ -4147,12 +4157,13 @@ select:focus-visible {
   cursor: pointer;
 }
 
-.terminal-search button:hover:not(:disabled) {
+.terminal-search-bar > button:hover:not(:disabled),
+.terminal-search-settings-toggle.active {
   color: var(--terminal-header-foreground, var(--terminal-foreground));
   background: var(--terminal-control-hover, #ffffff12);
 }
 
-.terminal-search button:disabled {
+.terminal-search-bar > button:disabled {
   opacity: 0.35;
   cursor: default;
 }
@@ -4163,6 +4174,35 @@ select:focus-visible {
 
 .terminal-search-next svg {
   transform: rotate(90deg);
+}
+
+.terminal-search-options {
+  display: grid;
+  gap: 7px;
+  padding: 4px 9px 2px;
+  border-top: 1px solid var(--terminal-header-border, #30363d);
+}
+
+.terminal-search-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 21px;
+  color: var(--terminal-header-foreground, var(--terminal-foreground));
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.terminal-search-options input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--terminal-active-background, #278fe8);
+}
+
+.terminal-search-options small {
+  color: #f28b82;
+  font-size: 9px;
 }
 
 @keyframes terminal-search-in {
