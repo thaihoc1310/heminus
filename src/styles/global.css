@@ -3535,6 +3535,49 @@ select:focus-visible {
   background: var(--terminal-tool-card);
 }
 
+.terminal-config-number-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.terminal-config-stepper {
+  display: grid;
+  grid-template-columns: 26px 28px 26px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--terminal-tool-border);
+  border-radius: 7px;
+  background: var(--terminal-tool-hover);
+}
+
+.terminal-config-stepper button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  color: var(--terminal-tool-muted);
+  border: 0;
+  background: transparent;
+  font: 500 15px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+}
+
+.terminal-config-stepper button:hover:not(:disabled),
+.terminal-config-stepper button:focus-visible {
+  color: var(--terminal-tool-foreground);
+  background: color-mix(in srgb, var(--terminal-tool-accent) 16%, transparent);
+  outline: none;
+}
+
+.terminal-config-stepper button:disabled {
+  opacity: 0.3;
+}
+
+.terminal-config-stepper output {
+  color: var(--terminal-tool-foreground);
+  font: 600 10px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+  text-align: center;
+}
+
 .terminal-config-copy {
   display: grid;
   min-width: 0;

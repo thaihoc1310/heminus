@@ -12,6 +12,7 @@
     formatTerminalShortcut,
     setHistorySuggestions,
     setHistorySuggestionsShortcut,
+    setSuggestionMinimumCharacters,
     shortcutFromKeyboardEvent,
     terminalPreferences
   } from "../../lib/terminalPreferences";
@@ -496,6 +497,31 @@
               aria-hidden="true"
             ><i></i></span>
           </button>
+        </div>
+        <div class="terminal-config-row terminal-config-number-row">
+          <span class="terminal-config-copy">
+            <strong>Minimum characters</strong>
+            <small>Start suggesting after this many typed characters.</small>
+          </span>
+          <div class="terminal-config-stepper" aria-label="Minimum suggestion characters">
+            <button
+              title="Decrease minimum characters"
+              aria-label="Decrease minimum characters"
+              disabled={$terminalPreferences.suggestionMinimumCharacters <= 1}
+              onclick={() => setSuggestionMinimumCharacters(
+                $terminalPreferences.suggestionMinimumCharacters - 1
+              )}
+            >−</button>
+            <output aria-live="polite">{$terminalPreferences.suggestionMinimumCharacters}</output>
+            <button
+              title="Increase minimum characters"
+              aria-label="Increase minimum characters"
+              disabled={$terminalPreferences.suggestionMinimumCharacters >= 10}
+              onclick={() => setSuggestionMinimumCharacters(
+                $terminalPreferences.suggestionMinimumCharacters + 1
+              )}
+            >+</button>
+          </div>
         </div>
       </section>
     </div>

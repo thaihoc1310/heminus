@@ -3,12 +3,14 @@ import { writable } from "svelte/store";
 export interface TerminalPreferences {
   historySuggestions: boolean;
   historySuggestionsShortcut: string;
+  suggestionMinimumCharacters: number;
 }
 
 const storageKey = "heminus-terminal-preferences";
 const defaults: TerminalPreferences = {
   historySuggestions: true,
-  historySuggestionsShortcut: "Ctrl+Shift+H"
+  historySuggestionsShortcut: "Ctrl+Shift+H",
+  suggestionMinimumCharacters: 2
 };
 
 type ShortcutEvent = Pick<
@@ -23,6 +25,12 @@ function normalizedShortcutKey(key: string): string | null {
   return normalized;
 }
 
+export function normalizeSuggestionMinimumCharacters(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return defaults.suggestionMinimumCharacters;
+  return Math.max(1, Math.min(10, Math.round(parsed)));
+}
+
 function load(): TerminalPreferences {
   if (typeof localStorage === "undefined") return defaults;
   try {
@@ -30,7 +38,10 @@ function load(): TerminalPreferences {
     return {
       historySuggestions: saved.historySuggestions ?? defaults.historySuggestions,
       historySuggestionsShortcut:
-        saved.historySuggestionsShortcut ?? defaults.historySuggestionsShortcut
+        saved.historySuggestionsShortcut ?? defaults.historySuggestionsShortcut,
+      suggestionMinimumCharacters: normalizeSuggestionMinimumCharacters(
+        saved.suggestionMinimumCharacters ?? defaults.suggestionMinimumCharacters
+      )
     };
   } catch {
     return defaults;
@@ -52,6 +63,16 @@ export function setHistorySuggestionsShortcut(shortcut: string) {
   terminalPreferences.update((current) => {
     if (current.historySuggestionsShortcut === shortcut) return current;
     const next = { ...current, historySuggestionsShortcut: shortcut };
+    localStorage.setItem(storageKey, JSON.stringify(next));
+    return next;
+  });
+}
+
+export function setSuggestionMinimumCharacters(value: number) {
+  const suggestionMinimumCharacters = normalizeSuggestionMinimumCharacters(value);
+  terminalPreferences.update((current) => {
+    if (current.suggestionMinimumCharacters === suggestionMinimumCharacters) return current;
+    const next = { ...current, suggestionMinimumCharacters };
     localStorage.setItem(storageKey, JSON.stringify(next));
     return next;
   });

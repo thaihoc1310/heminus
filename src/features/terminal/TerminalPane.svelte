@@ -284,7 +284,8 @@
       if (disposed) return;
 
       terminal = new Terminal({
-        allowProposedApi: false,
+        // SearchAddon uses xterm's decoration API for highlights and result counts.
+        allowProposedApi: true,
         convertEol: false,
         cursorBlink: true,
         fontFamily: "'JetBrains Mono', 'Ubuntu Mono', monospace",
@@ -479,7 +480,9 @@
         suggestions = buildTerminalSuggestions(
           commandInput,
           snippetCatalog,
-          $terminalPreferences.historySuggestions ? commandHistory : []
+          $terminalPreferences.historySuggestions ? commandHistory : [],
+          8,
+          $terminalPreferences.suggestionMinimumCharacters
         );
         suggestionIndex = -1;
         requestAnimationFrame(positionSuggestions);

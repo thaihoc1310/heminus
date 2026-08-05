@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatTerminalShortcut,
   matchesTerminalShortcut,
+  normalizeSuggestionMinimumCharacters,
   shortcutFromKeyboardEvent
 } from "./terminalPreferences";
 
@@ -40,5 +41,12 @@ describe("terminal preferences shortcuts", () => {
         "Ctrl+Shift+H"
       )
     ).toBe(false);
+  });
+
+  it("normalizes the minimum suggestion character count", () => {
+    expect(normalizeSuggestionMinimumCharacters(undefined)).toBe(2);
+    expect(normalizeSuggestionMinimumCharacters(0)).toBe(1);
+    expect(normalizeSuggestionMinimumCharacters(4.6)).toBe(5);
+    expect(normalizeSuggestionMinimumCharacters(20)).toBe(10);
   });
 });

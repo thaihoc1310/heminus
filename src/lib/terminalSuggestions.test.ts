@@ -26,6 +26,17 @@ describe("terminal suggestions", () => {
     ]);
   });
 
+  it("waits for the configured minimum number of typed characters", () => {
+    expect(buildTerminalSuggestions("p", [snippet], ["pwd"])).toEqual([]);
+    expect(buildTerminalSuggestions("pi", [snippet], ["pwd"])).toEqual([
+      { kind: "snippet", command: "ping google.com", detail: "Ping Google" }
+    ]);
+    expect(buildTerminalSuggestions("p", [snippet], ["pwd"], 8, 1)).toEqual([
+      { kind: "snippet", command: "ping google.com", detail: "Ping Google" },
+      { kind: "history", command: "pwd", detail: "History" }
+    ]);
+  });
+
   it("tracks typed commands, backspace, and submissions", () => {
     expect(updateCommandInput("ping go", "\x7foogle.com\r")).toEqual({
       input: "",
