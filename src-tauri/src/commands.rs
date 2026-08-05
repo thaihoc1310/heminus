@@ -114,7 +114,7 @@ fn build_detached_terminal_window(
     } else {
         title.trim()
     };
-    if let Err(error) = build_terminal_webview(app, &label, window_title, position, (1120.0, 720.0))
+    if let Err(error) = build_terminal_webview(app, &label, window_title, position, (720.0, 520.0))
     {
         if let Ok(mut payloads) = state.detached_payloads.lock() {
             payloads.remove(&label);
