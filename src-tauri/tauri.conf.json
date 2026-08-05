@@ -45,6 +45,7 @@
     "longDescription": "Heminus is a focused, local-first SSH, SFTP and terminal workspace.",
     "linux": {
       "deb": {
+        "desktopTemplate": "linux/heminus.desktop.hbs",
         "depends": [
           "openssh-client"
         ]

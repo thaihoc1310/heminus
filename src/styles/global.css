@@ -3487,6 +3487,123 @@ select:focus-visible {
   padding-top: 16px;
 }
 
+.terminal-config-scroll {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  padding-top: 16px;
+}
+
+.terminal-config-section {
+  display: grid;
+  gap: 9px;
+}
+
+.terminal-config-section > header {
+  display: grid;
+  gap: 3px;
+  padding: 0 2px;
+}
+
+.terminal-config-section > header strong {
+  font-size: 12px;
+}
+
+.terminal-config-section > header small {
+  color: var(--terminal-tool-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.terminal-config-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 62px;
+  padding: 9px 10px;
+  color: var(--terminal-tool-foreground);
+  text-align: left;
+  border: 1px solid var(--terminal-tool-border);
+  border-radius: 11px;
+  background: var(--terminal-tool-card);
+  cursor: pointer;
+}
+
+.terminal-config-row:hover {
+  background: var(--terminal-tool-hover);
+}
+
+.terminal-config-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: var(--terminal-tool-accent);
+  border-radius: 9px;
+  background: var(--terminal-tool-active);
+}
+
+.terminal-config-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.terminal-config-copy strong {
+  font-size: 11px;
+}
+
+.terminal-config-copy small {
+  overflow: hidden;
+  color: var(--terminal-tool-muted);
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-config-row kbd {
+  color: var(--terminal-tool-muted);
+  font: 500 8px/1.2 "Ubuntu Sans", Ubuntu, sans-serif;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.terminal-config-switch {
+  position: relative;
+  width: 31px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--terminal-tool-muted) 38%, transparent);
+  transition: background 120ms ease;
+}
+
+.terminal-config-switch i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--terminal-tool-foreground);
+  transition: transform 120ms ease;
+}
+
+.terminal-config-switch.active {
+  background: var(--terminal-tool-accent);
+}
+
+.terminal-config-switch.active i {
+  transform: translateX(13px);
+}
+
+.terminal-config-action > svg {
+  color: var(--terminal-tool-muted);
+}
+
 .terminal-appearance-section {
   display: grid;
   gap: 8px;

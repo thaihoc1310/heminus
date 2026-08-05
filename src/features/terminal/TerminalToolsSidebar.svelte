@@ -8,6 +8,10 @@
     saveSnippet
   } from "../../lib/ipc";
   import { terminalThemes } from "../../lib/terminalThemes";
+  import {
+    setHistorySuggestions,
+    terminalPreferences
+  } from "../../lib/terminalPreferences";
   import type { Snippet, TerminalAppearance } from "../../lib/types";
 
   let {
@@ -19,6 +23,7 @@
     onrunall,
     onclose,
     onopenfull,
+    onopenlocalterminal,
     oncatalogchange = () => {}
   }: {
     appearance: TerminalAppearance;
@@ -29,10 +34,11 @@
     onrunall: (command: string) => void;
     onclose: () => void;
     onopenfull: () => void;
+    onopenlocalterminal: () => void;
     oncatalogchange?: (snippets: Snippet[]) => void;
   } = $props();
 
-  type SidebarSection = "snippets" | "appearance" | "history";
+  type SidebarSection = "snippets" | "appearance" | "history" | "config";
   type ToolSort = "newest" | "oldest" | "az" | "za";
 
   const sortOptions: { value: ToolSort; label: string }[] = [
@@ -257,6 +263,11 @@
         title="Appearance"
         onclick={() => setSection("appearance")}
       ><Icon name="appearance" size={18} /></button>
+      <button
+        class:active={section === "config"}
+        title="Terminal configuration"
+        onclick={() => setSection("config")}
+      ><Icon name="sliders" size={18} /></button>
     </nav>
     <button class="terminal-tools-close" title="Close terminal tools" onclick={onclose}>
       <Icon name="close" size={16} />
@@ -377,7 +388,7 @@
         </div>
       </section>
     </div>
-  {:else}
+  {:else if section === "history"}
     <div class="terminal-tools-toolbar history-toolbar">
       <label class="terminal-tool-search">
         <Icon name="search" size={15} />
@@ -433,6 +444,48 @@
           {/each}
         </div>
       {/if}
+    </div>
+  {:else}
+    <div class="terminal-tools-scroll terminal-config-scroll">
+      <section class="terminal-config-section">
+        <header>
+          <strong>Suggestions</strong>
+          <small>Choose what appears while you type.</small>
+        </header>
+        <button
+          class="terminal-config-row"
+          aria-pressed={$terminalPreferences.historySuggestions}
+          onclick={() => setHistorySuggestions(!$terminalPreferences.historySuggestions)}
+        >
+          <span class="terminal-config-icon"><Icon name="clock" size={17} /></span>
+          <span class="terminal-config-copy">
+            <strong>History suggestions</strong>
+            <small>Mix successful commands with snippets.</small>
+          </span>
+          <kbd>Ctrl Shift H</kbd>
+          <span
+            class="terminal-config-switch"
+            class:active={$terminalPreferences.historySuggestions}
+            aria-hidden="true"
+          ><i></i></span>
+        </button>
+      </section>
+
+      <section class="terminal-config-section">
+        <header>
+          <strong>Quick terminal</strong>
+          <small>Open a standalone local terminal without the Vault window.</small>
+        </header>
+        <button class="terminal-config-row terminal-config-action" onclick={onopenlocalterminal}>
+          <span class="terminal-config-icon"><Icon name="terminal" size={17} /></span>
+          <span class="terminal-config-copy">
+            <strong>Open local terminal</strong>
+            <small>Creates a new detached Heminus window.</small>
+          </span>
+          <kbd>Ctrl Alt H</kbd>
+          <Icon name="plus" size={15} />
+        </button>
+      </section>
     </div>
   {/if}
 

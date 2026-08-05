@@ -11,6 +11,7 @@ use std::{collections::HashMap, sync::Mutex};
 use heminus_storage::Database;
 use sftp::SftpManager;
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use terminal::TerminalManager;
 use tunnel::TunnelManager;
 
@@ -28,9 +29,22 @@ pub fn run() {
         .compact()
         .init();
 
+    let open_local_terminal_only = std::env::args_os().any(|argument| argument == "--new-terminal");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed
+                        && let Err(error) = commands::build_local_terminal_window(app)
+                    {
+                        tracing::warn!("Could not open the shortcut terminal: {error}");
+                    }
+                })
+                .build(),
+        )
+        .setup(move |app| {
             let database = Database::open_default()?;
             let ssh = ssh_runtime::SshRuntime::initialize()?;
             key_management::migrate_external_keys(&database, &ssh)?;
@@ -45,11 +59,24 @@ pub fn run() {
             app.manage(TerminalManager::default());
             app.manage(TunnelManager::default());
             app.manage(SftpManager::default());
+            if let Err(error) = app.global_shortcut().register("Ctrl+Alt+H") {
+                tracing::warn!("Could not register Ctrl+Alt+H: {error}");
+            }
+            if open_local_terminal_only {
+                if let Some(main) = app.get_webview_window("main") {
+                    main.hide()?;
+                }
+                commands::build_local_terminal_window(app.handle())?;
+                if let Some(main) = app.get_webview_window("main") {
+                    main.destroy()?;
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::create_detached_terminal_window,
+            commands::create_local_terminal_window,
             commands::transfer_terminal_tab,
             commands::take_detached_terminal_payload,
             commands::home_directory,

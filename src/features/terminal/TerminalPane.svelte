@@ -27,6 +27,10 @@
   } from "../../lib/types";
   import { terminalTheme } from "../../lib/terminalThemes";
   import {
+    terminalPreferences,
+    toggleHistorySuggestions
+  } from "../../lib/terminalPreferences";
+  import {
     detectHostOperatingSystem,
     rememberHostOperatingSystem
   } from "../../lib/hostOperatingSystem";
@@ -34,6 +38,7 @@
   import {
     buildTerminalSuggestions,
     highlightedCommand,
+    reconcileRenderedCommandInput,
     updateCommandInput,
     type TerminalSuggestion
   } from "../../lib/terminalSuggestions";
@@ -161,6 +166,11 @@
 
   $effect(() => {
     historyVersion;
+    const historySuggestions = $terminalPreferences.historySuggestions;
+    if (!historySuggestions) {
+      commandHistory = [];
+      return;
+    }
     const hostId = host?.id ?? null;
     let disposed = false;
     void listCommandHistory(hostId).then((items) => {
@@ -265,6 +275,7 @@
     let shellIntegrationRemainder = "";
     let outputTail = "";
     let sensitiveInput = false;
+    let commandStartPosition: { row: number; column: number } | null = null;
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
 
@@ -396,6 +407,27 @@
       let lastPtyCols = terminal.cols;
       onSessionReady(paneId, sessionId);
       const encoder = new TextEncoder();
+      const cursorPosition = () => terminal
+        ? {
+            row: terminal.buffer.active.baseY + terminal.buffer.active.cursorY,
+            column: terminal.buffer.active.cursorX
+          }
+        : null;
+      const renderedCommand = (): string | null => {
+        if (!terminal || !commandStartPosition) return null;
+        const buffer = terminal.buffer.active;
+        const endRow = buffer.baseY + buffer.cursorY;
+        if (endRow < commandStartPosition.row) return null;
+        const parts: string[] = [];
+        for (let row = commandStartPosition.row; row <= endRow; row += 1) {
+          const line = buffer.getLine(row);
+          if (!line) return null;
+          const from = row === commandStartPosition.row ? commandStartPosition.column : 0;
+          const to = row === endRow ? buffer.cursorX : terminal.cols;
+          parts.push(line.translateToString(false, from, to));
+        }
+        return parts.join("").trimEnd();
+      };
       const flush = () => {
         flushTimer = null;
         if (!sessionId || queuedInput.length === 0) return;
@@ -415,11 +447,13 @@
         if (flushTimer === null) flushTimer = window.setTimeout(flush, 4);
       };
       externalCommandHandler = (command: string, run: boolean) => {
+        commandStartPosition ??= cursorPosition();
         const data = `${command}${run ? "\r" : ""}`;
         queueData(data);
         const update = updateCommandInput(commandInput, data);
         commandInput = update.input;
         pendingCommands.push(...update.submitted);
+        if (update.submitted.length > 0) commandStartPosition = null;
         suggestions = [];
         suggestionIndex = -1;
         terminal?.focus();
@@ -441,7 +475,11 @@
         suggestionStyle = `left:${left}px;top:${Math.max(container.offsetTop + 8, top)}px;width:${width}px`;
       };
       const refreshSuggestions = () => {
-        suggestions = buildTerminalSuggestions(commandInput, snippetCatalog, commandHistory);
+        suggestions = buildTerminalSuggestions(
+          commandInput,
+          snippetCatalog,
+          $terminalPreferences.historySuggestions ? commandHistory : []
+        );
         suggestionIndex = -1;
         requestAnimationFrame(positionSuggestions);
       };
@@ -462,6 +500,12 @@
             suggestions = [];
           }
           return;
+        }
+        const submitting = data.includes("\r") || data.includes("\n");
+        if (!submitting) commandStartPosition ??= cursorPosition();
+        if (submitting) {
+          const rendered = renderedCommand();
+          commandInput = reconcileRenderedCommandInput(commandInput, rendered);
         }
         if (suggestions.length > 0) {
           if (data === "\x1b[A" || data === "\x1b[B") {
@@ -486,9 +530,24 @@
         for (const command of update.submitted) {
           pendingCommands.push(command);
         }
+        if (update.submitted.length > 0 || data.includes("\x03") || data.includes("\x15")) {
+          commandStartPosition = null;
+        }
         refreshSuggestions();
       });
       terminal.attachCustomKeyEventHandler((event) => {
+        if (
+          event.type === "keydown" &&
+          event.ctrlKey &&
+          event.shiftKey &&
+          event.key.toLowerCase() === "h"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleHistorySuggestions();
+          refreshSuggestions();
+          return false;
+        }
         if (
           event.type === "keydown" &&
           (event.ctrlKey || event.metaKey) &&

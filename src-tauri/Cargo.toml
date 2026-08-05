@@ -29,6 +29,7 @@ sha2 = "0.10.9"
 ssh-key = { version = "0.6.7", features = ["ed25519", "encryption", "getrandom"] }
 tauri = { version = "2.11.1", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
 tokio = { version = "1.48", features = ["fs", "io-util", "process", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

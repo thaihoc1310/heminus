@@ -1,0 +1,15 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}Comment={{comment}}{{/if}}
+Exec={{exec}}
+StartupWMClass=heminus-app
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+Actions=NewTerminal;
+
+[Desktop Action NewTerminal]
+Name=Open Local Terminal
+Exec={{exec}} --new-terminal
+Icon={{icon}}

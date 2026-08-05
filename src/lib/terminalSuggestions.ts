@@ -81,3 +81,11 @@ export function updateCommandInput(
   }
   return { input: current, submitted };
 }
+
+export function reconcileRenderedCommandInput(
+  trackedInput: string,
+  renderedInput: string | null
+): string {
+  if (!renderedInput || renderedInput.length < trackedInput.length) return trackedInput;
+  return renderedInput;
+}

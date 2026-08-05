@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTerminalSuggestions,
   highlightedCommand,
+  reconcileRenderedCommandInput,
   updateCommandInput
 } from "./terminalSuggestions";
 import type { Snippet } from "./types";
@@ -30,6 +31,11 @@ describe("terminal suggestions", () => {
       input: "",
       submitted: ["ping google.com"]
     });
+  });
+
+  it("uses the command rendered by shell completion before saving history", () => {
+    expect(reconcileRenderedCommandInput("cd Wor", "cd Workspace/")).toBe("cd Workspace/");
+    expect(reconcileRenderedCommandInput("printf complete", "printf com")).toBe("printf complete");
   });
 
   it("splits a command into highlighted segments", () => {
