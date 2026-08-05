@@ -710,14 +710,6 @@
           {searchResultCount > 0 ? searchResultIndex + 1 : 0}/{searchResultCount}
         </span>
         <button
-          class="terminal-search-settings-toggle"
-          class:active={searchSettingsOpen}
-          title="Search settings"
-          aria-label="Search settings"
-          aria-expanded={searchSettingsOpen}
-          onclick={() => searchSettingsOpen = !searchSettingsOpen}
-        ><Icon name="appearance" size={15} /></button>
-        <button
           class="terminal-search-previous"
           title="Previous match (Shift+Enter)"
           disabled={!searchQuery}
@@ -729,6 +721,14 @@
           disabled={!searchQuery}
           onclick={() => findInTerminal("next")}
         ><Icon name="chevron" size={15} /></button>
+        <button
+          class="terminal-search-settings-toggle"
+          class:active={searchSettingsOpen}
+          title="Search settings"
+          aria-label="Search settings"
+          aria-expanded={searchSettingsOpen}
+          onclick={() => searchSettingsOpen = !searchSettingsOpen}
+        ><Icon name="appearance" size={15} /></button>
         <button title="Close (Escape)" onclick={closeTerminalSearch}>
           <Icon name="close" size={14} />
         </button>

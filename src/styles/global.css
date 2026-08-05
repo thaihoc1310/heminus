@@ -4194,10 +4194,57 @@ select:focus-visible {
 }
 
 .terminal-search-options input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  place-content: center;
   width: 15px;
   height: 15px;
   margin: 0;
-  accent-color: var(--terminal-active-background, #278fe8);
+  border: 1px solid color-mix(
+    in srgb,
+    var(--terminal-header-muted, #8b949e) 72%,
+    transparent
+  );
+  border-radius: 4px;
+  background: color-mix(
+    in srgb,
+    var(--terminal-header-background, #181c21) 90%,
+    var(--terminal-header-foreground, #ffffff) 10%
+  );
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.terminal-search-options input[type="checkbox"]::before {
+  width: 4px;
+  height: 8px;
+  content: "";
+  border: solid var(--terminal-active-foreground, #ffffff);
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg) scale(0);
+  transition: transform 100ms ease;
+}
+
+.terminal-search-options input[type="checkbox"]:checked {
+  border-color: var(--terminal-active-background, #278fe8);
+  background: var(--terminal-active-background, #278fe8);
+}
+
+.terminal-search-options input[type="checkbox"]:checked::before {
+  transform: translateY(-1px) rotate(45deg) scale(1);
+}
+
+.terminal-search-options input[type="checkbox"]:hover {
+  border-color: var(--terminal-active-background, #278fe8);
+}
+
+.terminal-search-options input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(
+    in srgb,
+    var(--terminal-active-background, #278fe8) 48%,
+    transparent
+  );
+  outline-offset: 2px;
 }
 
 .terminal-search-options small {
