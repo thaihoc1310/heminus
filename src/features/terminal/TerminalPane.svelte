@@ -27,6 +27,7 @@
   } from "../../lib/types";
   import { terminalTheme } from "../../lib/terminalThemes";
   import {
+    matchesTerminalShortcut,
     terminalPreferences,
     toggleHistorySuggestions
   } from "../../lib/terminalPreferences";
@@ -538,9 +539,7 @@
       terminal.attachCustomKeyEventHandler((event) => {
         if (
           event.type === "keydown" &&
-          event.ctrlKey &&
-          event.shiftKey &&
-          event.key.toLowerCase() === "h"
+          matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
         ) {
           event.preventDefault();
           event.stopPropagation();

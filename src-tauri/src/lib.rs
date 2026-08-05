@@ -1,5 +1,6 @@
 mod commands;
 mod credential;
+mod desktop_integration;
 mod key_management;
 mod sftp;
 mod ssh_runtime;
@@ -59,8 +60,16 @@ pub fn run() {
             app.manage(TerminalManager::default());
             app.manage(TunnelManager::default());
             app.manage(SftpManager::default());
-            if let Err(error) = app.global_shortcut().register("Ctrl+Alt+H") {
-                tracing::warn!("Could not register Ctrl+Alt+H: {error}");
+            match desktop_integration::ensure_local_terminal_shortcut() {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Err(error) = app.global_shortcut().register("Ctrl+Alt+H") {
+                        tracing::warn!("Could not register Ctrl+Alt+H: {error}");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("Could not configure Ctrl+Alt+H: {error}");
+                }
             }
             if open_local_terminal_only {
                 if let Some(main) = app.get_webview_window("main") {
@@ -76,7 +85,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::create_detached_terminal_window,
-            commands::create_local_terminal_window,
             commands::transfer_terminal_tab,
             commands::take_detached_terminal_payload,
             commands::home_directory,

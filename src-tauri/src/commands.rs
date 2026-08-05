@@ -85,11 +85,6 @@ pub async fn create_detached_terminal_window(
     build_detached_terminal_window(&app, state.inner(), payload, &title, None)
 }
 
-#[tauri::command]
-pub fn create_local_terminal_window(app: AppHandle) -> Result<String, String> {
-    build_local_terminal_window(&app)
-}
-
 pub(crate) fn build_local_terminal_window(app: &AppHandle) -> Result<String, String> {
     let label = format!("detached-{}", Uuid::new_v4().simple());
     build_terminal_webview(app, &label, "Local Terminal", None)?;

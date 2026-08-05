@@ -14,7 +14,6 @@
   } from "./lib/dragPreview";
   import {
     createDetachedTerminalWindow,
-    createLocalTerminalWindow,
     deleteGroup,
     deleteHost,
     listHosts,
@@ -54,7 +53,11 @@
     splitPane
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
-  import { toggleHistorySuggestions } from "./lib/terminalPreferences";
+  import {
+    matchesTerminalShortcut,
+    terminalPreferences,
+    toggleHistorySuggestions
+  } from "./lib/terminalPreferences";
   import { parseQuickConnectInput } from "./lib/quickConnect";
   import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
@@ -278,11 +281,7 @@
     const onKeydown = (event: KeyboardEvent) => {
       if (
         page === "terminal" &&
-        event.ctrlKey &&
-        event.shiftKey &&
-        !event.altKey &&
-        !event.metaKey &&
-        event.key.toLowerCase() === "h"
+        matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
       ) {
         event.preventDefault();
         toggleHistorySuggestions();
@@ -2948,9 +2947,6 @@
               onopenfull={() => {
                 closeTerminalTools();
                 void openSnippets();
-              }}
-              onopenlocalterminal={() => {
-                void createLocalTerminalWindow().catch((cause) => showMessage(cause, true));
               }}
             />
           </div>

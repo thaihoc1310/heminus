@@ -9,7 +9,10 @@
   } from "../../lib/ipc";
   import { terminalThemes } from "../../lib/terminalThemes";
   import {
+    formatTerminalShortcut,
     setHistorySuggestions,
+    setHistorySuggestionsShortcut,
+    shortcutFromKeyboardEvent,
     terminalPreferences
   } from "../../lib/terminalPreferences";
   import type { Snippet, TerminalAppearance } from "../../lib/types";
@@ -23,7 +26,6 @@
     onrunall,
     onclose,
     onopenfull,
-    onopenlocalterminal,
     oncatalogchange = () => {}
   }: {
     appearance: TerminalAppearance;
@@ -34,7 +36,6 @@
     onrunall: (command: string) => void;
     onclose: () => void;
     onopenfull: () => void;
-    onopenlocalterminal: () => void;
     oncatalogchange?: (snippets: Snippet[]) => void;
   } = $props();
 
@@ -64,6 +65,7 @@
   let contextMenu = $state<{ snippet: Snippet; x: number; y: number } | null>(null);
   let historyContextMenu = $state<{ command: string; x: number; y: number } | null>(null);
   let panelElement = $state<HTMLElement>();
+  let capturingHistoryShortcut = $state(false);
 
   const visibleSnippets = $derived.by(() => {
     const query = snippetQuery.trim().toLowerCase();
@@ -229,6 +231,20 @@
     const fontSize = Math.max(9, Math.min(32, appearance.fontSize + delta));
     onappearancechange({ fontSize });
   }
+
+  function captureHistoryShortcut(event: KeyboardEvent) {
+    if (!capturingHistoryShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      capturingHistoryShortcut = false;
+      return;
+    }
+    const shortcut = shortcutFromKeyboardEvent(event);
+    if (!shortcut) return;
+    setHistorySuggestionsShortcut(shortcut);
+    capturingHistoryShortcut = false;
+  }
 </script>
 
 <svelte:window onclick={(event) => {
@@ -262,12 +278,12 @@
         class:active={section === "appearance"}
         title="Appearance"
         onclick={() => setSection("appearance")}
-      ><Icon name="appearance" size={18} /></button>
+      ><Icon name="palette" size={18} /></button>
       <button
         class:active={section === "config"}
         title="Terminal configuration"
         onclick={() => setSection("config")}
-      ><Icon name="sliders" size={18} /></button>
+      ><Icon name="appearance" size={18} /></button>
     </nav>
     <button class="terminal-tools-close" title="Close terminal tools" onclick={onclose}>
       <Icon name="close" size={16} />
@@ -452,39 +468,35 @@
           <strong>Suggestions</strong>
           <small>Choose what appears while you type.</small>
         </header>
-        <button
-          class="terminal-config-row"
-          aria-pressed={$terminalPreferences.historySuggestions}
-          onclick={() => setHistorySuggestions(!$terminalPreferences.historySuggestions)}
-        >
-          <span class="terminal-config-icon"><Icon name="clock" size={17} /></span>
+        <div class="terminal-config-row">
           <span class="terminal-config-copy">
             <strong>History suggestions</strong>
             <small>Mix successful commands with snippets.</small>
           </span>
-          <kbd>Ctrl Shift H</kbd>
-          <span
-            class="terminal-config-switch"
-            class:active={$terminalPreferences.historySuggestions}
-            aria-hidden="true"
-          ><i></i></span>
-        </button>
-      </section>
-
-      <section class="terminal-config-section">
-        <header>
-          <strong>Quick terminal</strong>
-          <small>Open a standalone local terminal without the Vault window.</small>
-        </header>
-        <button class="terminal-config-row terminal-config-action" onclick={onopenlocalterminal}>
-          <span class="terminal-config-icon"><Icon name="terminal" size={17} /></span>
-          <span class="terminal-config-copy">
-            <strong>Open local terminal</strong>
-            <small>Creates a new detached Heminus window.</small>
-          </span>
-          <kbd>Ctrl Alt H</kbd>
-          <Icon name="plus" size={15} />
-        </button>
+          <button
+            class="terminal-shortcut-button"
+            class:capturing={capturingHistoryShortcut}
+            title="Change history suggestions shortcut"
+            aria-label="Change history suggestions shortcut"
+            onclick={() => capturingHistoryShortcut = true}
+            onkeydown={captureHistoryShortcut}
+            onblur={() => capturingHistoryShortcut = false}
+          >{capturingHistoryShortcut
+              ? "Press shortcut…"
+              : formatTerminalShortcut($terminalPreferences.historySuggestionsShortcut)}</button>
+          <button
+            class="terminal-config-toggle"
+            aria-label="Toggle history suggestions"
+            aria-pressed={$terminalPreferences.historySuggestions}
+            onclick={() => setHistorySuggestions(!$terminalPreferences.historySuggestions)}
+          >
+            <span
+              class="terminal-config-switch"
+              class:active={$terminalPreferences.historySuggestions}
+              aria-hidden="true"
+            ><i></i></span>
+          </button>
+        </div>
       </section>
     </div>
   {/if}

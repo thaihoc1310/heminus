@@ -3517,7 +3517,7 @@ select:focus-visible {
 
 .terminal-config-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 9px;
   width: 100%;
@@ -3528,21 +3528,6 @@ select:focus-visible {
   border: 1px solid var(--terminal-tool-border);
   border-radius: 11px;
   background: var(--terminal-tool-card);
-  cursor: pointer;
-}
-
-.terminal-config-row:hover {
-  background: var(--terminal-tool-hover);
-}
-
-.terminal-config-icon {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  color: var(--terminal-tool-accent);
-  border-radius: 9px;
-  background: var(--terminal-tool-active);
 }
 
 .terminal-config-copy {
@@ -3564,12 +3549,34 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.terminal-config-row kbd {
+.terminal-shortcut-button {
+  padding: 5px 7px;
   color: var(--terminal-tool-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   font: 500 8px/1.2 "Ubuntu Sans", Ubuntu, sans-serif;
   letter-spacing: 0.02em;
   white-space: nowrap;
   opacity: 0.7;
+}
+
+.terminal-shortcut-button:hover,
+.terminal-shortcut-button:focus-visible,
+.terminal-shortcut-button.capturing {
+  color: var(--terminal-tool-foreground);
+  border-color: var(--terminal-tool-border);
+  background: var(--terminal-tool-hover);
+  opacity: 1;
+  outline: none;
+}
+
+.terminal-config-toggle {
+  display: grid;
+  place-items: center;
+  padding: 5px 0 5px 5px;
+  border: 0;
+  background: transparent;
 }
 
 .terminal-config-switch {
@@ -3598,10 +3605,6 @@ select:focus-visible {
 
 .terminal-config-switch.active i {
   transform: translateX(13px);
-}
-
-.terminal-config-action > svg {
-  color: var(--terminal-tool-muted);
 }
 
 .terminal-appearance-section {

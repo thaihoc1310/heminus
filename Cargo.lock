@@ -1824,6 +1824,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
+ "gio",
  "heminus-domain",
  "heminus-storage",
  "hmac",

@@ -36,11 +36,6 @@ export async function createDetachedTerminalWindow(
   });
 }
 
-export async function createLocalTerminalWindow(): Promise<string> {
-  if (!isTauri) throw new Error("Standalone terminals require the desktop app");
-  return invoke<string>("create_local_terminal_window");
-}
-
 export async function takeDetachedTerminalPayload(): Promise<DetachedWindowPayload | null> {
   if (!isTauri) return null;
   const payload = await invoke<string | null>("take_detached_terminal_payload");
