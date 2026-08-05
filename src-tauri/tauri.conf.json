@@ -19,8 +19,9 @@
         "minWidth": 480,
         "minHeight": 360,
         "center": true,
+        "visible": false,
         "decorations": false,
-        "transparent": false,
+        "transparent": true,
         "resizable": true,
         "fullscreen": false,
         "devtools": false

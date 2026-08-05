@@ -72,13 +72,12 @@ pub fn run() {
                 }
             }
             if open_local_terminal_only {
-                if let Some(main) = app.get_webview_window("main") {
-                    main.hide()?;
-                }
                 commands::build_local_terminal_window(app.handle())?;
                 if let Some(main) = app.get_webview_window("main") {
                     main.destroy()?;
                 }
+            } else if let Some(main) = app.get_webview_window("main") {
+                main.show()?;
             }
             Ok(())
         })

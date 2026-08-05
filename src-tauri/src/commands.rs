@@ -87,7 +87,7 @@ pub async fn create_detached_terminal_window(
 
 pub(crate) fn build_local_terminal_window(app: &AppHandle) -> Result<String, String> {
     let label = format!("detached-{}", Uuid::new_v4().simple());
-    build_terminal_webview(app, &label, "Local Terminal", None)?;
+    build_terminal_webview(app, &label, "Local Terminal", None, (720.0, 520.0))?;
     Ok(label)
 }
 
@@ -114,7 +114,8 @@ fn build_detached_terminal_window(
     } else {
         title.trim()
     };
-    if let Err(error) = build_terminal_webview(app, &label, window_title, position) {
+    if let Err(error) = build_terminal_webview(app, &label, window_title, position, (1120.0, 720.0))
+    {
         if let Ok(mut payloads) = state.detached_payloads.lock() {
             payloads.remove(&label);
         }
@@ -129,6 +130,7 @@ fn build_terminal_webview(
     label: &str,
     title: &str,
     position: Option<(f64, f64)>,
+    size: (f64, f64),
 ) -> Result<(), String> {
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
@@ -136,14 +138,18 @@ fn build_terminal_webview(
         tauri::WebviewUrl::App(format!("index.html?detached={label}").into()),
     )
     .title(title)
-    .inner_size(1120.0, 720.0)
+    .inner_size(size.0, size.1)
     .min_inner_size(360.0, 240.0)
-    .background_color(tauri::webview::Color(0x1f, 0x21, 0x24, 0xff))
+    .maximized(false)
+    .background_color(tauri::webview::Color(0x00, 0x00, 0x00, 0x00))
+    .transparent(true)
     .decorations(false)
     .resizable(true)
     .visible(false);
     if let Some((x, y)) = position {
         builder = builder.position(x, y);
+    } else {
+        builder = builder.center();
     }
 
     builder

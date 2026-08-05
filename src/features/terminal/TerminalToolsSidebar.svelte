@@ -278,7 +278,7 @@
         class:active={section === "appearance"}
         title="Appearance"
         onclick={() => setSection("appearance")}
-      ><Icon name="palette" size={18} /></button>
+      ><Icon name="sun" size={18} /></button>
       <button
         class:active={section === "config"}
         title="Terminal configuration"

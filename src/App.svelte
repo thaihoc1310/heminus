@@ -233,6 +233,7 @@
   } | null>(null);
   let suppressTopTabClick = false;
   let detachedInitialized = $state(!detachedMode);
+  let windowedChrome = $state(true);
   let managerEditorDirty = $state<Record<string, boolean>>({});
   const appearanceSaveTimers = new Map<string, number>();
   const localTerminalAppearanceKey = "heminus-local-terminal-appearance";
@@ -307,13 +308,31 @@
       if (event.key === "Escape") groupContextMenu = null;
       if (event.key === "Escape") terminalContextMenu = null;
     };
+    const syncWindowedChrome = async () => {
+      if (!appWindow) {
+        windowedChrome = true;
+        return;
+      }
+      try {
+        const [maximized, fullscreen] = await Promise.all([
+          appWindow.isMaximized(),
+          appWindow.isFullscreen()
+        ]);
+        windowedChrome = !maximized && !fullscreen;
+      } catch {
+        windowedChrome = true;
+      }
+    };
     window.addEventListener("keydown", onKeydown);
+    window.addEventListener("resize", syncWindowedChrome);
+    void syncWindowedChrome();
     return () => {
       transferListenerDisposed = true;
       removeTransferListener?.();
       removeSnippetListener?.();
       removeCommandHistoryListener?.();
       window.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("resize", syncWindowedChrome);
       if (terminalToolsCloseTimer !== null) {
         window.clearTimeout(terminalToolsCloseTimer);
       }
@@ -2614,6 +2633,7 @@
 
 <div
   class="application"
+  class:windowed-chrome={windowedChrome}
   class:detached-window={detachedMode}
   class:detached-initialized={detachedInitialized}
   class:terminal-surface={page === "terminal"}
