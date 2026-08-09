@@ -139,6 +139,8 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_clipboard_write,
+            terminal::terminal_clipboard_read,
             terminal::terminal_disconnect_history,
             terminal::terminal_rename,
             tunnel::tunnel_start,

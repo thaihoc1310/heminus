@@ -14,8 +14,10 @@
     listCommandHistory,
     listSnippets,
     openTerminal,
+    readTerminalClipboard,
     recordCommandHistory,
     resizeTerminal,
+    writeTerminalClipboard,
     writeTerminal
   } from "../../lib/ipc";
   import type {
@@ -300,6 +302,8 @@
     let resizeObserver: ResizeObserver | null = null;
     let attachedEventUnlisten: (() => void) | null = null;
     let resizeFrame: number | null = null;
+    let primarySelectionFrame: number | null = null;
+    let primarySelectionWrite = Promise.resolve();
     let flushTimer: number | null = null;
     let queuedInput: number[] = [];
     let writeChain = Promise.resolve();
@@ -312,8 +316,13 @@
     let outputTail = "";
     let sensitiveInput = false;
     let commandStartPosition: { row: number; column: number } | null = null;
+    let handleTerminalMiddleMouseEvent: ((event: MouseEvent) => void) | null = null;
+    let handleTerminalMiddlePointerDown: ((event: PointerEvent) => void) | null = null;
+    let handleTerminalMiddlePointerUp: ((event: PointerEvent) => void) | null = null;
+    let handleTerminalAuxClick: ((event: MouseEvent) => void) | null = null;
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
+    const supportsPrimarySelection = navigator.userAgent.includes("Linux");
 
     async function start() {
       if (disposed) return;
@@ -348,6 +357,80 @@
       });
       terminal.open(container);
       container.addEventListener("focusin", activate);
+      const clearTerminalSelection = () => {
+        terminal?.clearSelection();
+        const domSelection = container.ownerDocument.getSelection();
+        if (
+          domSelection?.anchorNode &&
+          container.contains(domSelection.anchorNode)
+        ) {
+          domSelection.removeAllRanges();
+        }
+      };
+      const finishTerminalPaste = () => {
+        clearTerminalSelection();
+        if (terminal?.modes.bracketedPasteMode) {
+          terminal.input("\x1b[D\x1b[C", true);
+        }
+      };
+      if (supportsPrimarySelection) {
+        const suppressMiddleClick = (event: MouseEvent | PointerEvent) => {
+          if (event.button !== 1) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        };
+        const pastePrimarySelection = async () => {
+          if (primarySelectionFrame !== null) {
+            window.cancelAnimationFrame(primarySelectionFrame);
+            primarySelectionFrame = null;
+            const selection = terminal?.getSelection() ?? "";
+            if (selection) {
+              primarySelectionWrite = primarySelectionWrite
+                .then(() => writeTerminalClipboard(selection, true))
+                .catch(() => {});
+            }
+          }
+          await primarySelectionWrite;
+          const text = await readTerminalClipboard(true);
+          if (!disposed && terminal && text) {
+            terminal.paste(text);
+            finishTerminalPaste();
+          }
+        };
+        handleTerminalMiddlePointerDown = (event: PointerEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+          void pastePrimarySelection();
+        };
+        handleTerminalMiddleMouseEvent = (event: MouseEvent) => {
+          suppressMiddleClick(event);
+        };
+        handleTerminalMiddlePointerUp = (event: PointerEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+        };
+        handleTerminalAuxClick = (event: MouseEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+        };
+        container.addEventListener(
+          "pointerdown",
+          handleTerminalMiddlePointerDown,
+          true
+        );
+        container.addEventListener(
+          "mousedown",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+        container.addEventListener(
+          "pointerup",
+          handleTerminalMiddlePointerUp,
+          true
+        );
+        container.addEventListener("mouseup", handleTerminalMiddleMouseEvent, true);
+        container.addEventListener("auxclick", handleTerminalAuxClick, true);
+      }
       fitAddon.fit();
       const channel = new Channel<TerminalEvent>();
       const handleTerminalEvent = (event: TerminalEvent) => {
@@ -574,7 +657,49 @@
         }
         refreshSuggestions();
       });
+      terminal.onSelectionChange(() => {
+        if (!supportsPrimarySelection || primarySelectionFrame !== null) return;
+        primarySelectionFrame = window.requestAnimationFrame(() => {
+          primarySelectionFrame = null;
+          const selection = terminal?.getSelection() ?? "";
+          if (selection) {
+            primarySelectionWrite = primarySelectionWrite
+              .then(() => writeTerminalClipboard(selection, true))
+              .catch(() => {});
+          }
+        });
+      });
       terminal.attachCustomKeyEventHandler((event) => {
+        if (
+          event.type === "keydown" &&
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          event.key.toLowerCase() === "c"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          const selection = terminal?.getSelection() ?? "";
+          if (selection) void writeTerminalClipboard(selection);
+          return false;
+        }
+        if (
+          event.type === "keydown" &&
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          event.key.toLowerCase() === "v"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          void readTerminalClipboard().then((text) => {
+            if (!disposed && terminal && text) {
+              terminal.paste(text);
+              finishTerminalPaste();
+            }
+          });
+          return false;
+        }
         if (
           event.type === "keydown" &&
           matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
@@ -632,10 +757,40 @@
       disposed = true;
       if (flushTimer !== null) window.clearTimeout(flushTimer);
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+      if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
       resizeObserver?.disconnect();
       attachedEventUnlisten?.();
       attachedEventUnlisten = null;
       container?.removeEventListener("focusin", activate);
+      if (handleTerminalMiddlePointerDown) {
+        container?.removeEventListener(
+          "pointerdown",
+          handleTerminalMiddlePointerDown,
+          true
+        );
+      }
+      if (handleTerminalMiddleMouseEvent) {
+        container?.removeEventListener(
+          "mousedown",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+        container?.removeEventListener(
+          "mouseup",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+      }
+      if (handleTerminalMiddlePointerUp) {
+        container?.removeEventListener(
+          "pointerup",
+          handleTerminalMiddlePointerUp,
+          true
+        );
+      }
+      if (handleTerminalAuxClick) {
+        container?.removeEventListener("auxclick", handleTerminalAuxClick, true);
+      }
       const mountedTerminal = terminal;
       terminal = null;
       mountedTerminal?.dispose();
