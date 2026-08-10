@@ -1,7 +1,11 @@
 /** @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setElementDragPreview, setNativeTabDragPreview } from "./dragPreview";
+import {
+  createNativeTabDragPreviewDataUrl,
+  setElementDragPreview,
+  setNativeTabDragPreview
+} from "./dragPreview";
 
 describe("drag preview", () => {
   afterEach(() => {
@@ -53,6 +57,44 @@ describe("drag preview", () => {
     expect(canvas?.style.height).toBe("16px");
     expect(context.scale).toHaveBeenCalledWith(2, 2);
     expect(setDragImage).toHaveBeenCalledWith(canvas, 42, 8);
+  });
+
+  it("renders a PNG data URL for the desktop native drag API", () => {
+    vi.stubGlobal("devicePixelRatio", 1.5);
+    const context = {
+      beginPath: vi.fn(),
+      roundRect: vi.fn(),
+      fill: vi.fn(),
+      stroke: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      translate: vi.fn(),
+      strokeRect: vi.fn(),
+      arc: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      fillText: vi.fn(),
+      scale: vi.fn()
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/png;base64,preview"
+    );
+
+    const result = createNativeTabDragPreviewDataUrl({
+      label: "Local Terminal",
+      icon: "terminal",
+      background: "#101114",
+      activeBackground: "#272a30",
+      foreground: "#f5f5f5",
+      border: "#3a3d44"
+    });
+
+    expect(result).toBe("data:image/png;base64,preview");
+    expect(context.scale).toHaveBeenCalledWith(1.5, 1.5);
   });
 
   it("keeps a fixed DOM preview at the exact source size", () => {

@@ -5,12 +5,26 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use heminus_domain::{Host, IdentityKind};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SshRuntime {
     root: PathBuf,
     known_hosts: PathBuf,
     global_known_hosts: PathBuf,
     keys: PathBuf,
+    connections: PathBuf,
+}
+
+#[derive(Default)]
+pub struct ConnectionArtifacts {
+    config: Option<PathBuf>,
+}
+
+impl Drop for ConnectionArtifacts {
+    fn drop(&mut self) {
+        if let Some(path) = self.config.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 impl SshRuntime {
@@ -21,16 +35,23 @@ impl SshRuntime {
     }
 
     fn initialize_at(root: PathBuf) -> Result<Self, String> {
+        let connections_root = root.join("connections");
         let runtime = Self {
             known_hosts: root.join("known_hosts"),
             global_known_hosts: root.join("global_known_hosts"),
             keys: root.join("keys"),
+            connections: connections_root.join(uuid::Uuid::new_v4().to_string()),
             root,
         };
         fs::create_dir_all(&runtime.keys)
             .map_err(|error| format!("Could not create the Heminus SSH vault: {error}"))?;
+        fs::create_dir_all(&runtime.connections).map_err(|error| {
+            format!("Could not create the Heminus SSH connection directory: {error}")
+        })?;
         secure_directory(&runtime.root)?;
         secure_directory(&runtime.keys)?;
+        secure_directory(&connections_root)?;
+        secure_directory(&runtime.connections)?;
         ensure_private_file(&runtime.known_hosts, b"")?;
         ensure_private_file(&runtime.global_known_hosts, b"")?;
         Ok(runtime)
@@ -46,8 +67,6 @@ impl SshRuntime {
 
     fn arguments_with_host_key_policy(&self, policy: &str) -> Vec<OsString> {
         [
-            OsString::from("-F"),
-            OsString::from("none"),
             OsString::from("-o"),
             OsString::from(format!(
                 "UserKnownHostsFile={}",
@@ -97,7 +116,19 @@ impl SshRuntime {
         host: &Host,
         host_key_policy: &str,
     ) -> Result<Vec<OsString>, String> {
-        let mut arguments = Vec::new();
+        let jump_hosts = jump_hosts(database, host)?;
+        let mut arguments = if jump_hosts.is_empty() {
+            vec![OsString::from("-F"), OsString::from("none")]
+        } else {
+            let (config_path, aliases) =
+                self.write_jump_host_config(database, &jump_hosts, host_key_policy)?;
+            vec![
+                OsString::from("-F"),
+                config_path.into_os_string(),
+                OsString::from("-o"),
+                OsString::from(format!("ProxyJump={}", aliases.join(","))),
+            ]
+        };
         for variable in &host.environment {
             let value = variable.value.replace(['\r', '\n'], " ");
             let quoted = value.replace('\\', "\\\\").replace('"', "\\\"");
@@ -108,8 +139,18 @@ impl SshRuntime {
             )));
         }
 
-        let mut proxy_command: Option<String> = None;
-        for (index, jump_host) in jump_hosts(database, host)?.into_iter().enumerate() {
+        Ok(arguments)
+    }
+
+    fn write_jump_host_config(
+        &self,
+        database: &heminus_storage::Database,
+        jump_hosts: &[Host],
+        host_key_policy: &str,
+    ) -> Result<(PathBuf, Vec<String>), String> {
+        let mut config = String::new();
+        let mut aliases = Vec::with_capacity(jump_hosts.len());
+        for (index, jump_host) in jump_hosts.iter().enumerate() {
             let jump_identity = jump_host
                 .identity_id
                 .map(|id| {
@@ -131,31 +172,37 @@ impl SshRuntime {
                 .username
                 .as_deref()
                 .unwrap_or(&jump_host.username);
-            let mut proxy_parts = vec![OsString::from("ssh")];
-            proxy_parts.extend(self.arguments_with_host_key_policy(host_key_policy));
-            if let Some(previous_proxy) = proxy_command.as_deref() {
-                let escaped_previous_proxy = previous_proxy.replace('%', "%%");
-                proxy_parts.extend([
-                    OsString::from("-o"),
-                    OsString::from(format!("ProxyCommand={escaped_previous_proxy}")),
-                ]);
-            }
+            let alias = format!("heminus-jump-{}", index + 1);
+            aliases.push(alias.clone());
+            config.push_str(&format!("Host {alias}\n"));
+            push_config_value(&mut config, "HostName", effective_address(jump_host))?;
+            push_config_value(&mut config, "User", username)?;
+            config.push_str(&format!("  Port {}\n", jump_host.port));
+            push_config_value(
+                &mut config,
+                "UserKnownHostsFile",
+                &self.known_hosts.to_string_lossy(),
+            )?;
+            push_config_value(
+                &mut config,
+                "GlobalKnownHostsFile",
+                &self.global_known_hosts.to_string_lossy(),
+            )?;
+            config.push_str(&format!(
+                "  StrictHostKeyChecking {host_key_policy}\n  HashKnownHosts yes\n  IdentitiesOnly yes\n  IdentityAgent none\n  IdentityFile none\n  AddKeysToAgent no\n"
+            ));
             match jump_identity.kind {
                 IdentityKind::KeyFile => {
                     let key_path = jump_identity
                         .key_path
                         .as_deref()
                         .ok_or_else(|| format!("The key for jump host {} is missing", index + 1))?;
-                    proxy_parts.extend([
-                        OsString::from("-o"),
-                        OsString::from(if jump_identity.secret_stored {
-                            "BatchMode=no"
-                        } else {
-                            "BatchMode=yes"
-                        }),
-                        OsString::from("-i"),
-                        OsString::from(key_path),
-                    ]);
+                    config.push_str(if jump_identity.secret_stored {
+                        "  BatchMode no\n"
+                    } else {
+                        "  BatchMode yes\n"
+                    });
+                    push_config_value(&mut config, "IdentityFile", key_path)?;
                 }
                 IdentityKind::Password => {
                     if !jump_identity.secret_stored {
@@ -164,42 +211,28 @@ impl SshRuntime {
                             index + 1
                         ));
                     }
-                    proxy_parts.extend([
-                        OsString::from("-o"),
-                        OsString::from("BatchMode=no"),
-                        OsString::from("-o"),
-                        OsString::from("PreferredAuthentications=keyboard-interactive,password"),
-                        OsString::from("-o"),
-                        OsString::from("PubkeyAuthentication=no"),
-                        OsString::from("-o"),
-                        OsString::from("NumberOfPasswordPrompts=1"),
-                    ]);
+                    config.push_str(
+                        "  BatchMode no\n  PreferredAuthentications keyboard-interactive,password\n  PubkeyAuthentication no\n  NumberOfPasswordPrompts 1\n",
+                    );
                 }
                 IdentityKind::Agent => {
                     return Err("System SSH-agent identities are not supported".to_string());
                 }
             }
-            proxy_parts.extend([
-                OsString::from("-p"),
-                OsString::from(jump_host.port.to_string()),
-                OsString::from("-W"),
-                OsString::from("%h:%p"),
-                OsString::from("--"),
-                OsString::from(format!("{username}@{}", effective_address(&jump_host))),
-            ]);
-            proxy_command = Some(
-                proxy_parts
-                    .iter()
-                    .map(|part| shell_quote(&part.to_string_lossy()))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            config.push('\n');
         }
-        if let Some(proxy_command) = proxy_command {
-            arguments.push(OsString::from("-o"));
-            arguments.push(OsString::from(format!("ProxyCommand={proxy_command}")));
-        }
-        Ok(arguments)
+
+        let config_path = self
+            .connections
+            .join(format!("{}.conf", uuid::Uuid::new_v4()));
+        fs::write(&config_path, config).map_err(|error| {
+            format!(
+                "Could not write the Heminus SSH connection config {}: {error}",
+                config_path.display()
+            )
+        })?;
+        secure_file(&config_path)?;
+        Ok((config_path, aliases))
     }
 
     pub fn known_hosts_path(&self) -> &Path {
@@ -215,10 +248,35 @@ impl SshRuntime {
             .ok()
             .is_some_and(|path| path.starts_with(&self.keys))
     }
+
+    pub fn connection_artifacts(&self, arguments: &[OsString]) -> ConnectionArtifacts {
+        let config = arguments.windows(2).find_map(|pair| {
+            (pair[0] == "-F" && pair[1] != "none")
+                .then(|| PathBuf::from(&pair[1]))
+                .filter(|path| path.starts_with(&self.connections))
+        });
+        ConnectionArtifacts { config }
+    }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+impl Drop for SshRuntime {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.connections);
+    }
+}
+
+fn push_config_value(config: &mut String, name: &str, value: &str) -> Result<(), String> {
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(format!(
+            "SSH {name} contains an unsupported control character"
+        ));
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    config.push_str(&format!("  {name} \"{escaped}\"\n"));
+    Ok(())
 }
 
 pub fn effective_address(host: &Host) -> &str {
@@ -304,23 +362,11 @@ fn ensure_private_file(path: &Path, initial_contents: &[u8]) -> Result<(), Strin
 }
 
 fn secure_directory(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Could not secure {}: {error}", path.display()))?;
-    }
-    Ok(())
+    crate::platform::secure_private_directory(path)
 }
 
 fn secure_file(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not secure {}: {error}", path.display()))?;
-    }
-    Ok(())
+    crate::platform::secure_private_file(path)
 }
 
 #[cfg(test)]
@@ -328,6 +374,19 @@ mod tests {
     use super::*;
     use heminus_domain::{EnvironmentVariable, Identity};
     use uuid::Uuid;
+
+    fn jump_config_path(arguments: &[String]) -> &Path {
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "-F")
+            .expect("host arguments should select an SSH config");
+        Path::new(&arguments[index + 1])
+    }
+
+    fn jump_config(arguments: &[String]) -> String {
+        fs::read_to_string(jump_config_path(arguments))
+            .expect("jump-host config should be readable")
+    }
 
     #[test]
     fn runtime_uses_only_app_private_ssh_files() {
@@ -339,7 +398,7 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert!(arguments.windows(2).any(|pair| pair == ["-F", "none"]));
+        assert!(!arguments.iter().any(|argument| argument == "-F"));
         assert!(arguments.iter().any(|value| {
             value
                 == &format!(
@@ -350,6 +409,40 @@ mod tests {
         assert!(arguments.contains(&"IdentityAgent=none".to_string()));
         assert!(arguments.contains(&"IdentityFile=none".to_string()));
         assert!(runtime.keys_directory().is_dir());
+
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let host = Host::new("Server", "192.0.2.20", "deploy");
+        let host_arguments = runtime
+            .host_arguments(&database, &host)
+            .unwrap()
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(host_arguments.windows(2).any(|pair| pair == ["-F", "none"]));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connection_config_is_removed_with_its_session_artifacts() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let mut identity = Identity::new("Gateway password", IdentityKind::Password);
+        identity.secret_stored = true;
+        database.save_identity(&identity).unwrap();
+        let mut jump_host = Host::new("Gateway", "192.0.2.10", "bastion");
+        jump_host.identity_id = Some(identity.id);
+        database.save_host(&jump_host).unwrap();
+        let mut target = Host::new("Private node", "10.0.0.20", "deploy");
+        target.jump_host_ids = vec![jump_host.id];
+
+        let arguments = runtime.host_arguments(&database, &target).unwrap();
+        let artifacts = runtime.connection_artifacts(&arguments);
+        let config = artifacts.config.clone().expect("connection config");
+        assert!(config.is_file());
+        drop(artifacts);
+        assert!(!config.exists());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -408,13 +501,34 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(arguments.contains(&"SetEnv=LANG=\"en_US.UTF-8\"".to_string()));
-        let proxy = arguments
-            .iter()
-            .find(|argument| argument.starts_with("ProxyCommand="))
-            .unwrap();
-        assert!(proxy.contains("'-F' 'none'"));
-        assert!(proxy.contains("'bastion@192.0.2.10'"));
-        assert!(proxy.contains("'IdentityAgent=none'"));
+        assert!(arguments.contains(&"ProxyJump=heminus-jump-1".to_string()));
+        let config = jump_config(&arguments);
+        assert!(config.contains("Host heminus-jump-1"));
+        assert!(config.contains("HostName \"192.0.2.10\""));
+        assert!(config.contains("User \"bastion\""));
+        assert!(config.contains("IdentityAgent none"));
+        assert!(!config.contains("ProxyCommand"));
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new(crate::platform::ssh_executable().unwrap())
+                .arg("-G")
+                .arg("-F")
+                .arg(jump_config_path(&arguments))
+                .arg("heminus-jump-1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let parsed = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+            assert!(parsed.contains("hostname 192.0.2.10"));
+            assert!(parsed.contains("user bastion"));
+            assert!(parsed.contains("identityagent none"));
+            assert!(parsed.contains("identityfile none"));
+            assert!(parsed.contains("gateway"));
+        }
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -439,14 +553,12 @@ mod tests {
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let proxy = arguments
-            .iter()
-            .find(|argument| argument.starts_with("ProxyCommand="))
-            .unwrap();
-        assert!(proxy.contains("'BatchMode=no'"));
-        assert!(proxy.contains("'PreferredAuthentications=keyboard-interactive,password'"));
-        assert!(proxy.contains("'PubkeyAuthentication=no'"));
-        assert!(proxy.contains("'bastion@192.0.2.10'"));
+        assert!(arguments.contains(&"ProxyJump=heminus-jump-1".to_string()));
+        let config = jump_config(&arguments);
+        assert!(config.contains("BatchMode no"));
+        assert!(config.contains("PreferredAuthentications keyboard-interactive,password"));
+        assert!(config.contains("PubkeyAuthentication no"));
+        assert!(config.contains("User \"bastion\""));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -479,17 +591,13 @@ mod tests {
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let proxy = arguments
-            .iter()
-            .find(|argument| argument.starts_with("ProxyCommand="))
-            .unwrap();
-        let first_position = proxy.find("edge@192.0.2.10").unwrap();
-        let second_position = proxy.find("relay@10.0.0.10").unwrap();
+        assert!(arguments.contains(&"ProxyJump=heminus-jump-1,heminus-jump-2".to_string()));
+        let config = jump_config(&arguments);
+        let first_position = config.find("HostName \"192.0.2.10\"").unwrap();
+        let second_position = config.find("HostName \"10.0.0.10\"").unwrap();
         assert!(first_position < second_position);
-        assert!(proxy.matches("ProxyCommand=").count() >= 2);
-        assert!(proxy.contains("'%%h:%%p'"));
-        assert!(proxy.contains("'%h:%p'"));
-        assert!(proxy.contains("'PreferredAuthentications=keyboard-interactive,password'"));
+        assert!(config.contains("PreferredAuthentications keyboard-interactive,password"));
+        assert!(!config.contains("ProxyCommand"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -516,12 +624,10 @@ mod tests {
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let proxy = arguments
-            .iter()
-            .find(|argument| argument.starts_with("ProxyCommand="))
-            .unwrap();
-        assert!(proxy.contains("'BatchMode=no'"));
-        assert!(proxy.contains(&format!("'{}'", key_path.display())));
+        let config = jump_config(&arguments);
+        assert!(config.contains("BatchMode no"));
+        assert!(config.contains("IdentityFile"));
+        assert!(config.contains("gateway\""));
 
         fs::remove_dir_all(root).unwrap();
     }

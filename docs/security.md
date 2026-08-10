@@ -17,11 +17,12 @@
 - OpenSSH receives secrets through a short-lived askpass bridge.
   The process environment contains only candidate identity UUIDs and prompt
   match metadata, never a secret.
-- Every remote SSH process uses `-F none`, disables the system agent and default
-  identity files, and receives only the host and identity selected in Heminus.
+- Direct SSH processes use `-F none`. Jump-host processes use a short-lived,
+  app-owned `-F` config with synthetic aliases. Both paths disable the system
+  agent and default identities and receive only data selected in Heminus.
 - Key-file identities store a path inside Heminus's private SSH vault. Dragged
   source files are validated, copied into the vault, and left unchanged; vault
-  copies are restricted to mode `0600` on Unix.
+  copies are restricted to mode `0600` on Unix or a private ACL on Windows.
 - Local file browsing and transfer destinations are restricted to the user's
   home directory.
 - Uploads and downloads use randomized hidden partial files and publish the
@@ -34,6 +35,7 @@
   input entered at detected password/passphrase/token prompts is never added to
   command history.
 - Tunnel processes and SFTP transports are terminated when their manager is
-  dropped; SFTP child processes use kill-on-drop.
+  dropped. Windows terminal, SFTP, tunnel, and ProxyJump descendants are also
+  contained in per-session Job Objects with kill-on-close behavior.
 
 This is an implementation review, not an independent security audit.

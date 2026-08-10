@@ -7,6 +7,8 @@ import type {
   KeyMaterial,
   KnownHostEntry,
   LocalEntry,
+  LocalPathInfo,
+  PlatformCapabilities,
   PortForward,
   PrivateKeyImport,
   RemoteEntry,
@@ -15,6 +17,7 @@ import type {
   SftpOpenResult,
   Snippet,
   TerminalTabTransfer,
+  TerminalTabPointerState,
   TerminalTabTransferResult,
   TerminalEvent,
   TransferEvent,
@@ -23,8 +26,50 @@ import type {
   VaultGroup
 } from "./types";
 import { matchesSearch } from "./format";
+import type { NativeTabDragPreview } from "./dragPreview";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
+
+export interface NativeTerminalTabDragSession {
+  id: string;
+  sourceWindowLabel: string;
+  sourceId: string;
+  sourceKind: "top-tab" | "workspace-pane";
+  canSplit: boolean;
+  preview: NativeTabDragPreview;
+}
+
+const nativeTerminalTabDragStarted = "native-terminal-tab-drag-started";
+const nativeTerminalTabDragEnded = "native-terminal-tab-drag-ended";
+
+export async function announceNativeTerminalTabDrag(
+  session: NativeTerminalTabDragSession
+): Promise<void> {
+  if (isTauri) await emit(nativeTerminalTabDragStarted, session);
+}
+
+export async function announceNativeTerminalTabDragEnd(sessionId: string): Promise<void> {
+  if (isTauri) await emit(nativeTerminalTabDragEnded, { sessionId });
+}
+
+export async function listenForNativeTerminalTabDrags(
+  onStarted: (session: NativeTerminalTabDragSession) => void,
+  onEnded: (sessionId: string) => void
+): Promise<UnlistenFn> {
+  if (!isTauri) return () => {};
+  const unlistenStarted = await listen<NativeTerminalTabDragSession>(
+    nativeTerminalTabDragStarted,
+    (event) => onStarted(event.payload)
+  );
+  const unlistenEnded = await listen<{ sessionId: string }>(
+    nativeTerminalTabDragEnded,
+    (event) => onEnded(event.payload.sessionId)
+  );
+  return () => {
+    unlistenStarted();
+    unlistenEnded();
+  };
+}
 
 export async function createDetachedTerminalWindow(
   payload: DetachedWindowPayload
@@ -296,6 +341,40 @@ export async function listLocalEntries(path?: string): Promise<LocalEntry[]> {
   return invoke<LocalEntry[]>("list_local_entries", { path: path ?? null });
 }
 
+export async function terminalTabPointerState(): Promise<TerminalTabPointerState | null> {
+  if (!isTauri) return null;
+  return invoke<TerminalTabPointerState>("terminal_tab_pointer_state");
+}
+
+export async function platformCapabilities(): Promise<PlatformCapabilities> {
+  if (!isTauri) {
+    return {
+      localPermissionEditing: false,
+      customApplicationOpen: false,
+      foreignProcessTermination: false,
+      sshAvailable: false,
+      sshKeygenAvailable: false,
+      localShell: null
+    };
+  }
+  return invoke<PlatformCapabilities>("platform_capabilities");
+}
+
+export async function localPathInfo(path?: string): Promise<LocalPathInfo> {
+  if (!isTauri) {
+    return {
+      path: "/",
+      parentPath: null,
+      breadcrumbs: [{ name: "/", path: "/" }]
+    };
+  }
+  return invoke<LocalPathInfo>("local_path_info", { path: path ?? null });
+}
+
+export async function joinLocalPath(parent: string, name: string): Promise<string> {
+  return invoke<string>("join_local_path", { parent, name });
+}
+
 export async function createLocalDirectory(path: string): Promise<void> {
   return invoke("create_local_directory", { path });
 }
@@ -480,10 +559,11 @@ function searchable(host: Host, query: string): boolean {
 }
 
 const now = new Date().toISOString();
+const demoLocalLabel = navigator.userAgent.includes("Windows") ? "Local Windows" : "Local Device";
 const demoHosts: Host[] = [
   {
     id: "b0c4b4c4-03fc-4de7-adc7-e3258fc00db1",
-    label: "Local Ubuntu",
+    label: demoLocalLabel,
     address: "127.0.0.1",
     port: 22,
     username: "thaihoc",

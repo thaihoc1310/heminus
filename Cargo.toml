@@ -9,7 +9,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "GPL-3.0-or-later"
 authors = ["Heminus contributors"]
 
@@ -30,3 +30,9 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[patch.crates-io]
+# Keep the Shell drag image alive over both the parent window and WebView2's
+# child HWND drop targets on Windows.
+tao = { path = "vendor/tao" }
+wry = { path = "vendor/wry" }

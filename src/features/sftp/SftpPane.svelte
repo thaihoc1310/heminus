@@ -14,12 +14,15 @@
     createRemoteDirectory,
     downloadFile,
     homeDirectory,
+    joinLocalPath,
     listGroups,
     listHosts,
     listLocalEntries,
+    localPathInfo,
     listRemoteEntries,
     openLocalEntry,
     openSftpSession,
+    platformCapabilities,
     removeLocalEntry,
     removeRemoteEntry,
     renameLocalEntry,
@@ -31,7 +34,9 @@
   } from "../../lib/ipc";
   import type {
     Host,
+    LocalBreadcrumb,
     LocalEntry,
+    PlatformCapabilities,
     RemoteEntry,
     SftpOpenResult,
     TransferEvent,
@@ -63,6 +68,8 @@
   let error = $state("");
   let homePath = $state("");
   let currentPath = $state("");
+  let localParentPath = $state<string | null>(null);
+  let localPathBreadcrumbs = $state<LocalBreadcrumb[]>([]);
   let remotePath = $state("");
   let remoteHome = $state("");
   let session = $state<SftpOpenResult | null>(null);
@@ -115,6 +122,14 @@
   let componentDisposed = false;
   let localDirectoryRequestId = 0;
   let remoteDirectoryRequestId = 0;
+  let capabilities = $state<PlatformCapabilities>({
+    localPermissionEditing: false,
+    customApplicationOpen: false,
+    foreignProcessTermination: false,
+    sshAvailable: false,
+    sshKeygenAvailable: false,
+    localShell: null
+  });
 
   const visibleLocalEntries = $derived(
     sortEntries(
@@ -138,7 +153,9 @@
       remoteSortDirection
     )
   );
-  const localBreadcrumbs = $derived(makeBreadcrumbs(currentPath));
+  const localBreadcrumbs = $derived(
+    leftSession ? makeBreadcrumbs(currentPath) : localPathBreadcrumbs
+  );
   const remoteBreadcrumbs = $derived(makeBreadcrumbs(remotePath));
   const transferRate = $derived(
     transferStartedAt > 0
@@ -159,15 +176,17 @@
     window.addEventListener("keydown", closeContextMenuOnEscape);
     void (async () => {
       try {
-        const [resolvedHomePath, loadedHosts, loadedGroups] = await Promise.all([
+        const [resolvedHomePath, loadedHosts, loadedGroups, loadedCapabilities] = await Promise.all([
           homeDirectory(),
           listHosts(),
-          listGroups()
+          listGroups(),
+          platformCapabilities()
         ]);
         if (componentDisposed) return;
         homePath = resolvedHomePath;
         hosts = loadedHosts;
         groups = loadedGroups;
+        capabilities = loadedCapabilities;
         selectedHostId = hosts.some((host) => host.id === initialHostId)
           ? initialHostId
           : (hosts[0]?.id ?? "");
@@ -222,15 +241,29 @@
     localLoading = true;
     error = "";
     try {
-      const entries = sourceSession
-        ? await listRemoteEntries(sourceSession.id, path)
-        : await listLocalEntries(path);
+      const [entries, resolvedPath, parent, breadcrumbs] = sourceSession
+        ? [
+            await listRemoteEntries(sourceSession.id, path),
+            path,
+            path === "/" ? null : parentPath(path),
+            makeBreadcrumbs(path)
+          ] as const
+        : await Promise.all([listLocalEntries(path), localPathInfo(path)]).then(
+            ([localEntries, info]) => [
+              localEntries,
+              info.path,
+              info.parentPath,
+              info.breadcrumbs
+            ] as const
+          );
       if (componentDisposed || requestId !== localDirectoryRequestId) return;
       localEntries = entries;
-      currentPath = path;
+      currentPath = resolvedPath;
+      localParentPath = parent;
+      localPathBreadcrumbs = breadcrumbs;
       selectedLocal = null;
       if (remember) {
-        const next = rememberPath(localHistory, localHistoryIndex, path);
+        const next = rememberPath(localHistory, localHistoryIndex, resolvedPath);
         localHistory = next.history;
         localHistoryIndex = next.index;
       }
@@ -243,8 +276,8 @@
     }
     if (componentDisposed || requestId !== localDirectoryRequestId) return;
     await tick();
-    if (requestId === localDirectoryRequestId && currentPath === path && localFileListElement) {
-      localFileListElement.scrollTop = localScrollPositions.get(path) ?? 0;
+    if (requestId === localDirectoryRequestId && localFileListElement) {
+      localFileListElement.scrollTop = localScrollPositions.get(currentPath) ?? 0;
     }
   }
 
@@ -448,8 +481,10 @@
   }
 
   function localParent() {
-    if (!currentPath || currentPath === "/") return;
-    void openLocalDirectory(parentPath(currentPath));
+    const parent = leftSession
+      ? (currentPath && currentPath !== "/" ? parentPath(currentPath) : null)
+      : localParentPath;
+    if (parent) void openLocalDirectory(parent);
   }
 
   function remoteParent() {
@@ -732,7 +767,7 @@
     const targetSession = leftSession;
     const destination = targetSession
       ? joinRemote(currentPath, entry.name)
-      : `${currentPath}/${entry.name}`;
+      : await joinLocalPath(currentPath, entry.name);
     if (
       localEntries.some((candidate) => candidate.name === entry.name) &&
       !(await confirmDialog({
@@ -988,7 +1023,7 @@
     if (!name || name.includes("/")) return;
     try {
       if (remote) await createRemoteDirectory(remote.id, joinRemote(currentPath, name));
-      else await createLocalDirectory(`${currentPath}/${name}`);
+      else await createLocalDirectory(await joinLocalPath(currentPath, name));
       await openLocalDirectory(currentPath);
     } catch (cause) {
       error = errorMessage(cause);
@@ -1009,7 +1044,7 @@
       if (remote) {
         await renameRemoteEntry(remote.id, selectedLocal.path, joinRemote(currentPath, name));
       } else {
-        await renameLocalEntry(selectedLocal.path, `${currentPath}/${name}`);
+        await renameLocalEntry(selectedLocal.path, await joinLocalPath(currentPath, name));
       }
       await openLocalDirectory(currentPath);
     } catch (cause) {
@@ -1205,7 +1240,9 @@
               <div></div>
               <button onclick={() => void openLocalDirectory(currentPath)}>Refresh</button>
               <button onclick={() => void newLocalFolder()}>New Folder</button>
-              <button disabled={!selectedLocal} onclick={() => void editLocalPermissions()}>Edit Permissions</button>
+              {#if leftSession || capabilities.localPermissionEditing}
+                <button disabled={!selectedLocal} onclick={() => void editLocalPermissions()}>Edit Permissions</button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1254,7 +1291,7 @@
         {#if localLoading}
           <div class="loading-row">Reading local files…</div>
         {:else}
-          {#if currentPath !== "/"}
+          {#if leftSession ? currentPath !== "/" : localParentPath !== null}
             <button class="file-row parent-row" onclick={localParent}>
               <span class="file-name">
                 <span class="file-kind-icon"><Icon name="folder" size={18} /></span>
@@ -1614,10 +1651,12 @@
     >
       {#if contextMenu.entry}
         <button onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry!)}>Open</button>
-        <button
-          disabled={contextMenu.entry.isDirectory}
-          onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry!, true)}
-        >Open with…</button>
+        {#if capabilities.customApplicationOpen}
+          <button
+            disabled={contextMenu.entry.isDirectory}
+            onclick={() => void openEntry(contextMenu!.pane, contextMenu!.entry!, true)}
+          >Open with…</button>
+        {/if}
         <div></div>
         <button disabled={!session} onclick={() => void contextCopy()}>
           Copy to target directory
@@ -1628,7 +1667,8 @@
       {/if}
       <button onclick={() => void contextRefresh()}>Refresh</button>
       <button onclick={() => void contextNewFolder()}>New Folder</button>
-      {#if contextMenu.entry}
+      {#if contextMenu.entry &&
+        (contextMenu.pane === "remote" || leftSession || capabilities.localPermissionEditing)}
         <button onclick={() => void contextPermissions()}>Edit Permissions</button>
       {/if}
     </div>

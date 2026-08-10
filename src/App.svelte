@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { startDrag } from "@crabnebula/tauri-plugin-drag";
+  import { getCurrentWindow, type DragDropEvent } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
   import AppDialog from "./components/AppDialog.svelte";
   import CollectionControls from "./components/CollectionControls.svelte";
@@ -9,10 +10,19 @@
   import TerminalToolsSidebar from "./features/terminal/TerminalToolsSidebar.svelte";
   import { confirmDialog, promptDialog } from "./lib/dialog";
   import {
+    createNativeTabDragPreviewDataUrl,
     setElementDragPreview,
-    setNativeTabDragPreview
+    type NativeTabDragPreview
   } from "./lib/dragPreview";
   import {
+    findWorkspaceForPane,
+    workspaceIdFromTabId,
+    workspaceTabId,
+    type RuntimeWorkspace
+  } from "./lib/runtimeWorkspace";
+  import {
+    announceNativeTerminalTabDrag,
+    announceNativeTerminalTabDragEnd,
     createDetachedTerminalWindow,
     deleteGroup,
     deleteHost,
@@ -20,6 +30,7 @@
     listIdentities,
     listGroups,
     listenForCommandHistoryChanges,
+    listenForNativeTerminalTabDrags,
     listenForSnippetChanges,
     listenForTerminalTabTransfers,
     saveHost,
@@ -27,9 +38,11 @@
     saveIdentity,
     setIdentitySecret,
     takeDetachedTerminalPayload,
+    terminalTabPointerState,
     transferTerminalTab,
     renameTerminalSession,
-    writeTerminal
+    writeTerminal,
+    type NativeTerminalTabDragSession
   } from "./lib/ipc";
   import type {
     DetachedWindowPayload,
@@ -53,6 +66,9 @@
     splitPane
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
+  import {
+    hasPassedTopTabDragThreshold
+  } from "./lib/tabDrag";
   import { parseQuickConnectInput } from "./lib/quickConnect";
   import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
@@ -191,13 +207,8 @@
   let activeTerminalId = $state<string | null>(null);
   let terminalSessionIds = $state<Record<string, string>>({});
   let detachingPaneIds = $state<string[]>([]);
-  let workspaceName = $state("Workspace");
-  let splitMode = $state(false);
-  let workspaceActive = $state(false);
-  let workspacePaneIds = $state<string[]>([]);
-  let broadcastPaneIds = $state<string[]>([]);
-  let workspaceFocusedPaneId = $state<string | null>(null);
-  let workspaceLayout = $state<WorkspaceLayout | null>(null);
+  let workspaces = $state<RuntimeWorkspace[]>([]);
+  let activeWorkspaceId = $state<string | null>(null);
   let draggedTabId = $state<string | null>(null);
   let paneDropTarget = $state<{ paneId: string; zone: DropZone } | null>(null);
   let paneExtractTarget = $state(false);
@@ -205,14 +216,18 @@
   let activeDividerPath = $state<string | null>(null);
   let panePointerDrag = $state<{
     sourceId: string;
+    pointerId: number;
     startX: number;
     startY: number;
     currentX: number;
     currentY: number;
+    screenX: number;
+    screenY: number;
     dragging: boolean;
   } | null>(null);
   let topTabPointerDrag = $state<{
     sourceId: string;
+    pointerId: number;
     startX: number;
     startY: number;
     currentX: number;
@@ -224,14 +239,55 @@
   let topTabDropTarget = $state<{
     id: string;
     after: boolean;
-    merge: boolean;
   } | null>(null);
   let suppressTopTabClick = false;
   let detachedInitialized = $state(!detachedMode);
   let managerEditorDirty = $state<Record<string, boolean>>({});
+  let topTabCaptureElement: HTMLElement | null = null;
+  let terminalTabDragPollTimer: number | null = null;
+  let terminalTabDragPollInFlight = false;
+  let nativeTerminalTabDragActive = $state(false);
+  let nativeTerminalTabDragSession = $state<NativeTerminalTabDragSession | null>(null);
+  let nativeDragScaleFactor = 1;
   const appearanceSaveTimers = new Map<string, number>();
   const localTerminalAppearanceKey = "heminus-local-terminal-appearance";
-  const terminalTabDragMime = "application/x-heminus-terminal-tab";
+
+  function workspaceById(id: string | null): RuntimeWorkspace | null {
+    if (!id) return null;
+    return workspaces.find((workspace) => workspace.id === id) ?? null;
+  }
+
+  function activeWorkspace(): RuntimeWorkspace | null {
+    return workspaceById(activeWorkspaceId);
+  }
+
+  function workspaceForPane(paneId: string): RuntimeWorkspace | null {
+    return findWorkspaceForPane(workspaces, paneId);
+  }
+
+  function activeWorkspaceContains(paneId: string): boolean {
+    return activeWorkspace()?.paneIds.includes(paneId) ?? false;
+  }
+
+  function restoredWorkspace(
+    name: string,
+    paneIds: string[],
+    layout: WorkspaceLayout | null,
+    activePaneId: string | null
+  ): RuntimeWorkspace {
+    const id = crypto.randomUUID();
+    return {
+      id,
+      name: name || "Workspace",
+      paneIds,
+      layout: normalizeLayout(layout, paneIds),
+      activePaneId: activePaneId && paneIds.includes(activePaneId)
+        ? activePaneId
+        : paneIds[0] ?? null,
+      focusedPaneId: null,
+      broadcastPaneIds: []
+    };
+  }
 
   $effect(() => {
     if (page !== "new-tab") return;
@@ -243,9 +299,17 @@
 
   onMount(() => {
     if (detachedMode) void initializeDetachedWindow();
-    else void refreshHosts();
+    else {
+      void refreshHosts();
+      void tick().then(async () => {
+        await appWindow?.show();
+        await appWindow?.setFocus();
+      });
+    }
     let transferListenerDisposed = false;
     let removeTransferListener: (() => void) | null = null;
+    let removeNativeDragListener: (() => void) | null = null;
+    let removeNativeDropListener: (() => void) | null = null;
     let removeSnippetListener: (() => void) | null = null;
     let removeCommandHistoryListener: (() => void) | null = null;
     void listenForSnippetChanges(() => {
@@ -273,6 +337,28 @@
       if (transferListenerDisposed) unlisten();
       else removeTransferListener = unlisten;
     }).catch((cause) => showMessage(cause, true));
+    void listenForNativeTerminalTabDrags(
+      (session) => {
+        nativeTerminalTabDragSession = session;
+      },
+      (sessionId) => {
+        if (nativeTerminalTabDragSession?.id === sessionId) clearNativeTerminalTabDragFeedback();
+      }
+    ).then((unlisten) => {
+      if (transferListenerDisposed) unlisten();
+      else removeNativeDragListener = unlisten;
+    }).catch((cause) => showMessage(cause, true));
+    if (appWindow) {
+      void appWindow.scaleFactor().then((scaleFactor) => {
+        nativeDragScaleFactor = scaleFactor;
+      }).catch((cause) => showMessage(cause, true));
+      void appWindow.onDragDropEvent(({ payload }) => {
+        handleNativeTerminalTabDragDropEvent(payload);
+      }).then((unlisten) => {
+        if (transferListenerDisposed) unlisten();
+        else removeNativeDropListener = unlisten;
+      }).catch((cause) => showMessage(cause, true));
+    }
     const onKeydown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -299,12 +385,15 @@
     return () => {
       transferListenerDisposed = true;
       removeTransferListener?.();
+      removeNativeDragListener?.();
+      removeNativeDropListener?.();
       removeSnippetListener?.();
       removeCommandHistoryListener?.();
       window.removeEventListener("keydown", onKeydown);
       if (terminalToolsCloseTimer !== null) {
         window.clearTimeout(terminalToolsCloseTimer);
       }
+      stopTerminalTabPointerPolling();
       for (const timer of appearanceSaveTimers.values()) window.clearTimeout(timer);
       appearanceSaveTimers.clear();
     };
@@ -333,25 +422,24 @@
       await loadTerminalComponent();
       const workspace = payload.workspace;
       if (workspace && terminalTabs.length > 1) {
-        workspacePaneIds = workspace.paneIds.filter((id) =>
+        const paneIds = workspace.paneIds.filter((id) =>
           terminalTabs.some((tab) => tab.id === id)
         );
-        if (workspacePaneIds.length > 1) {
-          workspaceName = workspace.name || "Workspace";
-          workspaceLayout = normalizeLayout(workspace.layout, workspacePaneIds);
-          splitMode = true;
-          workspaceActive = true;
-          topTabOrder = ["workspace"];
-          activeTerminalId = workspace.activePaneId &&
-            workspacePaneIds.includes(workspace.activePaneId)
-            ? workspace.activePaneId
-            : workspacePaneIds[0];
+        if (paneIds.length > 1) {
+          const runtimeWorkspace = restoredWorkspace(
+            workspace.name,
+            paneIds,
+            workspace.layout,
+            workspace.activePaneId
+          );
+          workspaces = [runtimeWorkspace];
+          activeWorkspaceId = runtimeWorkspace.id;
+          topTabOrder = [workspaceTabId(runtimeWorkspace.id)];
+          activeTerminalId = runtimeWorkspace.activePaneId;
         }
       }
-      if (!splitMode) {
-        workspacePaneIds = [];
-        workspaceLayout = null;
-        workspaceActive = false;
+      if (workspaces.length === 0) {
+        activeWorkspaceId = null;
         topTabOrder = terminalTabs.map((tab) => tab.id);
         activeTerminalId = terminalTabs[0]?.id ?? null;
       }
@@ -377,7 +465,15 @@
       .elementsFromPoint(clientX, clientY)
       .map((element) => element.closest<HTMLElement>("[data-top-tab-id]"))
       .find((element) => element?.dataset.topTabId !== undefined);
+    const paneTarget = document
+      .elementsFromPoint(clientX, clientY)
+      .map((element) => element.closest<HTMLElement>(".terminal-instance"))
+      .find((element) => element?.dataset.paneId !== undefined);
     const targetId = tabTarget?.dataset.topTabId ?? null;
+    const targetPaneId = paneTarget?.dataset.paneId ?? null;
+    const targetPaneZone = paneTarget
+      ? paneDropZone(clientX, clientY, paneTarget)
+      : "right";
     const targetBounds = tabTarget?.getBoundingClientRect();
     const insertAfter = Boolean(
       targetBounds && clientX > targetBounds.left + targetBounds.width / 2
@@ -407,6 +503,22 @@
     await loadTerminalComponent();
 
     const incomingIds = incomingTabs.map((tab) => tab.id);
+    if (!payload.workspace && targetPaneId && workspaceForPane(targetPaneId)) {
+      for (const incomingId of incomingIds) {
+        movePaneIntoPane(incomingId, targetPaneId, targetPaneZone);
+      }
+      page = "terminal";
+      return;
+    }
+    if (!payload.workspace && targetPaneId) {
+      createWorkspace(
+        [targetPaneId, ...incomingIds],
+        targetPaneId,
+        targetPaneZone
+      );
+      page = "terminal";
+      return;
+    }
     const nextOrder = topTabOrder.filter((id) => !incomingIds.includes(id));
     const targetIndex = targetId ? nextOrder.indexOf(targetId) : -1;
     const insertAt =
@@ -416,30 +528,22 @@
     const incomingWorkspaceIds = payload.workspace?.paneIds.filter((id) =>
       incomingIds.includes(id)
     ) ?? [];
-    const canRestoreWorkspace =
-      incomingWorkspaceIds.length > 1 && workspacePaneIds.length < 2;
-    if (canRestoreWorkspace && payload.workspace) {
-      const orderWithoutWorkspace = nextOrder.filter((id) => id !== "workspace");
-      orderWithoutWorkspace.splice(
-        Math.min(insertAt, orderWithoutWorkspace.length),
-        0,
-        "workspace"
-      );
-      topTabOrder = orderWithoutWorkspace;
-      workspaceName = payload.workspace.name || "Workspace";
-      workspacePaneIds = incomingWorkspaceIds;
-      workspaceLayout = normalizeLayout(
+    if (incomingWorkspaceIds.length > 1 && payload.workspace) {
+      const runtimeWorkspace = restoredWorkspace(
+        payload.workspace.name,
+        incomingWorkspaceIds,
         payload.workspace.layout,
-        incomingWorkspaceIds
+        payload.workspace.activePaneId
       );
-      splitMode = true;
-      workspaceActive = true;
-      workspaceFocusedPaneId = null;
-      activeTerminalId =
-        payload.workspace.activePaneId &&
-        incomingWorkspaceIds.includes(payload.workspace.activePaneId)
-          ? payload.workspace.activePaneId
-          : incomingWorkspaceIds[0];
+      nextOrder.splice(
+        Math.min(insertAt, nextOrder.length),
+        0,
+        workspaceTabId(runtimeWorkspace.id)
+      );
+      topTabOrder = nextOrder;
+      workspaces = [...workspaces, runtimeWorkspace];
+      activeWorkspaceId = runtimeWorkspace.id;
+      activeTerminalId = runtimeWorkspace.activePaneId;
     } else {
       nextOrder.splice(
         Math.min(insertAt, nextOrder.length),
@@ -447,7 +551,7 @@
         ...incomingIds
       );
       topTabOrder = nextOrder;
-      workspaceActive = false;
+      activeWorkspaceId = null;
       activeTerminalId = incomingIds[0] ?? activeTerminalId;
     }
     page = "terminal";
@@ -1486,7 +1590,7 @@
     terminalTabs.push(tab);
     topTabOrder.push(tab.id);
     activeTerminalId = tab.id;
-    workspaceActive = false;
+    activeWorkspaceId = null;
     page = "terminal";
     await loadTerminalComponent();
   }
@@ -1504,30 +1608,37 @@
   async function activateStandaloneTerminal(id: string) {
     if (!(await preparePageChange("terminal"))) return;
     activeTerminalId = id;
-    workspaceActive = false;
+    activeWorkspaceId = null;
     page = "terminal";
   }
 
-  async function activateWorkspace() {
-    if (!splitMode || workspacePaneIds.length < 2) return;
+  async function activateWorkspace(workspaceId: string) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace || workspace.paneIds.length < 2) return;
     if (!(await preparePageChange("terminal"))) return;
-    workspaceActive = true;
-    if (!activeTerminalId || !workspacePaneIds.includes(activeTerminalId)) {
-      activeTerminalId = workspacePaneIds[0] ?? null;
-    }
+    activeWorkspaceId = workspace.id;
+    activeTerminalId = workspace.activePaneId && workspace.paneIds.includes(workspace.activePaneId)
+      ? workspace.activePaneId
+      : workspace.paneIds[0] ?? null;
     page = "terminal";
   }
 
   function activateTerminalPane(id: string) {
     activeTerminalId = id;
-    if (workspacePaneIds.includes(id)) workspaceActive = true;
+    const workspace = workspaceForPane(id);
+    if (workspace) {
+      activeWorkspaceId = workspace.id;
+      workspace.activePaneId = id;
+    } else {
+      activeWorkspaceId = null;
+    }
     page = "terminal";
   }
 
   function openTerminalContextMenu(event: MouseEvent, tab: TerminalTab) {
     event.preventDefault();
     const width = 226;
-    const height = tab.id === "workspace" ? 146 : 252;
+    const height = workspaceIdFromTabId(tab.id) ? 146 : 252;
     terminalContextMenu = {
       tab,
       x: Math.max(10, Math.min(event.clientX, window.innerWidth - width - 10)),
@@ -1595,26 +1706,28 @@
     }
   }
 
-  async function detachWorkspace() {
-    const tabs = workspacePaneIds
+  async function detachWorkspace(workspaceId = activeWorkspaceId) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return;
+    const tabs = workspace.paneIds
       .map((id) => terminalTabs.find((tab) => tab.id === id))
       .filter((tab): tab is TerminalTab => Boolean(tab));
     if (tabs.length < 2) return;
     const payload: DetachedWindowPayload = {
-      title: workspaceName || "Workspace",
+      title: workspace.name || "Workspace",
       tabs: tabs.map(detachedTabSpec),
       workspace: {
-        name: workspaceName || "Workspace",
+        name: workspace.name || "Workspace",
         paneIds: tabs.map((tab) => tab.id),
-        layout: normalizeLayout(workspaceLayout, tabs.map((tab) => tab.id)),
-        activePaneId: activeTerminalId
+        layout: normalizeLayout(workspace.layout, tabs.map((tab) => tab.id)),
+        activePaneId: workspace.activePaneId
       }
     };
     try {
       await createDetachedTerminalWindow(payload);
       const ids = tabs.map((tab) => tab.id);
       detachingPaneIds = [...new Set([...detachingPaneIds, ...ids])];
-      closeCurrentWorkspace();
+      closeWorkspace(workspace.id);
       window.setTimeout(() => {
         detachingPaneIds = detachingPaneIds.filter((id) => !ids.includes(id));
       }, 2_000);
@@ -1627,20 +1740,23 @@
     payload: DetachedWindowPayload;
     paneIds: string[];
   } | null {
-    if (sourceId === "workspace") {
-      const tabs = workspacePaneIds
+    const workspaceId = workspaceIdFromTabId(sourceId);
+    if (workspaceId) {
+      const workspace = workspaceById(workspaceId);
+      if (!workspace) return null;
+      const tabs = workspace.paneIds
         .map((id) => terminalTabs.find((tab) => tab.id === id))
         .filter((tab): tab is TerminalTab => Boolean(tab));
       if (tabs.length < 2) return null;
       return {
         payload: {
-          title: workspaceName || "Workspace",
+          title: workspace.name || "Workspace",
           tabs: tabs.map(detachedTabSpec),
           workspace: {
-            name: workspaceName || "Workspace",
+            name: workspace.name || "Workspace",
             paneIds: tabs.map((tab) => tab.id),
-            layout: normalizeLayout(workspaceLayout, tabs.map((tab) => tab.id)),
-            activePaneId: activeTerminalId
+            layout: normalizeLayout(workspace.layout, tabs.map((tab) => tab.id)),
+            activePaneId: workspace.activePaneId
           }
         },
         paneIds: tabs.map((tab) => tab.id)
@@ -1668,8 +1784,13 @@
     const { payload, paneIds } = transfer;
     detachingPaneIds = [...new Set([...detachingPaneIds, ...paneIds])];
     try {
-      await transferTerminalTab(payload, screenX, screenY);
-      if (sourceId === "workspace") closeCurrentWorkspace();
+      const result = await transferTerminalTab(payload, screenX, screenY);
+      if (!result.transferred) {
+        detachingPaneIds = detachingPaneIds.filter((id) => !paneIds.includes(id));
+        return;
+      }
+      const workspaceId = workspaceIdFromTabId(sourceId);
+      if (workspaceId) closeWorkspace(workspaceId);
       else closeTerminalTab(sourceId);
       if (detachedMode && terminalTabs.length === 0) {
         window.setTimeout(() => void appWindow?.close(), 0);
@@ -1683,35 +1804,44 @@
     }
   }
 
-  function closeCurrentWorkspace() {
-    for (const id of [...workspacePaneIds]) closeTerminalTab(id);
+  function closeWorkspace(workspaceId = activeWorkspaceId) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return;
+    for (const id of [...workspace.paneIds]) closeTerminalTab(id);
   }
 
   function focusWorkspacePane(id: string) {
+    const workspace = workspaceForPane(id);
+    if (!workspace) return;
     activeTerminalId = id;
-    workspaceActive = true;
-    workspaceFocusedPaneId = workspaceFocusedPaneId === id ? null : id;
+    activeWorkspaceId = workspace.id;
+    workspace.activePaneId = id;
+    workspace.focusedPaneId = workspace.focusedPaneId === id ? null : id;
   }
 
   function closeTerminalTab(id: string) {
     const index = terminalTabs.findIndex((tab) => tab.id === id);
     if (index < 0) return;
-    const wasWorkspacePane = workspacePaneIds.includes(id);
+    const owner = workspaceForPane(id);
     terminalTabs.splice(index, 1);
     topTabOrder = topTabOrder.filter((tabId) => tabId !== id);
-    if (wasWorkspacePane) {
-      workspacePaneIds = workspacePaneIds.filter((paneId) => paneId !== id);
-      broadcastPaneIds = broadcastPaneIds.filter((paneId) => paneId !== id);
-      workspaceLayout = removeLayoutPane(workspaceLayout, id);
-      dissolveWorkspaceIfNeeded();
+    if (owner) {
+      owner.paneIds = owner.paneIds.filter((paneId) => paneId !== id);
+      owner.broadcastPaneIds = owner.broadcastPaneIds.filter((paneId) => paneId !== id);
+      owner.layout = removeLayoutPane(owner.layout, id);
+      if (owner.focusedPaneId === id) owner.focusedPaneId = null;
+      if (owner.activePaneId === id) owner.activePaneId = owner.paneIds[0] ?? null;
+      dissolveWorkspaceIfNeeded(owner.id);
     }
     if (activeTerminalId === id) {
-      if (workspaceActive && workspacePaneIds.length >= 2) {
-        activeTerminalId = workspacePaneIds[0] ?? null;
+      const workspace = activeWorkspace();
+      if (workspace && workspace.paneIds.length >= 2) {
+        activeTerminalId = workspace.activePaneId ?? workspace.paneIds[0] ?? null;
       } else {
         const next = standaloneTerminalTabs()[Math.min(index, standaloneTerminalTabs().length - 1)];
-        activeTerminalId = next?.id ?? workspacePaneIds[0] ?? null;
-        workspaceActive = !next && workspacePaneIds.length >= 2;
+        const nextWorkspace = workspaces[0] ?? null;
+        activeTerminalId = next?.id ?? nextWorkspace?.activePaneId ?? null;
+        activeWorkspaceId = next ? null : nextWorkspace?.id ?? null;
       }
       if (!activeTerminalId) page = "new-tab";
     }
@@ -1723,7 +1853,7 @@
   }
 
   function standaloneTerminalTabs(): TerminalTab[] {
-    return terminalTabs.filter((tab) => !workspacePaneIds.includes(tab.id));
+    return terminalTabs.filter((tab) => !workspaceForPane(tab.id));
   }
 
   function createWorkspace(
@@ -1736,29 +1866,53 @@
     );
     if (validIds.length < 2) return;
     const positions = validIds
-      .map((id) => topTabOrder.indexOf(id))
+      .map((id) => {
+        const owner = workspaceForPane(id);
+        return topTabOrder.indexOf(owner ? workspaceTabId(owner.id) : id);
+      })
       .filter((position) => position >= 0);
     const insertAt = positions.length > 0 ? Math.min(...positions) : topTabOrder.length;
-    topTabOrder = topTabOrder.filter((id) => !validIds.includes(id) && id !== "workspace");
-    topTabOrder.splice(Math.min(insertAt, topTabOrder.length), 0, "workspace");
-    workspacePaneIds = validIds;
+    for (const id of validIds) removePaneFromWorkspace(id);
+    topTabOrder = topTabOrder.filter((id) => !validIds.includes(id));
     const firstId = targetId && validIds.includes(targetId) ? targetId : validIds[0];
-    workspaceLayout = splitPane(null, firstId, null, "right");
+    let layout = splitPane(null, firstId, null, "right");
     for (const id of validIds.filter((candidate) => candidate !== firstId)) {
-      workspaceLayout = splitPane(workspaceLayout, id, firstId, zone);
+      layout = splitPane(layout, id, firstId, zone);
     }
-    splitMode = true;
-    workspaceActive = true;
-    broadcastPaneIds = [];
-    activeTerminalId = validIds.at(-1) ?? firstId;
-    workspaceFocusedPaneId = null;
+    const workspace = restoredWorkspace(
+      "Workspace",
+      validIds,
+      layout,
+      validIds.at(-1) ?? firstId
+    );
+    workspaces = [...workspaces, workspace];
+    topTabOrder.splice(
+      Math.min(insertAt, topTabOrder.length),
+      0,
+      workspaceTabId(workspace.id)
+    );
+    activeWorkspaceId = workspace.id;
+    activeTerminalId = workspace.activePaneId;
   }
 
-  function dissolveWorkspaceIfNeeded() {
-    if (workspacePaneIds.length >= 2) return;
-    const remainingId = workspacePaneIds[0] ?? null;
-    const workspaceIndex = topTabOrder.indexOf("workspace");
-    topTabOrder = topTabOrder.filter((id) => id !== "workspace");
+  function removePaneFromWorkspace(paneId: string) {
+    const workspace = workspaceForPane(paneId);
+    if (!workspace) return;
+    workspace.paneIds = workspace.paneIds.filter((id) => id !== paneId);
+    workspace.broadcastPaneIds = workspace.broadcastPaneIds.filter((id) => id !== paneId);
+    workspace.layout = removeLayoutPane(workspace.layout, paneId);
+    if (workspace.focusedPaneId === paneId) workspace.focusedPaneId = null;
+    if (workspace.activePaneId === paneId) workspace.activePaneId = workspace.paneIds[0] ?? null;
+    dissolveWorkspaceIfNeeded(workspace.id);
+  }
+
+  function dissolveWorkspaceIfNeeded(workspaceId: string) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace || workspace.paneIds.length >= 2) return;
+    const remainingId = workspace.paneIds[0] ?? null;
+    const tabId = workspaceTabId(workspace.id);
+    const workspaceIndex = topTabOrder.indexOf(tabId);
+    topTabOrder = topTabOrder.filter((id) => id !== tabId);
     if (remainingId && !topTabOrder.includes(remainingId)) {
       topTabOrder.splice(
         workspaceIndex >= 0 ? Math.min(workspaceIndex, topTabOrder.length) : topTabOrder.length,
@@ -1766,12 +1920,8 @@
         remainingId
       );
     }
-    workspacePaneIds = [];
-    workspaceLayout = null;
-    splitMode = false;
-    workspaceActive = false;
-    broadcastPaneIds = [];
-    workspaceFocusedPaneId = null;
+    workspaces = workspaces.filter((candidate) => candidate.id !== workspace.id);
+    if (activeWorkspaceId === workspace.id) activeWorkspaceId = null;
   }
 
   function registerTerminalSession(paneId: string, sessionId: string) {
@@ -1904,9 +2054,10 @@
   }
 
   function broadcastTerminalBytes(sourcePaneId: string, bytes: number[]) {
-    if (!broadcastPaneIds.includes(sourcePaneId) || bytes.length === 0) return;
+    const workspace = workspaceForPane(sourcePaneId);
+    if (!workspace?.broadcastPaneIds.includes(sourcePaneId) || bytes.length === 0) return;
     for (const [paneId, sessionId] of Object.entries(terminalSessionIds)) {
-      if (paneId !== sourcePaneId && broadcastPaneIds.includes(paneId)) {
+      if (paneId !== sourcePaneId && workspace.broadcastPaneIds.includes(paneId)) {
         void writeTerminal(sessionId, bytes).catch((cause) => {
           console.error("Broadcast write failed", cause);
         });
@@ -1915,8 +2066,9 @@
   }
 
   function toggleSplit() {
-    if (splitMode) {
-      activateWorkspace();
+    const workspace = activeWorkspace();
+    if (workspace) {
+      void activateWorkspace(workspace.id);
       return;
     }
     const paneIds = standaloneTerminalTabs().map((tab) => tab.id);
@@ -1925,10 +2077,10 @@
   }
 
   async function toggleBroadcast(paneId = activeTerminalId) {
-    if (!paneId || !workspacePaneIds.includes(paneId)) return;
-    if (broadcastPaneIds.length === 0) {
-      if (!splitMode) toggleSplit();
-      if (!splitMode || workspacePaneIds.length < 2) return;
+    if (!paneId) return;
+    const workspace = workspaceForPane(paneId);
+    if (!workspace) return;
+    if (workspace.broadcastPaneIds.length === 0) {
       if (
         !(await confirmDialog({
           title: "Enable broadcast input?",
@@ -1939,26 +2091,28 @@
       ) {
         return;
       }
-      workspaceActive = true;
-      broadcastPaneIds = [...workspacePaneIds];
+      activeWorkspaceId = workspace.id;
+      workspace.broadcastPaneIds = [...workspace.paneIds];
       return;
     }
-    broadcastPaneIds = broadcastPaneIds.includes(paneId)
-      ? broadcastPaneIds.filter((id) => id !== paneId)
-      : [...broadcastPaneIds, paneId];
+    workspace.broadcastPaneIds = workspace.broadcastPaneIds.includes(paneId)
+      ? workspace.broadcastPaneIds.filter((id) => id !== paneId)
+      : [...workspace.broadcastPaneIds, paneId];
   }
 
-  async function renameWorkspace() {
+  async function renameWorkspace(workspaceId = activeWorkspaceId) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return;
     const name = (
       await promptDialog({
         title: "Rename workspace",
         label: "Workspace name",
-        initialValue: workspaceName,
+        initialValue: workspace.name,
         confirmLabel: "Rename"
       })
     )?.trim();
     if (!name) return;
-    workspaceName = name;
+    workspace.name = name;
   }
 
   function finishTabDrag() {
@@ -1969,24 +2123,21 @@
   }
 
   function extractWorkspacePane(sourceId: string) {
-    if (!workspacePaneIds.includes(sourceId)) {
+    const workspace = workspaceForPane(sourceId);
+    if (!workspace) {
       finishTabDrag();
       return;
     }
-    const workspaceIndex = topTabOrder.indexOf("workspace");
-    workspacePaneIds = workspacePaneIds.filter((id) => id !== sourceId);
-    broadcastPaneIds = broadcastPaneIds.filter((id) => id !== sourceId);
-    workspaceLayout = removeLayoutPane(workspaceLayout, sourceId);
+    const workspaceIndex = topTabOrder.indexOf(workspaceTabId(workspace.id));
+    removePaneFromWorkspace(sourceId);
     topTabOrder = topTabOrder.filter((id) => id !== sourceId);
     topTabOrder.splice(
       workspaceIndex >= 0 ? workspaceIndex + 1 : topTabOrder.length,
       0,
       sourceId
     );
-    dissolveWorkspaceIfNeeded();
     activeTerminalId = sourceId;
-    workspaceActive = false;
-    workspaceFocusedPaneId = null;
+    activeWorkspaceId = null;
     page = "terminal";
     finishTabDrag();
   }
@@ -1997,6 +2148,17 @@
     element: HTMLDivElement,
     paneId: string
   ) {
+    paneDropTarget = {
+      paneId,
+      zone: paneDropZone(clientX, clientY, element)
+    };
+  }
+
+  function paneDropZone(
+    clientX: number,
+    clientY: number,
+    element: Element
+  ): DropZone {
     const rect = element.getBoundingClientRect();
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
@@ -2007,7 +2169,7 @@
       ["bottom", 1 - y]
     ];
     distances.sort((left, right) => left[1] - right[1]);
-    paneDropTarget = { paneId, zone: distances[0][0] };
+    return distances[0][0];
   }
 
   function movePaneIntoPane(
@@ -2019,62 +2181,84 @@
       finishTabDrag();
       return;
     }
-    if (!workspacePaneIds.includes(targetId)) {
+    const targetWorkspace = workspaceForPane(targetId);
+    if (!targetWorkspace) {
       createWorkspace([targetId, sourceId], targetId, zone);
       finishTabDrag();
       return;
     }
-    if (!workspacePaneIds.includes(sourceId)) {
-      workspacePaneIds = [...workspacePaneIds, sourceId];
+    const sourceWorkspace = workspaceForPane(sourceId);
+    if (sourceWorkspace?.id !== targetWorkspace.id) {
+      if (sourceWorkspace) removePaneFromWorkspace(sourceId);
+      targetWorkspace.paneIds = [...targetWorkspace.paneIds, sourceId];
       topTabOrder = topTabOrder.filter((id) => id !== sourceId);
-      if (!topTabOrder.includes("workspace")) topTabOrder.push("workspace");
+      const targetTabId = workspaceTabId(targetWorkspace.id);
+      if (!topTabOrder.includes(targetTabId)) topTabOrder.push(targetTabId);
     }
-    workspaceLayout = splitPane(workspaceLayout, sourceId, targetId, zone);
-    const order = leafOrder(workspaceLayout);
-    workspacePaneIds.sort((left, right) => order.indexOf(left) - order.indexOf(right));
-    splitMode = true;
-    workspaceActive = true;
+    targetWorkspace.layout = splitPane(targetWorkspace.layout, sourceId, targetId, zone);
+    const order = leafOrder(targetWorkspace.layout);
+    targetWorkspace.paneIds.sort((left, right) => order.indexOf(left) - order.indexOf(right));
+    activeWorkspaceId = targetWorkspace.id;
     activeTerminalId = sourceId;
-    workspaceFocusedPaneId = null;
+    targetWorkspace.activePaneId = sourceId;
+    targetWorkspace.focusedPaneId = null;
     finishTabDrag();
   }
 
   function startPanePointerDrag(event: PointerEvent, sourceId: string) {
     if (event.button !== 0) return;
     event.preventDefault();
-    workspaceFocusedPaneId = null;
+    const workspace = workspaceForPane(sourceId);
+    if (workspace) workspace.focusedPaneId = null;
     activeTerminalId = sourceId;
     panePointerDrag = {
       sourceId,
+      pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       currentX: event.clientX,
       currentY: event.clientY,
+      screenX: event.screenX,
+      screenY: event.screenY,
       dragging: false
     };
   }
 
   function movePanePointerDrag(event: PointerEvent) {
-    if (!panePointerDrag) return;
-    panePointerDrag.currentX = event.clientX;
-    panePointerDrag.currentY = event.clientY;
-    const moved = Math.hypot(
-      event.clientX - panePointerDrag.startX,
-      event.clientY - panePointerDrag.startY
-    );
-    if (!panePointerDrag.dragging && moved < 6) return;
+    const drag = panePointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag.currentX = event.clientX;
+    drag.currentY = event.clientY;
+    drag.screenX = event.screenX;
+    drag.screenY = event.screenY;
+    if (
+      !drag.dragging &&
+      !hasPassedTopTabDragThreshold(
+        drag.startX,
+        drag.startY,
+        event.clientX,
+        event.clientY
+      )
+    ) return;
     event.preventDefault();
-    panePointerDrag.dragging = true;
-    draggedTabId = panePointerDrag.sourceId;
+    if (!drag.dragging) {
+      drag.dragging = true;
+      draggedTabId = drag.sourceId;
+      if (appWindow) {
+        nativeTerminalTabDragActive = true;
+        void startNativeTerminalTabDrag("workspace-pane", drag.pointerId);
+        return;
+      }
+    }
     const target = document
       .elementsFromPoint(event.clientX, event.clientY)
       .map((element) => element.closest<HTMLElement>(".terminal-instance"))
       .find((element) => element?.dataset.paneId !== undefined);
     const targetId = target?.dataset.paneId;
-    if (!target || !targetId || targetId === panePointerDrag.sourceId) {
+    if (!target || !targetId || targetId === drag.sourceId) {
       paneDropTarget = null;
       paneExtractTarget =
-        workspacePaneIds.includes(panePointerDrag.sourceId) &&
+        Boolean(workspaceForPane(drag.sourceId)) &&
         document
           .elementsFromPoint(event.clientX, event.clientY)
           .some((element) => Boolean(element.closest(".titlebar")));
@@ -2089,102 +2273,223 @@
     );
   }
 
-  function finishPanePointerDrag() {
-    if (!panePointerDrag) return;
+  function finishPanePointerDrag(event?: PointerEvent) {
+    const drag = panePointerDrag;
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    finishPanePointerDragAt(
+      drag.pointerId,
+      event?.clientX ?? drag.currentX,
+      event?.clientY ?? drag.currentY,
+      event?.screenX ?? drag.screenX,
+      event?.screenY ?? drag.screenY
+    );
+  }
+
+  function finishPanePointerDragAt(
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    screenX: number,
+    screenY: number
+  ) {
+    const drag = panePointerDrag;
+    if (!drag || pointerId !== drag.pointerId) return;
+    drag.currentX = clientX;
+    drag.currentY = clientY;
+    drag.screenX = screenX;
+    drag.screenY = screenY;
+    if (drag.dragging) {
+      updateTopTabDropTargetsAt(drag.sourceId, true, clientX, clientY);
+      updatePaneExtractTargetAt(drag.sourceId, clientX, clientY);
+    }
     const target = paneDropTarget;
     const extract = paneExtractTarget;
-    const sourceId = panePointerDrag.sourceId;
+    const tabTarget = topTabDropTarget;
+    const sourceId = drag.sourceId;
     panePointerDrag = null;
+    if (!drag.dragging) return;
     if (target) {
       movePaneIntoPane(sourceId, target.paneId, target.zone);
-    } else if (extract) {
+      return;
+    }
+    if (tabTarget || extract) {
       extractWorkspacePane(sourceId);
-    } else {
+      if (tabTarget) reorderTopTab(sourceId, tabTarget.id, tabTarget.after);
       finishTabDrag();
+      return;
+    }
+    finishTabDrag();
+    if (
+      appWindow &&
+      Number.isFinite(screenX) &&
+      Number.isFinite(screenY) &&
+      (screenX !== 0 || screenY !== 0) &&
+      transferableTopTab(sourceId)
+    ) {
+      void transferDraggedTopTab(sourceId, screenX, screenY);
     }
   }
 
-  function startTopTabNativeDrag(event: DragEvent, sourceId: string) {
+  function startTopTabPointerDrag(event: PointerEvent, sourceId: string) {
     if (
+      event.button !== 0 ||
       (event.target as HTMLElement).closest(".terminal-tab-close") ||
-      !event.dataTransfer
+      panePointerDrag
     ) {
-      event.preventDefault();
       return;
     }
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(terminalTabDragMime, sourceId);
+    topTabCaptureElement = event.currentTarget as HTMLElement;
     topTabPointerDrag = {
       sourceId,
+      pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       currentX: event.clientX,
       currentY: event.clientY,
       screenX: event.screenX,
       screenY: event.screenY,
-      dragging: true
+      dragging: false
     };
-    draggedTabId = sourceId;
-    const terminalTab = terminalTabs.find((tab) => tab.id === sourceId);
-    const icon =
-      sourceId === "vault"
-        ? "vault"
-        : sourceId === "sftp"
-          ? "folder"
-          : sourceId === "workspace"
-            ? "grid"
-            : "terminal";
-    const label =
-      sourceId === "vault"
-        ? "Vaults"
-        : sourceId === "sftp"
-          ? "SFTP"
-          : sourceId === "workspace"
-            ? workspaceName || "Workspace"
-            : terminalTab?.title ?? "Terminal";
-    const themedTab =
-      terminalTab ??
-      terminalTabs.find((tab) => tab.id === activeTerminalId) ??
-      null;
-    const theme = terminalTheme(themedTab?.appearance.theme);
-    setNativeTabDragPreview(event, {
-      label,
-      icon,
-      background: theme.chrome.headerBackground,
-      activeBackground: theme.chrome.activeBackground,
-      foreground: theme.chrome.headerForeground,
-      border: theme.chrome.headerBorder
-    });
   }
 
-  function moveTopTabNativeDrag(event: DragEvent) {
-    if (!topTabPointerDrag) return;
-    if (event.clientX !== 0 || event.clientY !== 0) {
-      topTabPointerDrag.currentX = event.clientX;
-      topTabPointerDrag.currentY = event.clientY;
-    }
-    if (event.screenX !== 0 || event.screenY !== 0) {
-      topTabPointerDrag.screenX = event.screenX;
-      topTabPointerDrag.screenY = event.screenY;
+  function moveTopTabPointerDrag(event: PointerEvent) {
+    const drag = topTabPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag.currentX = event.clientX;
+    drag.currentY = event.clientY;
+    drag.screenX = event.screenX;
+    drag.screenY = event.screenY;
+    if (!drag.dragging) {
+      if (!hasPassedTopTabDragThreshold(
+        drag.startX,
+        drag.startY,
+        event.clientX,
+        event.clientY
+      )) return;
+      drag.dragging = true;
+      draggedTabId = drag.sourceId;
+      if (appWindow) {
+        event.preventDefault();
+        nativeTerminalTabDragActive = true;
+        topTabCaptureElement = null;
+        void startNativeTerminalTabDrag("top-tab", drag.pointerId);
+        return;
+      }
+      if (topTabCaptureElement && !topTabCaptureElement.hasPointerCapture(drag.pointerId)) {
+        topTabCaptureElement.setPointerCapture(drag.pointerId);
+      }
+      startTerminalTabPointerPolling();
     }
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    const elements = document.elementsFromPoint(event.clientX, event.clientY);
-    const sourceIsTerminal = terminalTabs.some((tab) => tab.id === topTabPointerDrag?.sourceId);
+    updateTopTabDropTargets(event.clientX, event.clientY);
+  }
+
+  async function startNativeTerminalTabDrag(
+    sourceKind: NativeTerminalTabDragSession["sourceKind"],
+    pointerId: number
+  ) {
+    const drag = sourceKind === "top-tab" ? topTabPointerDrag : panePointerDrag;
+    if (!drag || drag.pointerId !== pointerId) {
+      nativeTerminalTabDragActive = false;
+      return;
+    }
+    const previewOptions = nativeTopTabDragPreview(drag.sourceId);
+    const transfer = transferableTopTab(drag.sourceId);
+    const session: NativeTerminalTabDragSession = {
+      id: crypto.randomUUID(),
+      sourceWindowLabel: appWindow?.label ?? "",
+      sourceId: drag.sourceId,
+      sourceKind,
+      canSplit: sourceKind === "workspace-pane" || Boolean(
+        transfer && !transfer.payload.workspace && transfer.paneIds.length === 1
+      ),
+      preview: previewOptions
+    };
+    try {
+      nativeTerminalTabDragSession = session;
+      startTerminalTabPointerPolling();
+      await announceNativeTerminalTabDrag(session);
+      const preview = createNativeTabDragPreviewDataUrl(previewOptions);
+      if (!preview) throw new Error("Could not render the terminal tab drag preview.");
+      await startDrag({
+        item: {
+          data: drag.sourceId,
+          types: ["app.heminus.terminal-tab"]
+        },
+        icon: preview,
+        mode: "move"
+      });
+      const pointer = await terminalTabPointerState();
+      const current = sourceKind === "top-tab" ? topTabPointerDrag : panePointerDrag;
+      if (!pointer || !current || current.pointerId !== pointerId) return;
+      if (sourceKind === "top-tab") {
+        finishTopTabPointerDragAt(
+          pointerId,
+          pointer.clientX,
+          pointer.clientY,
+          pointer.screenX,
+          pointer.screenY
+        );
+      } else {
+        finishPanePointerDragAt(
+          pointerId,
+          pointer.clientX,
+          pointer.clientY,
+          pointer.screenX,
+          pointer.screenY
+        );
+      }
+    } catch (cause) {
+      if (sourceKind === "top-tab") topTabPointerDrag = null;
+      else panePointerDrag = null;
+      finishTabDrag();
+      showMessage(cause, true);
+    } finally {
+      stopTerminalTabPointerPolling();
+      try {
+        await announceNativeTerminalTabDragEnd(session.id);
+      } catch (cause) {
+        console.error("Could not announce the end of native tab dragging", cause);
+      }
+      if (nativeTerminalTabDragSession?.id === session.id) {
+        clearNativeTerminalTabDragFeedback();
+      }
+      nativeTerminalTabDragActive = false;
+    }
+  }
+
+  function updateTopTabDropTargets(clientX: number, clientY: number) {
+    const drag = topTabPointerDrag;
+    if (!drag?.dragging) return;
+    updateTopTabDropTargetsAt(
+      drag.sourceId,
+      terminalTabs.some((tab) => tab.id === drag.sourceId),
+      clientX,
+      clientY
+    );
+  }
+
+  function updateTopTabDropTargetsAt(
+    sourceId: string,
+    canSplit: boolean,
+    clientX: number,
+    clientY: number
+  ) {
+    const elements = document.elementsFromPoint(clientX, clientY);
     const paneTarget = elements
       .map((element) => element.closest<HTMLElement>(".terminal-instance"))
       .find((element) => element?.dataset.paneId !== undefined);
     const paneId = paneTarget?.dataset.paneId;
     if (
-      sourceIsTerminal &&
+      canSplit &&
       paneTarget &&
       paneId &&
-      paneId !== topTabPointerDrag.sourceId
+      paneId !== sourceId
     ) {
       topTabDropTarget = null;
       updatePaneDropTarget(
-        event.clientX,
-        event.clientY,
+        clientX,
+        clientY,
         paneTarget as HTMLDivElement,
         paneId
       );
@@ -2195,66 +2500,202 @@
       .map((element) => element.closest<HTMLElement>("[data-top-tab-id]"))
       .find((element) => element?.dataset.topTabId !== undefined);
     const targetId = tabTarget?.dataset.topTabId;
-    if (!tabTarget || !targetId || targetId === topTabPointerDrag.sourceId) {
+    if (!tabTarget || !targetId || targetId === sourceId) {
       topTabDropTarget = null;
       return;
     }
     const bounds = tabTarget.getBoundingClientRect();
+    const relativeX = (clientX - bounds.left) / Math.max(bounds.width, 1);
     topTabDropTarget = {
       id: targetId,
-      after: event.clientX > bounds.left + bounds.width / 2,
-      merge:
-        targetId === "workspace" &&
-        sourceIsTerminal &&
-        !workspacePaneIds.includes(topTabPointerDrag.sourceId)
+      after: relativeX > 0.5
     };
   }
 
-  function finishTopTabDrop(event: DragEvent) {
-    if (!topTabPointerDrag) return;
-    const sourceId = topTabPointerDrag.sourceId;
+  function updatePaneExtractTargetAt(
+    sourceId: string,
+    clientX: number,
+    clientY: number
+  ) {
+    paneExtractTarget =
+      Boolean(workspaceForPane(sourceId)) &&
+      paneDropTarget === null &&
+      document
+        .elementsFromPoint(clientX, clientY)
+        .some((element) => Boolean(element.closest(".titlebar")));
+  }
+
+  function handleNativeTerminalTabDragDropEvent(event: DragDropEvent) {
+    const session = nativeTerminalTabDragSession;
+    if (!session) return;
+    if (event.type === "leave") {
+      paneDropTarget = null;
+      paneExtractTarget = false;
+      topTabDropTarget = null;
+      return;
+    }
+    const scaleFactor = Math.max(nativeDragScaleFactor, 0.1);
+    const clientX = event.position.x / scaleFactor;
+    const clientY = event.position.y / scaleFactor;
+    updateTopTabDropTargetsAt(
+      session.sourceId,
+      session.canSplit,
+      clientX,
+      clientY
+    );
+    if (session.sourceKind === "workspace-pane") {
+      updatePaneExtractTargetAt(session.sourceId, clientX, clientY);
+    } else {
+      paneExtractTarget = false;
+    }
+  }
+
+  function clearNativeTerminalTabDragFeedback() {
+    nativeTerminalTabDragSession = null;
+    paneDropTarget = null;
+    paneExtractTarget = false;
+    topTabDropTarget = null;
+  }
+
+  function finishTopTabPointerDrag(event: PointerEvent) {
+    const drag = topTabPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    finishTopTabPointerDragAt(
+      drag.pointerId,
+      event.clientX,
+      event.clientY,
+      event.screenX,
+      event.screenY
+    );
+  }
+
+  function finishTopTabPointerDragAt(
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    screenX: number,
+    screenY: number
+  ) {
+    const drag = topTabPointerDrag;
+    if (!drag || pointerId !== drag.pointerId) return;
+    drag.currentX = clientX;
+    drag.currentY = clientY;
+    drag.screenX = screenX;
+    drag.screenY = screenY;
+    if (drag.dragging) updateTopTabDropTargets(clientX, clientY);
+    stopTerminalTabPointerPolling();
+    releaseTopTabPointerCapture(drag.pointerId);
+    const sourceId = drag.sourceId;
     const paneTarget = paneDropTarget;
     const tabTarget = topTabDropTarget;
     topTabPointerDrag = null;
+    if (!drag.dragging) return;
     suppressTopTabClick = true;
     window.setTimeout(() => (suppressTopTabClick = false), 0);
     if (paneTarget) {
       movePaneIntoPane(sourceId, paneTarget.paneId, paneTarget.zone);
       return;
     }
-    if (tabTarget?.merge) {
-      const targetId =
-        workspacePaneIds.includes(activeTerminalId ?? "")
-          ? activeTerminalId
-          : workspacePaneIds[0];
-      if (targetId) movePaneIntoPane(sourceId, targetId, "right");
-      else finishTabDrag();
+    if (tabTarget) {
+      reorderTopTab(sourceId, tabTarget.id, tabTarget.after);
+      finishTabDrag();
       return;
     }
-    if (tabTarget) reorderTopTab(sourceId, tabTarget.id, tabTarget.after);
+    finishTabDrag();
+    if (
+      Number.isFinite(drag.screenX) &&
+      Number.isFinite(drag.screenY) &&
+      (drag.screenX !== 0 || drag.screenY !== 0) &&
+      transferableTopTab(sourceId)
+    ) {
+      void transferDraggedTopTab(sourceId, drag.screenX, drag.screenY);
+    }
+  }
+
+  function cancelTopTabPointerDrag(event: PointerEvent) {
+    const drag = topTabPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    stopTerminalTabPointerPolling();
+    releaseTopTabPointerCapture(drag.pointerId);
+    topTabPointerDrag = null;
     finishTabDrag();
   }
 
-  function finishTopTabNativeDrag(event: DragEvent) {
-    if (!topTabPointerDrag) return;
-    const sourceId = topTabPointerDrag.sourceId;
-    const screenX =
-      event.screenX !== 0 || event.screenY !== 0
-        ? event.screenX
-        : topTabPointerDrag.screenX;
-    const screenY =
-      event.screenX !== 0 || event.screenY !== 0
-        ? event.screenY
-        : topTabPointerDrag.screenY;
-    topTabPointerDrag = null;
-    finishTabDrag();
-    if (
-      Number.isFinite(screenX) &&
-      Number.isFinite(screenY) &&
-      (screenX !== 0 || screenY !== 0) &&
-      transferableTopTab(sourceId)
-    ) {
-      void transferDraggedTopTab(sourceId, screenX, screenY);
+  function releaseTopTabPointerCapture(pointerId: number) {
+    if (topTabCaptureElement?.hasPointerCapture(pointerId)) {
+      topTabCaptureElement.releasePointerCapture(pointerId);
+    }
+    topTabCaptureElement = null;
+  }
+
+  function startTerminalTabPointerPolling() {
+    if (terminalTabDragPollTimer !== null || !appWindow) return;
+    terminalTabDragPollTimer = window.setInterval(() => {
+      void pollTerminalTabPointerState();
+    }, 32);
+    void pollTerminalTabPointerState();
+  }
+
+  function stopTerminalTabPointerPolling() {
+    if (terminalTabDragPollTimer !== null) {
+      window.clearInterval(terminalTabDragPollTimer);
+      terminalTabDragPollTimer = null;
+    }
+    terminalTabDragPollInFlight = false;
+  }
+
+  async function pollTerminalTabPointerState() {
+    const sourceKind = topTabPointerDrag?.dragging
+      ? "top-tab"
+      : panePointerDrag?.dragging
+        ? "workspace-pane"
+        : null;
+    const drag = sourceKind === "top-tab" ? topTabPointerDrag : panePointerDrag;
+    if (!sourceKind || !drag?.dragging || terminalTabDragPollInFlight) return;
+    terminalTabDragPollInFlight = true;
+    try {
+      const pointer = await terminalTabPointerState();
+      const current = sourceKind === "top-tab" ? topTabPointerDrag : panePointerDrag;
+      if (!pointer || !current || current.pointerId !== drag.pointerId) return;
+      current.currentX = pointer.clientX;
+      current.currentY = pointer.clientY;
+      current.screenX = pointer.screenX;
+      current.screenY = pointer.screenY;
+      if (sourceKind === "top-tab") {
+        updateTopTabDropTargets(pointer.clientX, pointer.clientY);
+      } else {
+        updateTopTabDropTargetsAt(
+          current.sourceId,
+          true,
+          pointer.clientX,
+          pointer.clientY
+        );
+        updatePaneExtractTargetAt(current.sourceId, pointer.clientX, pointer.clientY);
+      }
+      if (!pointer.primaryPressed && !nativeTerminalTabDragActive) {
+        if (sourceKind === "top-tab") {
+          finishTopTabPointerDragAt(
+            current.pointerId,
+            pointer.clientX,
+            pointer.clientY,
+            pointer.screenX,
+            pointer.screenY
+          );
+        } else {
+          finishPanePointerDragAt(
+            current.pointerId,
+            pointer.clientX,
+            pointer.clientY,
+            pointer.screenX,
+            pointer.screenY
+          );
+        }
+      }
+    } catch (cause) {
+      stopTerminalTabPointerPolling();
+      showMessage(cause, true);
+    } finally {
+      terminalTabDragPollInFlight = false;
     }
   }
 
@@ -2270,63 +2711,37 @@
   }
 
   function handleGlobalPointerMove(event: PointerEvent) {
-    movePanePointerDrag(event);
+    if (topTabPointerDrag) moveTopTabPointerDrag(event);
+    else movePanePointerDrag(event);
   }
 
   function handleGlobalPointerEnd(event: PointerEvent) {
-    finishPanePointerDrag();
+    if (nativeTerminalTabDragActive) return;
+    if (topTabPointerDrag) finishTopTabPointerDrag(event);
+    else finishPanePointerDrag(event);
   }
 
   function handleGlobalPointerCancel(event: PointerEvent) {
-    finishPanePointerDrag();
-  }
-
-  function hasTerminalTabDrag(event: DragEvent): boolean {
-    return Array.from(event.dataTransfer?.types ?? []).includes(terminalTabDragMime);
-  }
-
-  function handleGlobalTabDrag(event: DragEvent) {
-    if (!topTabPointerDrag) return;
-    if (event.clientX !== 0 || event.clientY !== 0) {
-      topTabPointerDrag.currentX = event.clientX;
-      topTabPointerDrag.currentY = event.clientY;
-    }
-    if (event.screenX !== 0 || event.screenY !== 0) {
-      topTabPointerDrag.screenX = event.screenX;
-      topTabPointerDrag.screenY = event.screenY;
-    }
-  }
-
-  function handleGlobalTabDragOver(event: DragEvent) {
-    if (topTabPointerDrag) {
-      moveTopTabNativeDrag(event);
-      return;
-    }
-    if (hasTerminalTabDrag(event)) {
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    }
-  }
-
-  function handleGlobalTabDrop(event: DragEvent) {
-    if (!topTabPointerDrag && !hasTerminalTabDrag(event)) return;
-    event.preventDefault();
-    if (topTabPointerDrag) finishTopTabDrop(event);
+    if (nativeTerminalTabDragActive) return;
+    if (topTabPointerDrag) cancelTopTabPointerDrag(event);
+    else finishPanePointerDrag(event);
   }
 
   function terminalPaneStyle(id: string): string {
-    if (!splitMode || !workspaceActive || !workspacePaneIds.includes(id)) return "";
-    if (workspaceFocusedPaneId === id) {
+    const workspace = activeWorkspace();
+    if (!workspace || !workspace.paneIds.includes(id)) return "";
+    if (workspace.focusedPaneId === id) {
       return "left:0;top:0;width:100%;height:100%";
     }
-    const layout = normalizeLayout(workspaceLayout, workspacePaneIds);
+    const layout = normalizeLayout(workspace.layout, workspace.paneIds);
     const rect = layoutRects(layout)[id] ?? { left: 0, top: 0, width: 100, height: 100 };
     return `left:${rect.left}%;top:${rect.top}%;width:${rect.width}%;height:${rect.height}%`;
   }
 
   function workspaceDividers(): SplitDivider[] {
-    if (!splitMode || !workspaceActive || workspaceFocusedPaneId !== null) return [];
-    const layout = normalizeLayout(workspaceLayout, workspacePaneIds);
+    const workspace = activeWorkspace();
+    if (!workspace || workspace.focusedPaneId !== null) return [];
+    const layout = normalizeLayout(workspace.layout, workspace.paneIds);
     return layoutDividers(layout);
   }
 
@@ -2337,7 +2752,7 @@
   function activeDividerColor(): string {
     const activeTab =
       terminalTabs.find((tab) => tab.id === activeTerminalId) ??
-      terminalTabs.find((tab) => workspacePaneIds.includes(tab.id));
+      terminalTabs.find((tab) => activeWorkspaceContains(tab.id));
     return terminalTheme(activeTab?.appearance.theme).chrome.activeForeground;
   }
 
@@ -2371,8 +2786,10 @@
       divider.direction === "horizontal" ? divider.parent.left : divider.parent.top;
     const span =
       divider.direction === "horizontal" ? divider.parent.width : divider.parent.height;
-    workspaceLayout = setSplitRatio(
-      workspaceLayout,
+    const workspace = activeWorkspace();
+    if (!workspace) return;
+    workspace.layout = setSplitRatio(
+      workspace.layout,
       divider.path,
       (pointerPercent - origin) / span
     );
@@ -2496,9 +2913,39 @@
     if (firstHost) void openTerminal(firstHost);
   }
 
-  function workspaceTabOrder(): number {
-    const position = topTabOrder.indexOf("workspace");
+  function workspaceTabOrder(workspaceId: string): number {
+    const position = topTabOrder.indexOf(workspaceTabId(workspaceId));
     return position >= 0 ? position : 2;
+  }
+
+  function nativeTopTabDragPreview(sourceId: string): NativeTabDragPreview {
+    const terminalTab = terminalTabs.find((tab) => tab.id === sourceId);
+    const workspace = workspaceById(workspaceIdFromTabId(sourceId));
+    const icon: NativeTabDragPreview["icon"] = sourceId === "vault"
+      ? "vault"
+      : sourceId === "sftp"
+        ? "folder"
+        : workspace
+          ? "grid"
+          : "terminal";
+    const label = sourceId === "vault"
+      ? "Vaults"
+      : sourceId === "sftp"
+        ? "SFTP"
+        : workspace?.name || terminalTab?.title || "Terminal";
+    const themedTab = terminalTab
+      ?? terminalTabs.find((tab) => tab.id === workspace?.activePaneId)
+      ?? terminalTabs.find((tab) => tab.id === activeTerminalId)
+      ?? null;
+    const theme = terminalTheme(themedTab?.appearance.theme);
+    return {
+      label,
+      icon,
+      background: theme.chrome.headerBackground,
+      activeBackground: theme.chrome.activeBackground,
+      foreground: theme.chrome.headerForeground,
+      border: theme.chrome.headerBorder
+    };
   }
 
   function topTabDragPreview(): { icon: string; label: string; style: string } {
@@ -2510,12 +2957,13 @@
           : null;
     if (!drag) return { icon: "terminal", label: "", style: "" };
     const terminalTab = terminalTabs.find((tab) => tab.id === drag.sourceId);
+    const draggedWorkspace = workspaceById(workspaceIdFromTabId(drag.sourceId));
     const icon =
       drag.sourceId === "vault"
         ? "vault"
         : drag.sourceId === "sftp"
           ? "folder"
-          : drag.sourceId === "workspace"
+          : draggedWorkspace
             ? "grid"
             : "terminal";
     const label =
@@ -2523,8 +2971,8 @@
         ? "Vaults"
         : drag.sourceId === "sftp"
           ? "SFTP"
-          : drag.sourceId === "workspace"
-            ? workspaceName || "Workspace"
+          : draggedWorkspace
+            ? draggedWorkspace.name || "Workspace"
             : terminalTab?.title ?? "Terminal";
     const previewWidth = 168;
     const left = drag.currentX - previewWidth / 2;
@@ -2546,7 +2994,7 @@
   }
 
   function singleTerminalChromeStyle(): string {
-    if (page !== "terminal" || workspaceActive || !activeTerminalId) return "";
+    if (page !== "terminal" || activeWorkspace() || !activeTerminalId) return "";
     const tab = terminalTabs.find((candidate) => candidate.id === activeTerminalId);
     if (!tab) return "";
     const theme = terminalTheme(tab.appearance.theme);
@@ -2595,9 +3043,6 @@
   onpointermove={handleGlobalPointerMove}
   onpointerup={handleGlobalPointerEnd}
   onpointercancel={handleGlobalPointerCancel}
-  ondrag={handleGlobalTabDrag}
-  ondragover={handleGlobalTabDragOver}
-  ondrop={handleGlobalTabDrop}
 />
 
 <div
@@ -2605,8 +3050,8 @@
   class:detached-window={detachedMode}
   class:detached-initialized={detachedInitialized}
   class:terminal-surface={page === "terminal"}
-  class:single-terminal-surface={page === "terminal" && !workspaceActive && Boolean(activeTerminalId)}
-  class:dragging-terminal-tab={Boolean(panePointerDrag?.dragging)}
+  class:single-terminal-surface={page === "terminal" && !activeWorkspace() && Boolean(activeTerminalId)}
+  class:dragging-terminal-tab={Boolean(panePointerDrag?.dragging || topTabPointerDrag?.dragging)}
   style={singleTerminalChromeStyle()}
 >
   <div
@@ -2663,9 +3108,7 @@
           class:drop-after={topTabDropTarget?.id === "vault" && topTabDropTarget.after}
           data-top-tab-id="vault"
           style:order={topTabOrder.indexOf("vault")}
-          draggable="true"
-          ondragstart={(event) => startTopTabNativeDrag(event, "vault")}
-          ondragend={finishTopTabNativeDrag}
+          onpointerdown={(event) => startTopTabPointerDrag(event, "vault")}
           onclick={() => {
             if (!suppressTopTabClick) switchPage("hosts");
           }}
@@ -2681,9 +3124,7 @@
           class:drop-after={topTabDropTarget?.id === "sftp" && topTabDropTarget.after}
           data-top-tab-id="sftp"
           style:order={topTabOrder.indexOf("sftp")}
-          draggable="true"
-          ondragstart={(event) => startTopTabNativeDrag(event, "sftp")}
-          ondragend={finishTopTabNativeDrag}
+          onpointerdown={(event) => startTopTabPointerDrag(event, "sftp")}
           onclick={() => {
             if (!suppressTopTabClick) switchPage("sftp");
           }}
@@ -2692,25 +3133,22 @@
           <Icon name="folder" /><span>SFTP</span>
         </button>
       {/if}
-      {#if splitMode && workspacePaneIds.length > 1}
+      {#each workspaces as workspace (workspace.id)}
         <div
           use:observeTopTab
           class="terminal-tab-shell"
-          class:expanded={page === "terminal" && workspaceActive}
+          class:expanded={page === "terminal" && activeWorkspaceId === workspace.id}
           role="group"
           aria-label="Workspace terminal tab"
-          class:dragging={draggedTabId === "workspace"}
-          class:drop-before={topTabDropTarget?.id === "workspace" && !topTabDropTarget.after && !topTabDropTarget.merge}
-          class:drop-after={topTabDropTarget?.id === "workspace" && topTabDropTarget.after && !topTabDropTarget.merge}
-          class:drop-merge={topTabDropTarget?.id === "workspace" && topTabDropTarget.merge}
-          data-top-tab-id="workspace"
-          style:order={workspaceTabOrder()}
-          draggable="true"
-          ondragstart={(event) => startTopTabNativeDrag(event, "workspace")}
-          ondragend={finishTopTabNativeDrag}
+          class:dragging={draggedTabId === workspaceTabId(workspace.id)}
+          class:drop-before={topTabDropTarget?.id === workspaceTabId(workspace.id) && !topTabDropTarget.after}
+          class:drop-after={topTabDropTarget?.id === workspaceTabId(workspace.id) && topTabDropTarget.after}
+          data-top-tab-id={workspaceTabId(workspace.id)}
+          style:order={workspaceTabOrder(workspace.id)}
+          onpointerdown={(event) => startTopTabPointerDrag(event, workspaceTabId(workspace.id))}
           oncontextmenu={(event) => openTerminalContextMenu(event, {
-            id: "workspace",
-            title: workspaceName,
+            id: workspaceTabId(workspace.id),
+            title: workspace.name,
             host: null,
             appearance: activeTerminalAppearance(),
             resumeSessionId: null
@@ -2718,30 +3156,30 @@
         >
           <button
             class="terminal-tab"
-            class:active={page === "terminal" && workspaceActive}
-            aria-current={page === "terminal" && workspaceActive ? "page" : undefined}
+            class:active={page === "terminal" && activeWorkspaceId === workspace.id}
+            aria-current={page === "terminal" && activeWorkspaceId === workspace.id ? "page" : undefined}
             onclick={() => {
-              if (!suppressTopTabClick) activateWorkspace();
+              if (!suppressTopTabClick) activateWorkspace(workspace.id);
             }}
-            onauxclick={(event) => event.button === 1 && closeCurrentWorkspace()}
+            onauxclick={(event) => event.button === 1 && closeWorkspace(workspace.id)}
           >
-            <Icon name="grid" /><span>{workspaceName || "Workspace"}</span>
+            <Icon name="grid" /><span>{workspace.name || "Workspace"}</span>
           </button>
           <button
             class="terminal-tab-close"
             title="Close workspace"
             onclick={(event) => {
               event.stopPropagation();
-              closeCurrentWorkspace();
+              closeWorkspace(workspace.id);
             }}
           ><Icon name="close" size={13} /></button>
         </div>
-      {/if}
+      {/each}
       {#each standaloneTerminalTabs() as tab (tab.id)}
         <div
           use:observeTopTab
           class="terminal-tab-shell"
-          class:expanded={page === "terminal" && !workspaceActive && activeTerminalId === tab.id}
+          class:expanded={page === "terminal" && !activeWorkspace() && activeTerminalId === tab.id}
           role="group"
           aria-label={`${tab.title} terminal tab`}
           class:dragging={draggedTabId === tab.id}
@@ -2749,15 +3187,13 @@
           class:drop-after={topTabDropTarget?.id === tab.id && topTabDropTarget.after}
           data-top-tab-id={tab.id}
           style:order={topTabOrder.indexOf(tab.id)}
-          draggable="true"
-          ondragstart={(event) => startTopTabNativeDrag(event, tab.id)}
-          ondragend={finishTopTabNativeDrag}
+          onpointerdown={(event) => startTopTabPointerDrag(event, tab.id)}
           oncontextmenu={(event) => openTerminalContextMenu(event, tab)}
         >
           <button
             class="terminal-tab"
-            class:active={page === "terminal" && !workspaceActive && activeTerminalId === tab.id}
-            aria-current={page === "terminal" && !workspaceActive && activeTerminalId === tab.id ? "page" : undefined}
+            class:active={page === "terminal" && !activeWorkspace() && activeTerminalId === tab.id}
+            aria-current={page === "terminal" && !activeWorkspace() && activeTerminalId === tab.id ? "page" : undefined}
             onclick={() => {
               if (!suppressTopTabClick) activateStandaloneTerminal(tab.id);
             }}
@@ -2801,7 +3237,7 @@
     </div>
   </header>
 
-  {#if panePointerDrag?.dragging}
+  {#if (panePointerDrag?.dragging || topTabPointerDrag?.dragging) && !nativeTerminalTabDragActive}
     {@const dragPreview = topTabDragPreview()}
     <div
       class="top-tab-drag-preview"
@@ -2836,6 +3272,7 @@
     {/if}
 
     {#if terminalTabs.length > 0}
+      {@const visibleWorkspace = activeWorkspace()}
       <main
         class:hidden-page={page !== "terminal"}
         class:with-terminal-tools={terminalToolsMounted && page === "terminal" && Boolean(activeTerminalId)}
@@ -2843,7 +3280,7 @@
         style={terminalToolsStyle()}
       >
         <div
-          class:split-workspace={splitMode && workspaceActive}
+          class:split-workspace={Boolean(visibleWorkspace)}
           class:resizing-workspace={activeDividerPath !== null}
           class:dragging-workspace-pane={panePointerDrag?.dragging}
           class="terminal-grid"
@@ -2853,14 +3290,14 @@
             <div
               role="region"
               aria-label={`${tab.title} terminal pane`}
-              class:hidden-terminal={workspaceActive
-                ? !workspacePaneIds.includes(tab.id)
+              class:hidden-terminal={visibleWorkspace
+                ? !visibleWorkspace.paneIds.includes(tab.id)
                 : activeTerminalId !== tab.id}
-              class:hidden-workspace-pane={workspaceActive
-                && workspacePaneIds.includes(tab.id)
-                && workspaceFocusedPaneId !== null
-                && workspaceFocusedPaneId !== tab.id}
-              class:active-pane={workspaceActive && activeTerminalId === tab.id}
+              class:hidden-workspace-pane={visibleWorkspace
+                && visibleWorkspace.paneIds.includes(tab.id)
+                && visibleWorkspace.focusedPaneId !== null
+                && visibleWorkspace.focusedPaneId !== tab.id}
+              class:active-pane={Boolean(visibleWorkspace) && activeTerminalId === tab.id}
               class:drag-source={panePointerDrag?.dragging && panePointerDrag.sourceId === tab.id}
               class:drop-left={paneDropTarget?.paneId === tab.id && paneDropTarget.zone === "left"}
               class:drop-right={paneDropTarget?.paneId === tab.id && paneDropTarget.zone === "right"}
@@ -2880,8 +3317,8 @@
                   historyVersion={terminalHistoryVersion}
                   resumeSessionId={tab.resumeSessionId}
                   commandRequest={terminalCommandRequests[tab.id] ?? null}
-                  workspace={splitMode && workspaceActive && workspacePaneIds.includes(tab.id)}
-                  broadcast={broadcastPaneIds.includes(tab.id)}
+                  workspace={visibleWorkspace?.paneIds.includes(tab.id) ?? false}
+                  broadcast={visibleWorkspace?.broadcastPaneIds.includes(tab.id) ?? false}
                   onClose={() => closeTerminalTab(tab.id)}
                   onBroadcast={() => toggleBroadcast(tab.id)}
                   onFocus={() => focusWorkspacePane(tab.id)}
@@ -3818,19 +4255,20 @@
       onkeydown={(event) => event.stopPropagation()}
       oncontextmenu={(event) => event.preventDefault()}
     >
-      {#if terminalContextMenu.tab.id === "workspace"}
+      {#if workspaceIdFromTabId(terminalContextMenu.tab.id)}
+        {@const contextWorkspaceId = workspaceIdFromTabId(terminalContextMenu.tab.id)}
         <button
           role="menuitem"
           onclick={() => {
             terminalContextMenu = null;
-            renameWorkspace();
+            renameWorkspace(contextWorkspaceId);
           }}
         ><Icon name="edit" size={17} /><span>Rename</span></button>
         <button
           role="menuitem"
           onclick={() => {
             terminalContextMenu = null;
-            void detachWorkspace();
+            void detachWorkspace(contextWorkspaceId);
           }}
         ><Icon name="detach" size={17} /><span>Detach</span></button>
         <button
@@ -3838,7 +4276,7 @@
           role="menuitem"
           onclick={() => {
             terminalContextMenu = null;
-            closeCurrentWorkspace();
+            closeWorkspace(contextWorkspaceId);
           }}
         ><Icon name="close" size={17} /><span>Close</span></button>
       {:else}

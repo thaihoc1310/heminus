@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+#[cfg(target_family = "unix")]
 use std::fs;
 use std::io::Read;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+#[cfg(target_family = "unix")]
 use std::thread;
+#[cfg(target_family = "unix")]
 use std::time::Duration;
 
 use heminus_domain::{ForwardKind, Host, IdentityKind, PortForward};
@@ -17,6 +20,8 @@ use crate::AppState;
 
 struct ActiveTunnel {
     child: Child,
+    supervisor: crate::platform::ProcessSupervisor,
+    _artifacts: crate::ssh_runtime::ConnectionArtifacts,
 }
 
 #[derive(Default)]
@@ -85,6 +90,7 @@ impl Drop for TunnelManager {
     fn drop(&mut self) {
         if let Ok(active) = self.active.get_mut() {
             for tunnel in active.values_mut() {
+                tunnel.supervisor.terminate();
                 let _ = tunnel.child.kill();
                 let _ = tunnel.child.wait();
             }
@@ -127,6 +133,7 @@ pub fn tunnel_start(
         .as_ref()
         .and_then(|value| value.username.as_deref())
         .unwrap_or(&host.username);
+    let connection_artifacts = app_state.ssh.connection_artifacts(&host_arguments);
 
     let forwarding_argument = match rule.kind {
         ForwardKind::Local => format!(
@@ -167,7 +174,8 @@ pub fn tunnel_start(
         active.remove(&rule.id);
     }
 
-    let mut command = Command::new("ssh");
+    let mut command = Command::new(crate::platform::ssh_executable()?);
+    crate::platform::configure_background_command(&mut command);
     let password_identity = identity
         .as_ref()
         .filter(|value| value.kind == IdentityKind::Password);
@@ -231,11 +239,12 @@ pub fn tunnel_start(
             .env("SSH_ASKPASS", askpass)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env(crate::credential::askpass_candidates_env(), candidates);
+        #[cfg(unix)]
         if std::env::var_os("DISPLAY").is_none() {
             command.env("DISPLAY", "heminus:0");
         }
     }
-    let child = command
+    let mut child = command
         .arg("--")
         .arg(format!(
             "{username}@{}",
@@ -246,7 +255,22 @@ pub fn tunnel_start(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Could not start SSH forwarding: {error}"))?;
-    active.insert(rule.id, ActiveTunnel { child });
+    let supervisor = match crate::platform::ProcessSupervisor::attach(Some(child.id())) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    active.insert(
+        rule.id,
+        ActiveTunnel {
+            child,
+            supervisor,
+            _artifacts: connection_artifacts,
+        },
+    );
     Ok(())
 }
 
@@ -259,6 +283,7 @@ pub fn tunnel_stop(manager: State<'_, TunnelManager>, id: Uuid) -> Result<bool, 
     let Some(mut tunnel) = active.remove(&id) else {
         return Ok(false);
     };
+    tunnel.supervisor.terminate();
     tunnel.child.kill().map_err(|error| error.to_string())?;
     let _ = tunnel.child.wait();
     Ok(true)
@@ -288,6 +313,7 @@ pub fn tunnel_port_processes(port: u16) -> Result<Vec<TunnelPortProcess>, String
 }
 
 #[tauri::command]
+#[cfg(target_family = "unix")]
 pub fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
     let own_pid = std::process::id();
     let mut current = listener_pids(port)?;
@@ -355,6 +381,25 @@ pub fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), Strin
     ))
 }
 
+#[tauri::command]
+#[cfg(windows)]
+pub fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
+    let own_pid = std::process::id();
+    let mut current = listener_pids(port)?;
+    current.retain(|pid| *pid != own_pid);
+    let mut targets = pids;
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.iter().any(|pid| !current.contains(pid)) {
+        return Err("The process using this port changed. Try starting the tunnel again.".into());
+    }
+    Err(
+        "Stopping another application's process is not supported on Windows. Close it from Task Manager and try again."
+            .into(),
+    )
+}
+
+#[cfg(target_family = "unix")]
 fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
     let output = Command::new("fuser")
         .args(["-n", "tcp"])
@@ -371,6 +416,32 @@ fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
     Ok(pids)
 }
 
+#[cfg(windows)]
+fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
+    use netstat2::{AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
+
+    let sockets = netstat2::get_sockets_info(
+        AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
+        ProtocolFlags::TCP,
+    )
+    .map_err(|error| format!("Could not inspect port {port}: {error}"))?;
+    let mut pids = sockets
+        .into_iter()
+        .filter(|socket| {
+            matches!(
+                socket.protocol_socket_info,
+                ProtocolSocketInfo::Tcp(ref tcp)
+                    if tcp.local_port == port && tcp.state == TcpState::Listen
+            )
+        })
+        .flat_map(|socket| socket.associated_pids)
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
+#[cfg(target_family = "unix")]
 fn parse_fuser_pids(bytes: &[u8]) -> Vec<u32> {
     String::from_utf8_lossy(bytes)
         .split_whitespace()
@@ -378,6 +449,7 @@ fn parse_fuser_pids(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(target_family = "unix")]
 fn process_name(pid: u32) -> String {
     fs::read_to_string(format!("/proc/{pid}/comm"))
         .map(|name| name.trim().to_string())
@@ -386,6 +458,17 @@ fn process_name(pid: u32) -> String {
         .unwrap_or_else(|| format!("Process {pid}"))
 }
 
+#[cfg(windows)]
+fn process_name(pid: u32) -> String {
+    let system = sysinfo::System::new_all();
+    system
+        .process(sysinfo::Pid::from_u32(pid))
+        .map(|process| process.name().to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("Process {pid}"))
+}
+
+#[cfg(target_family = "unix")]
 fn process_command(pid: u32) -> String {
     fs::read(format!("/proc/{pid}/cmdline"))
         .ok()
@@ -399,6 +482,28 @@ fn process_command(pid: u32) -> String {
         })
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| process_name(pid))
+}
+
+#[cfg(windows)]
+fn process_command(pid: u32) -> String {
+    let system = sysinfo::System::new_all();
+    let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) else {
+        return process_name(pid);
+    };
+    let command = process
+        .cmd()
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if command.is_empty() {
+        process
+            .exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| process_name(pid))
+    } else {
+        command.chars().take(240).collect()
+    }
 }
 
 #[cfg(target_family = "unix")]
@@ -438,6 +543,7 @@ mod tests {
         assert_eq!(normalize_ssh_error(b" \n\r "), None);
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn fuser_pid_output_ignores_the_port_label() {
         assert_eq!(

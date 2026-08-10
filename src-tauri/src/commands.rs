@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
@@ -42,6 +44,21 @@ pub struct LocalEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalBreadcrumb {
+    name: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPathInfo {
+    path: PathBuf,
+    parent_path: Option<PathBuf>,
+    breadcrumbs: Vec<LocalBreadcrumb>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnownHostEntry {
     hosts: String,
     key_type: String,
@@ -61,9 +78,20 @@ struct TerminalTabTransferEvent {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TerminalTabPointerState {
+    screen_x: f64,
+    screen_y: f64,
+    client_x: f64,
+    client_y: f64,
+    primary_pressed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalTabTransferResult {
     target_label: String,
     created_window: bool,
+    transferred: bool,
 }
 
 #[tauri::command]
@@ -73,6 +101,11 @@ pub fn app_info() -> AppInfo {
         platform: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
     }
+}
+
+#[tauri::command]
+pub fn platform_capabilities() -> crate::platform::PlatformCapabilities {
+    crate::platform::capabilities()
 }
 
 #[tauri::command]
@@ -177,21 +210,39 @@ pub async fn transfer_terminal_tab(
         }
 
         let target_scale = target.scale_factor().unwrap_or(1.0);
+        let client_origin = target.inner_position().unwrap_or(position);
         target
             .emit_to(
                 EventTarget::webview_window(label.clone()),
                 "terminal-tab-transfer",
                 TerminalTabTransferEvent {
                     payload,
-                    client_x: (physical_x - left) / target_scale,
-                    client_y: (physical_y - top) / target_scale,
+                    client_x: (physical_x - f64::from(client_origin.x)) / target_scale,
+                    client_y: (physical_y - f64::from(client_origin.y)) / target_scale,
                 },
             )
             .map_err(|error| error.to_string())?;
         return Ok(TerminalTabTransferResult {
             target_label: label,
             created_window: false,
+            transferred: true,
         });
+    }
+
+    if let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) {
+        let left = f64::from(position.x);
+        let top = f64::from(position.y);
+        if physical_x >= left
+            && physical_x < left + f64::from(size.width)
+            && physical_y >= top
+            && physical_y < top + f64::from(size.height)
+        {
+            return Ok(TerminalTabTransferResult {
+                target_label: window.label().to_string(),
+                created_window: false,
+                transferred: false,
+            });
+        }
     }
 
     let label = build_detached_terminal_window(
@@ -204,6 +255,25 @@ pub async fn transfer_terminal_tab(
     Ok(TerminalTabTransferResult {
         target_label: label,
         created_window: true,
+        transferred: true,
+    })
+}
+
+#[tauri::command]
+pub fn terminal_tab_pointer_state(
+    window: WebviewWindow,
+) -> Result<TerminalTabPointerState, String> {
+    let cursor = window
+        .cursor_position()
+        .map_err(|error| error.to_string())?;
+    let position = window.inner_position().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    Ok(TerminalTabPointerState {
+        screen_x: cursor.x / scale,
+        screen_y: cursor.y / scale,
+        client_x: (cursor.x - f64::from(position.x)) / scale,
+        client_y: (cursor.y - f64::from(position.y)) / scale,
+        primary_pressed: crate::platform::primary_pointer_pressed(),
     })
 }
 
@@ -224,7 +294,50 @@ pub fn take_detached_terminal_payload(
 
 #[tauri::command]
 pub fn home_directory() -> Result<PathBuf, String> {
-    home_dir()
+    crate::platform::canonical_home_dir()
+}
+
+#[tauri::command]
+pub fn local_path_info(path: Option<PathBuf>) -> Result<LocalPathInfo, String> {
+    let home = crate::platform::canonical_home_dir()?;
+    let path = match path {
+        Some(path) => crate::platform::canonical_existing_local_path(&path)?,
+        None => home.clone(),
+    };
+    let relative = path
+        .strip_prefix(&home)
+        .map_err(|_| "Local path is outside the user profile".to_string())?;
+    let mut breadcrumbs = vec![LocalBreadcrumb {
+        name: home
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Home".into()),
+        path: home.clone(),
+    }];
+    let mut breadcrumb_path = home.clone();
+    for component in relative.components() {
+        breadcrumb_path.push(component.as_os_str());
+        breadcrumbs.push(LocalBreadcrumb {
+            name: component.as_os_str().to_string_lossy().into_owned(),
+            path: breadcrumb_path.clone(),
+        });
+    }
+    let parent_path = (path != home).then(|| {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.clone())
+    });
+    Ok(LocalPathInfo {
+        path,
+        parent_path,
+        breadcrumbs,
+    })
+}
+
+#[tauri::command]
+pub fn join_local_path(parent: PathBuf, name: String) -> Result<PathBuf, String> {
+    crate::platform::join_local_path(&parent, &name)
 }
 
 #[tauri::command]
@@ -608,8 +721,8 @@ pub fn list_sessions(
 
 #[tauri::command]
 pub fn list_local_entries(path: Option<PathBuf>) -> Result<Vec<LocalEntry>, String> {
-    let requested = path.unwrap_or(home_dir()?);
-    let resolved = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
+    let requested = path.unwrap_or(crate::platform::home_dir()?);
+    let resolved = crate::platform::canonical_existing_local_path(&requested)?;
     #[cfg(unix)]
     let user_names = unix_id_names("/etc/passwd");
     #[cfg(unix)]
@@ -668,25 +781,25 @@ pub fn list_local_entries(path: Option<PathBuf>) -> Result<Vec<LocalEntry>, Stri
 
 #[tauri::command]
 pub fn create_local_directory(path: PathBuf) -> Result<(), String> {
-    let target = safe_local_destination(&path)?;
+    let target = crate::platform::safe_local_destination(&path)?;
     fs::create_dir(&target).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn rename_local_entry(old_path: PathBuf, new_path: PathBuf) -> Result<(), String> {
-    let source = safe_existing_local_entry(&old_path)?;
-    let target = safe_local_destination(&new_path)?;
+    let source = crate::platform::safe_existing_local_entry(&old_path)?;
+    let target = crate::platform::safe_local_destination(&new_path)?;
     fs::rename(source, target).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn remove_local_entry(path: PathBuf, _is_directory: bool) -> Result<(), String> {
-    let home = fs::canonicalize(home_dir()?).map_err(|error| error.to_string())?;
+    let home = crate::platform::canonical_home_dir()?;
     remove_local_entry_at(&path, &home)
 }
 
 fn remove_local_entry_at(path: &Path, protected_home: &Path) -> Result<(), String> {
-    let target = safe_existing_local_entry(path)?;
+    let target = crate::platform::safe_existing_local_entry(path)?;
     if target == protected_home || target.parent().is_none() {
         return Err("The home and root directories cannot be removed".into());
     }
@@ -703,7 +816,7 @@ pub fn set_local_permissions(path: PathBuf, mode: u32) -> Result<(), String> {
     if mode > 0o7777 {
         return Err("Permissions must be an octal mode between 0000 and 7777".into());
     }
-    let target = safe_existing_local_entry(&path)?;
+    let target = crate::platform::safe_existing_local_entry(&path)?;
     if fs::symlink_metadata(&target)
         .map_err(|error| error.to_string())?
         .file_type()
@@ -725,20 +838,8 @@ pub fn set_local_permissions(path: PathBuf, mode: u32) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_local_entry(path: PathBuf, application: Option<String>) -> Result<(), String> {
-    let target = canonical_local_path(&path)?;
-    let program = application
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("xdg-open");
-    std::process::Command::new(program)
-        .arg(target)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Could not open the item with {program}: {error}"))
+    let target = crate::platform::canonical_existing_local_path(&path)?;
+    crate::platform::open_path(&target, application.as_deref())
 }
 
 #[tauri::command]
@@ -823,6 +924,7 @@ pub fn delete_known_host_entries(
             "Could not update the Heminus known-host vault: {error}"
         ));
     }
+    crate::platform::secure_private_file(path)?;
     Ok(removed)
 }
 
@@ -904,13 +1006,6 @@ fn hashed_known_host_matches(encoded_host: &str, candidate: &str) -> bool {
     hmac.verify_slice(&expected).is_ok()
 }
 
-fn home_dir() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| Path::new(path).is_absolute())
-        .ok_or_else(|| "HOME is unavailable".into())
-}
-
 #[cfg(unix)]
 fn unix_id_names(path: &str) -> HashMap<u32, String> {
     fs::read_to_string(path)
@@ -926,38 +1021,6 @@ fn unix_id_names(path: &str) -> HashMap<u32, String> {
                 .collect::<Vec<_>>()
         })
         .collect()
-}
-
-fn canonical_local_path(path: &Path) -> Result<PathBuf, String> {
-    fs::canonicalize(path).map_err(|error| error.to_string())
-}
-
-fn safe_existing_local_entry(path: &Path) -> Result<PathBuf, String> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| "Choose a valid file or folder".to_string())?;
-    if file_name == "." || file_name == ".." {
-        return Err("Choose a valid file or folder".into());
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Choose a valid parent directory".to_string())?;
-    let target = canonical_local_path(parent)?.join(file_name);
-    fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
-    Ok(target)
-}
-
-fn safe_local_destination(path: &Path) -> Result<PathBuf, String> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| "Choose a valid file or folder name".to_string())?;
-    if file_name == "." || file_name == ".." {
-        return Err("Choose a valid file or folder name".into());
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Choose a destination directory".to_string())?;
-    Ok(canonical_local_path(parent)?.join(file_name))
 }
 
 #[cfg(test)]
@@ -1008,15 +1071,11 @@ mod tests {
     }
 
     #[test]
-    fn local_file_operations_accept_absolute_paths() {
-        assert_eq!(
-            canonical_local_path(Path::new("/")).unwrap(),
-            PathBuf::from("/")
-        );
-        assert_eq!(
-            safe_local_destination(Path::new("/tmp/heminus-file")).unwrap(),
-            PathBuf::from("/tmp/heminus-file")
-        );
+    fn local_file_operations_stay_inside_home() {
+        let home = crate::platform::canonical_home_dir().unwrap();
+        assert!(crate::platform::canonical_existing_local_path(&home).is_ok());
+        let joined = crate::platform::join_local_path(&home, "heminus-file").unwrap();
+        assert_eq!(joined, home.join("heminus-file"));
     }
 
     #[cfg(unix)]
@@ -1024,7 +1083,9 @@ mod tests {
     fn deleting_a_directory_symlink_keeps_its_target() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!("heminus-symlink-remove-{}", Uuid::new_v4()));
+        let root = crate::platform::canonical_home_dir()
+            .unwrap()
+            .join(format!(".heminus-symlink-remove-{}", Uuid::new_v4()));
         let target = root.join("target");
         let link = root.join("link");
         fs::create_dir_all(&target).unwrap();
@@ -1043,7 +1104,9 @@ mod tests {
     fn renaming_a_symlink_moves_the_link_not_its_target() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!("heminus-symlink-rename-{}", Uuid::new_v4()));
+        let root = crate::platform::canonical_home_dir()
+            .unwrap()
+            .join(format!(".heminus-symlink-rename-{}", Uuid::new_v4()));
         let target = root.join("target");
         let source = root.join("source-link");
         let renamed = root.join("renamed-link");
@@ -1052,8 +1115,8 @@ mod tests {
         symlink(&target, &source).unwrap();
 
         fs::rename(
-            safe_existing_local_entry(&source).unwrap(),
-            safe_local_destination(&renamed).unwrap(),
+            crate::platform::safe_existing_local_entry(&source).unwrap(),
+            crate::platform::safe_local_destination(&renamed).unwrap(),
         )
         .unwrap();
 

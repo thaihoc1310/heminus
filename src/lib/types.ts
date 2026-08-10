@@ -79,6 +79,15 @@ export interface TerminalTabTransfer {
 export interface TerminalTabTransferResult {
   targetLabel: string;
   createdWindow: boolean;
+  transferred: boolean;
+}
+
+export interface TerminalTabPointerState {
+  screenX: number;
+  screenY: number;
+  clientX: number;
+  clientY: number;
+  primaryPressed: boolean;
 }
 
 export interface TerminalCommandRequest {
@@ -159,6 +168,26 @@ export interface LocalEntry {
   mode: number | null;
   owner: string | null;
   group: string | null;
+}
+
+export interface LocalBreadcrumb {
+  name: string;
+  path: string;
+}
+
+export interface LocalPathInfo {
+  path: string;
+  parentPath: string | null;
+  breadcrumbs: LocalBreadcrumb[];
+}
+
+export interface PlatformCapabilities {
+  localPermissionEditing: boolean;
+  customApplicationOpen: boolean;
+  foreignProcessTermination: boolean;
+  sshAvailable: boolean;
+  sshKeygenAvailable: boolean;
+  localShell: string | null;
 }
 
 export interface RemoteEntry {

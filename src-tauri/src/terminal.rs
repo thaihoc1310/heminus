@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,6 +20,8 @@ struct TerminalSession {
     killer: Box<dyn ChildKiller + Send + Sync>,
     history_id: Uuid,
     event_sink: Arc<Mutex<TerminalEventSink>>,
+    supervisor: crate::platform::ProcessSupervisor,
+    _artifacts: crate::ssh_runtime::ConnectionArtifacts,
 }
 
 struct TerminalEventSink {
@@ -77,6 +80,7 @@ impl Drop for TerminalManager {
         };
         let database = heminus_storage::Database::open_default().ok();
         for (_, mut session) in sessions.drain() {
+            session.supervisor.terminate();
             let _ = session.killer.kill();
             if let Some(database) = database.as_ref() {
                 let _ = database.finish_session(
@@ -144,6 +148,7 @@ fn is_local_host(host: &Host) -> bool {
     )
 }
 
+#[cfg(unix)]
 fn successful_command_prompt(shell: &str, original: Option<&str>) -> Option<String> {
     if Path::new(shell)
         .file_name()
@@ -166,27 +171,31 @@ fn append_remote_login_target(command: &mut CommandBuilder, username: &str, addr
     command.arg(format!("{username}@{address}"));
 }
 
-fn local_shell_command(environment: &[EnvironmentVariable]) -> CommandBuilder {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let original_prompt_command = environment
-        .iter()
-        .find(|variable| variable.name == "PROMPT_COMMAND")
-        .map(|variable| variable.value.clone())
-        .or_else(|| std::env::var("PROMPT_COMMAND").ok());
-    let history_prompt_command =
-        successful_command_prompt(&shell, original_prompt_command.as_deref());
-    let mut command = CommandBuilder::new(shell);
-    command.arg("-l");
-    if let Some(home) = std::env::var_os("HOME") {
-        command.cwd(home);
+fn local_shell_command(environment: &[EnvironmentVariable]) -> Result<CommandBuilder, String> {
+    let shell = crate::platform::local_shell()?;
+    let mut command = CommandBuilder::new(&shell.executable);
+    for argument in shell.arguments {
+        command.arg(argument);
     }
+    command.cwd(crate::platform::home_dir()?);
     for variable in environment {
         command.env(&variable.name, &variable.value);
     }
-    if let Some(prompt_command) = history_prompt_command {
-        command.env("PROMPT_COMMAND", prompt_command);
+    #[cfg(unix)]
+    {
+        let original_prompt_command = environment
+            .iter()
+            .find(|variable| variable.name == "PROMPT_COMMAND")
+            .map(|variable| variable.value.clone())
+            .or_else(|| std::env::var("PROMPT_COMMAND").ok());
+        if let Some(prompt_command) = successful_command_prompt(
+            &shell.executable.to_string_lossy(),
+            original_prompt_command.as_deref(),
+        ) {
+            command.env("PROMPT_COMMAND", prompt_command);
+        }
     }
-    command
+    Ok(command)
 }
 
 #[tauri::command]
@@ -213,10 +222,11 @@ pub fn terminal_open(
         })
         .map_err(|error| error.to_string())?;
 
+    let mut connection_artifacts = crate::ssh_runtime::ConnectionArtifacts::default();
     let mut command = if let Some(host) = host {
         host.validate().map_err(|error| error.to_string())?;
         if is_local_host(&host) {
-            local_shell_command(&host.environment)
+            local_shell_command(&host.environment)?
         } else {
             let (identity, host_arguments, credential_environment) = {
                 let database = app_state
@@ -240,11 +250,12 @@ pub fn terminal_open(
                 )?;
                 (identity, host_arguments, credential_environment)
             };
+            connection_artifacts = app_state.ssh.connection_artifacts(&host_arguments);
             let username = identity
                 .as_ref()
                 .and_then(|value| value.username.as_deref())
                 .unwrap_or(&host.username);
-            let mut ssh = CommandBuilder::new("ssh");
+            let mut ssh = CommandBuilder::new(crate::platform::ssh_executable()?);
             for argument in app_state.ssh.arguments() {
                 ssh.arg(argument);
             }
@@ -259,6 +270,7 @@ pub fn terminal_open(
                 ssh.env("SSH_ASKPASS", askpass);
                 ssh.env("SSH_ASKPASS_REQUIRE", "force");
                 ssh.env(crate::credential::askpass_candidates_env(), candidates);
+                #[cfg(unix)]
                 if std::env::var_os("DISPLAY").is_none() {
                     ssh.env("DISPLAY", "heminus:0");
                 }
@@ -303,7 +315,7 @@ pub fn terminal_open(
             ssh
         }
     } else {
-        local_shell_command(&[])
+        local_shell_command(&[])?
     };
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -315,6 +327,14 @@ pub fn terminal_open(
         .slave
         .spawn_command(command)
         .map_err(|error| error.to_string())?;
+    let supervisor = match crate::platform::ProcessSupervisor::attach(child.process_id()) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
     let session_killer = child.clone_killer();
     drop(pair.slave);
 
@@ -358,6 +378,8 @@ pub fn terminal_open(
                 killer: session_killer,
                 history_id,
                 event_sink: Arc::clone(&event_sink),
+                supervisor,
+                _artifacts: connection_artifacts,
             },
         );
 
@@ -513,6 +535,7 @@ pub fn terminal_close(
     let Some(mut session) = removed else {
         return Ok(false);
     };
+    session.supervisor.terminate();
     let _ = session.killer.kill();
     app_state
         .database
@@ -600,12 +623,20 @@ mod tests {
         });
 
         assert!(is_local_host(&host));
-        let command = local_shell_command(&host.environment);
+        let command = local_shell_command(&host.environment).unwrap();
         assert_eq!(
             command.get_env("hi").and_then(|value| value.to_str()),
             Some("ha")
         );
+        #[cfg(unix)]
         assert!(command.get_argv().iter().any(|argument| argument == "-l"));
+        #[cfg(windows)]
+        assert!(
+            command
+                .get_argv()
+                .iter()
+                .any(|argument| argument == "-NoLogo")
+        );
     }
 
     #[test]
@@ -614,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn bash_prompt_reports_exit_status_without_discarding_an_existing_hook() {
         let prompt = successful_command_prompt("/bin/bash", Some("update_terminal_title"))
             .expect("bash integration");

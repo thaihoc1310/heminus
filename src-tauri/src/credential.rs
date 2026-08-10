@@ -242,12 +242,50 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an unlocked desktop Secret Service"]
+    #[cfg_attr(unix, ignore = "requires an unlocked desktop Secret Service")]
     fn native_keyring_round_trip() {
         let id = Uuid::new_v4();
-        set(id, "temporary-heminus-test-secret".into()).unwrap();
-        assert_eq!(get(id).unwrap().as_str(), "temporary-heminus-test-secret");
-        delete(id).unwrap();
+        let result = (|| {
+            set(id, "temporary-heminus-test-secret".into())?;
+            if get(id)?.as_str() != "temporary-heminus-test-secret" {
+                return Err("The native credential store returned the wrong secret".into());
+            }
+            Ok::<_, String>(())
+        })();
+        let cleanup = delete(id);
+        result.unwrap();
+        cleanup.unwrap();
         assert!(get(id).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires the release GUI-subsystem executable"]
+    fn release_gui_executable_returns_askpass_secret() {
+        let id = Uuid::new_v4();
+        let executable = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("target/release/heminus-app.exe");
+        assert!(executable.is_file(), "build the Windows release first");
+        let candidates = serde_json::to_string(&vec![AskpassCandidate {
+            id,
+            needles: vec!["deploy@example.invalid".into()],
+        }])
+        .unwrap();
+        set(id, "temporary-release-askpass-secret".into()).unwrap();
+        let output = std::process::Command::new(executable)
+            .arg("deploy@example.invalid's password:")
+            .env(ASKPASS_CANDIDATES_ENV, candidates)
+            .output();
+        let cleanup = delete(id);
+        let output = output.unwrap();
+        cleanup.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"temporary-release-askpass-secret");
     }
 }

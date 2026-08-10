@@ -61,6 +61,8 @@ impl AsyncWrite for ChildStream {
 struct SftpConnection {
     session: SftpSession,
     child: AsyncMutex<Child>,
+    supervisor: crate::platform::ProcessSupervisor,
+    _artifacts: crate::ssh_runtime::ConnectionArtifacts,
 }
 
 #[derive(Default)]
@@ -179,8 +181,10 @@ pub async fn sftp_open(
         "Select and save a Password or Key identity on this host before opening SFTP. A local terminal does not authenticate an SSH connection.".to_string()
     })?;
     let username = identity.username.as_deref().unwrap_or(&host.username);
+    let connection_artifacts = app_state.ssh.connection_artifacts(&host_arguments);
 
-    let mut command = Command::new("ssh");
+    let mut command = Command::new(crate::platform::ssh_executable()?);
+    crate::platform::configure_background_command(command.as_std_mut());
     let password_identity = (identity.kind == IdentityKind::Password).then_some(&identity);
     for argument in app_state.ssh.sftp_arguments() {
         command.arg(argument);
@@ -237,10 +241,12 @@ pub async fn sftp_open(
             .env("SSH_ASKPASS", askpass)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env(crate::credential::askpass_candidates_env(), candidates);
+        #[cfg(unix)]
         if std::env::var_os("DISPLAY").is_none() {
             command.env("DISPLAY", "heminus:0");
         }
     }
+    command.kill_on_drop(true);
     let mut child = command
         .arg("--")
         .arg(format!(
@@ -253,6 +259,14 @@ pub async fn sftp_open(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Could not start OpenSSH SFTP: {error}"))?;
+    let supervisor = match crate::platform::ProcessSupervisor::attach(child.id()) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    };
     let reader = child
         .stdout
         .take()
@@ -315,6 +329,8 @@ pub async fn sftp_open(
             Arc::new(SftpConnection {
                 session,
                 child: AsyncMutex::new(child),
+                supervisor,
+                _artifacts: connection_artifacts,
             }),
         );
     Ok(SftpOpenResult { id, home_path })
@@ -390,6 +406,7 @@ pub async fn sftp_close(manager: State<'_, SftpManager>, id: Uuid) -> Result<boo
         return Ok(false);
     };
     let _ = connection.session.close().await;
+    connection.supervisor.terminate();
     let mut child = connection.child.lock().await;
     let _ = child.kill().await;
     let _ = child.wait().await;
@@ -1119,18 +1136,11 @@ async fn ensure_local_directory(path: &Path) -> Result<(), String> {
 }
 
 fn canonical_home_path(path: &Path) -> Result<PathBuf, String> {
-    path.canonicalize().map_err(|error| error.to_string())
+    crate::platform::canonical_existing_local_path(path)
 }
 
 fn safe_new_local_path(path: &Path) -> Result<PathBuf, String> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| "Choose a destination file name".to_string())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Choose a destination directory".to_string())?;
-    let canonical_parent = canonical_home_path(parent)?;
-    Ok(canonical_parent.join(file_name))
+    crate::platform::safe_local_destination(path)
 }
 
 fn remote_join_path(parent: &str, child: &str) -> String {
@@ -1293,11 +1303,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_paths_can_browse_from_root() {
-        assert_eq!(
-            canonical_home_path(Path::new("/")).unwrap(),
-            PathBuf::from("/")
-        );
+    fn local_paths_cannot_escape_the_user_profile() {
+        assert!(canonical_home_path(Path::new("/")).is_err());
     }
 
     #[test]

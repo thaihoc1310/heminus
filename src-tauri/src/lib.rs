@@ -1,6 +1,7 @@
 mod commands;
 mod credential;
 mod key_management;
+mod platform;
 mod sftp;
 mod ssh_runtime;
 mod terminal;
@@ -30,11 +31,13 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .setup(|app| {
             let database = Database::open_default()?;
             let ssh = ssh_runtime::SshRuntime::initialize()?;
             key_management::migrate_external_keys(&database, &ssh)?;
             ssh_runtime::migrate_legacy_hosts(&database)?;
+            database.migrate_welcome_host()?;
             database.reconcile_active_sessions()?;
             database.seed_welcome_hosts()?;
             app.manage(AppState {
@@ -49,10 +52,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
+            commands::platform_capabilities,
             commands::create_detached_terminal_window,
             commands::transfer_terminal_tab,
+            commands::terminal_tab_pointer_state,
             commands::take_detached_terminal_payload,
             commands::home_directory,
+            commands::local_path_info,
+            commands::join_local_path,
             commands::list_hosts,
             commands::save_host,
             commands::delete_host,

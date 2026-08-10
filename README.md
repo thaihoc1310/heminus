@@ -1,8 +1,8 @@
 # Heminus
 
 Heminus is a lightweight, local-first SSH, SFTP, terminal, and port-forwarding
-workspace for Ubuntu. It uses Tauri 2, Svelte 5, Rust, the system WebKitGTK
-runtime, and the system OpenSSH client.
+workspace for Ubuntu and Windows 11. It uses Tauri 2, Svelte 5, Rust, the
+platform webview, and the system OpenSSH client.
 
 The interface and all user-facing messages are in English.
 
@@ -48,24 +48,30 @@ transport engine. Heminus passes an isolated configuration on every invocation
 and does not consume the machine's SSH configuration, known hosts, default
 keys, or agent.
 
+On Windows 11 x86-64, run the per-user NSIS installer from
+`target\release\bundle\nsis`. Microsoft OpenSSH Client and WebView2 Runtime are
+required for the complete feature set. See [Windows development and release
+notes](docs/windows.md) for setup, limitations, and release requirements.
+
 ## Development
 
 Requirements:
 
-- Rust stable
+- Rust 1.95.0 with the native GNU/Linux or MSVC toolchain
 - Node.js 22+
-- pnpm 10+
-- Tauri's Ubuntu system dependencies
+- pnpm 10.33+
+- Tauri's platform development dependencies
 
 Commands:
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm check
 pnpm test
-cargo test --workspace
+cargo test --workspace --all-targets
 pnpm tauri dev
-pnpm tauri build --bundles deb
+pnpm run tauri:build:ubuntu # Ubuntu
+pnpm run tauri:build:windows # Windows
 ```
 
 ## Manual acceptance checklist
@@ -96,5 +102,5 @@ Passwords and key passphrases are stored only through the operating system's
 encrypted credential service and are never written to Heminus's SQLite
 database. Private-key identities point only to copies inside the private
 Heminus data directory. Dragged source files are left untouched; vault copies
-are validated and restricted to mode `0600` on Linux. Generated keys also live
-in that vault.
+are validated and restricted to mode `0600` on Linux or a private ACL on
+Windows. Generated keys also live in that vault.

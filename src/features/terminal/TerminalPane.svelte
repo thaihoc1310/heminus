@@ -118,7 +118,10 @@
       `--terminal-control-hover:${activeTheme.chrome.controlHover}`,
       `--terminal-active-foreground:${activeTheme.chrome.activeForeground}`,
       `--terminal-active-background:${activeTheme.chrome.activeBackground}`,
-      `--terminal-selection:${activeTheme.palette.selectionBackground ?? activeTheme.chrome.activeBackground}`
+      `--terminal-selection:${activeTheme.palette.selectionBackground ?? activeTheme.chrome.activeBackground}`,
+      `--terminal-scrollbar:${activeTheme.palette.scrollbarSliderBackground ?? activeTheme.chrome.headerBorder}`,
+      `--terminal-scrollbar-hover:${activeTheme.palette.scrollbarSliderHoverBackground ?? activeTheme.chrome.headerMuted}`,
+      `--terminal-scrollbar-active:${activeTheme.palette.scrollbarSliderActiveBackground ?? activeTheme.chrome.activeBackground}`
     ].join(";")
   );
 

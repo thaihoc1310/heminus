@@ -567,7 +567,8 @@ select:focus-visible {
 .top-tabs [data-top-tab-id] {
   position: relative;
   cursor: pointer;
-  touch-action: manipulation;
+  user-select: none;
+  touch-action: none;
 }
 
 .top-tabs [data-top-tab-id].dragging,
@@ -600,16 +601,6 @@ select:focus-visible {
 
 .top-tabs [data-top-tab-id].drop-after::after {
   right: -4px;
-}
-
-.top-tabs .terminal-tab-shell.drop-merge {
-  outline: 2px solid var(--app-terminal-header-accent, #d8c89d);
-  outline-offset: -2px;
-  background: color-mix(
-    in srgb,
-    var(--app-terminal-header-accent, #d8c89d) 12%,
-    transparent
-  );
 }
 
 .top-tabs .terminal-tab span,
@@ -4024,6 +4015,40 @@ select:focus-visible {
 
 .terminal-mount .xterm .xterm-viewport {
   background-color: var(--terminal-background, #1e2228) !important;
+  scrollbar-color: var(--terminal-scrollbar, #465363) var(--terminal-background, #1e2228);
+  scrollbar-width: thin;
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+  background: var(--terminal-background, #1e2228);
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: var(--terminal-background, #1e2228);
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid var(--terminal-background, #1e2228);
+  border-radius: 5px;
+  background: var(--terminal-scrollbar, #465363);
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--terminal-scrollbar-hover, #65758a);
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-thumb:active {
+  background: var(--terminal-scrollbar-active, #278fe8);
+}
+
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-button,
+.terminal-mount .xterm .xterm-viewport::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: var(--terminal-background, #1e2228);
 }
 
 .terminal-suggestions {

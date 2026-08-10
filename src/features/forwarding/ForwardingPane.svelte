@@ -9,6 +9,7 @@
     deletePortForward,
     listHosts,
     listPortForwards,
+    platformCapabilities,
     savePortForward,
     startTunnel,
     stopTunnelPortProcesses,
@@ -16,7 +17,7 @@
     tunnelPortProcesses,
     tunnelStates
   } from "../../lib/ipc";
-  import type { ForwardKind, Host, PortForward } from "../../lib/types";
+  import type { ForwardKind, Host, PlatformCapabilities, PortForward } from "../../lib/types";
   import {
     confirmDiscardChanges,
     draftChanged,
@@ -49,6 +50,14 @@
   let collectionSort = $state<CollectionSort>("az");
   let collectionQuery = $state("");
   let editorBaseline = $state<string | null>(null);
+  let capabilities = $state<PlatformCapabilities>({
+    localPermissionEditing: false,
+    customApplicationOpen: false,
+    foreignProcessTermination: false,
+    sshAvailable: false,
+    sshKeygenAvailable: false,
+    localShell: null
+  });
   const activePortConflictDialogs = new Set<string>();
   let statesRefreshPromise: Promise<void> | null = null;
   const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
@@ -85,7 +94,11 @@
   async function refresh(preferredId?: string) {
     loading = true;
     try {
-      [hosts, rules] = await Promise.all([listHosts(), listPortForwards()]);
+      [hosts, rules, capabilities] = await Promise.all([
+        listHosts(),
+        listPortForwards(),
+        platformCapabilities()
+      ]);
       const next = preferredId
         ? rules.find((rule) => rule.id === preferredId) ?? null
         : selected
@@ -162,6 +175,15 @@
             )
             .join("\n")
         : "The owning process is protected, so administrator permission is required to identify and stop it.";
+      if (!capabilities.foreignProcessTermination) {
+        await alertDialog({
+          title: `Port ${rule.bind_port} is already in use`,
+          message:
+            `${processDetails}\n\nClose the process in Task Manager, then start “${rule.name}” again.`,
+          confirmLabel: "Close"
+        });
+        return;
+      }
       const accepted = await confirmDialog({
         title: `Port ${rule.bind_port} is already in use`,
         message:

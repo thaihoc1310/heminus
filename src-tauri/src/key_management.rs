@@ -61,7 +61,9 @@ pub async fn read_key_material(
             .secret_stored
             .then(|| crate::credential::get(identity.id))
             .and_then(Result::ok);
-        let output = Command::new("ssh-keygen")
+        let mut command = Command::new(crate::platform::ssh_keygen_executable()?);
+        crate::platform::configure_background_command(&mut command);
+        let output = command
             .arg("-y")
             .arg("-P")
             .arg(
@@ -352,7 +354,10 @@ fn validate_unencrypted_private_key(contents: &str) -> Result<(), String> {
         file.write_all(contents.as_bytes())
             .map_err(|error| format!("Could not validate the private key: {error}"))?;
         drop(file);
-        let output = Command::new("ssh-keygen")
+        crate::platform::secure_private_file(&temporary_path)?;
+        let mut command = Command::new(crate::platform::ssh_keygen_executable()?);
+        crate::platform::configure_background_command(&mut command);
+        let output = command
             .arg("-y")
             .arg("-P")
             .arg("")
@@ -372,13 +377,7 @@ fn validate_unencrypted_private_key(contents: &str) -> Result<(), String> {
 }
 
 fn secure_private_key_permissions(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not secure the private key permissions: {error}"))?;
-    }
-    Ok(())
+    crate::platform::secure_private_file(path)
 }
 
 fn private_key_path(keys_directory: &Path, file_name: &str) -> Result<PathBuf, String> {
@@ -435,12 +434,7 @@ fn generate_ed25519_files(
     private_key
         .write_openssh_file(path, LineEnding::LF)
         .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-    }
+    secure_private_key_permissions(path)?;
     let public_path = public_key_path(path);
     let mut public_key = private_key
         .public_key()
@@ -490,7 +484,9 @@ fn command_error(context: &str, output: &Output) -> String {
 }
 
 pub fn validate_private_key_passphrase(path: &Path, passphrase: &str) -> Result<(), String> {
-    let output = Command::new("ssh-keygen")
+    let mut command = Command::new(crate::platform::ssh_keygen_executable()?);
+    crate::platform::configure_background_command(&mut command);
+    let output = command
         .arg("-y")
         .arg("-P")
         .arg(passphrase)
@@ -572,7 +568,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("heminus-pem-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("legacy.pem");
-        let output = Command::new("ssh-keygen")
+        let output = Command::new(crate::platform::ssh_keygen_executable().unwrap())
             .args(["-q", "-t", "rsa", "-b", "2048", "-m", "PEM", "-N", ""])
             .arg("-f")
             .arg(&path)

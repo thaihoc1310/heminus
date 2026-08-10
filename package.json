@@ -10,9 +10,12 @@
     "test": "vitest run",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --bundles deb"
+    "tauri:build": "tauri build",
+    "tauri:build:ubuntu": "tauri build --bundles deb",
+    "tauri:build:windows": "tauri build --bundles nsis"
   },
   "dependencies": {
+    "@crabnebula/tauri-plugin-drag": "2.1.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "~2.7.2",
     "@xterm/addon-fit": "0.11.0",

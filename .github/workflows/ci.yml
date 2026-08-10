@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl file libayatana-appindicator3-dev libsecret-1-dev \
+            librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev openssh-client wget
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: pnpm run tauri:build:ubuntu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heminus-ubuntu-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0-x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: pnpm run tauri:build:windows
+      - name: Verify release GUI askpass bridge
+        run: cargo test -p heminus-app credential::tests::release_gui_executable_returns_askpass_secret -- --ignored --exact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heminus-windows-nsis-unsigned
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

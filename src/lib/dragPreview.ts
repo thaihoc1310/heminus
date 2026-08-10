@@ -68,6 +68,49 @@ function drawTabIcon(
   context.restore();
 }
 
+function renderNativeTabDragPreview(
+  options: NativeTabDragPreview,
+  displayScale: number
+): HTMLCanvasElement | null {
+  const width = 168;
+  const height = 32;
+  const backingWidth = Math.max(1, Math.round(width * displayScale));
+  const backingHeight = Math.max(1, Math.round(height * displayScale));
+  const canvas = document.createElement("canvas");
+  canvas.width = backingWidth;
+  canvas.height = backingHeight;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.scale(backingWidth / width, backingHeight / height);
+
+  roundedRect(context, 0.5, 0.5, width - 1, height - 1, 13);
+  context.fillStyle = options.background;
+  context.fill();
+  context.fillStyle = options.activeBackground;
+  context.fill();
+  context.strokeStyle = options.border;
+  context.lineWidth = 1;
+  context.stroke();
+
+  context.fillStyle = options.foreground;
+  context.strokeStyle = options.foreground;
+  drawTabIcon(context, options.icon, 12, 9);
+  context.font = "600 12px system-ui, sans-serif";
+  context.textBaseline = "middle";
+  const label = options.label.length > 24
+    ? `${options.label.slice(0, 21)}...`
+    : options.label;
+  context.fillText(label, 36, height / 2, width - 48);
+  return canvas;
+}
+
+export function createNativeTabDragPreviewDataUrl(
+  options: NativeTabDragPreview
+): string {
+  const displayScale = Math.max(1, window.devicePixelRatio || 1);
+  return renderNativeTabDragPreview(options, displayScale)?.toDataURL("image/png") ?? "";
+}
+
 /**
  * Uses the browser/WebView's native drag image so it can leave the current
  * native window. WebKitGTK applies the display scale again when handing the

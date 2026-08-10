@@ -1203,16 +1203,61 @@ impl Database {
         if self.host_count()? > 0 {
             return Ok(());
         }
-        let mut host = Host::new("Local Ubuntu", "127.0.0.1", whoami());
+        let mut host = Host::new(local_host_label(), "127.0.0.1", whoami());
         host.color = HostColor::Blue;
         host.group_name = Some("This device".into());
         self.save_host(&host)?;
         Ok(())
     }
+
+    pub fn migrate_welcome_host(&self) -> Result<bool> {
+        let expected_label = local_host_label();
+        if expected_label == "Local Ubuntu" {
+            return Ok(false);
+        }
+        let Some(mut host) = self
+            .list_hosts(None)?
+            .into_iter()
+            .find(is_legacy_welcome_host)
+        else {
+            return Ok(false);
+        };
+        host.label = expected_label.into();
+        if host.username == "user" {
+            host.username = whoami();
+        }
+        host.updated_at = Utc::now();
+        self.save_host(&host)?;
+        Ok(true)
+    }
 }
 
 fn whoami() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "user".into())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".into())
+}
+
+fn local_host_label() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "Local Windows",
+        "macos" => "Local macOS",
+        _ => "Local Ubuntu",
+    }
+}
+
+fn is_legacy_welcome_host(host: &Host) -> bool {
+    host.label == "Local Ubuntu"
+        && host.address == "127.0.0.1"
+        && host.port == 22
+        && host.group_name.as_deref() == Some("This device")
+        && host.tags.is_empty()
+        && host.color == HostColor::Blue
+        && host.identity_id.is_none()
+        && host.jump_host_ids.is_empty()
+        && host.environment.is_empty()
+        && host.terminal_theme == TerminalTheme::default()
+        && host.terminal_font_size == 14
 }
 
 fn color_name(color: HostColor) -> &'static str {
@@ -1369,6 +1414,49 @@ fn parse_datetime(value: &str) -> rusqlite::Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn welcome_host_matches_the_local_platform_and_account() {
+        let database = Database::in_memory().unwrap();
+        database.seed_welcome_hosts().unwrap();
+        let host = database.list_hosts(None).unwrap().pop().unwrap();
+        assert_eq!(host.label, local_host_label());
+        assert_eq!(host.username, whoami());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_migrates_only_the_untouched_ubuntu_welcome_host() {
+        let database = Database::in_memory().unwrap();
+        let mut legacy = Host::new("Local Ubuntu", "127.0.0.1", "user");
+        legacy.color = HostColor::Blue;
+        legacy.group_name = Some("This device".into());
+        database.save_host(&legacy).unwrap();
+
+        assert!(database.migrate_welcome_host().unwrap());
+        let migrated = database.find_host(legacy.id).unwrap().unwrap();
+        assert_eq!(migrated.label, "Local Windows");
+        assert_eq!(migrated.username, whoami());
+
+        let customized_database = Database::in_memory().unwrap();
+        let mut customized = Host::new("Local Ubuntu", "127.0.0.1", "user");
+        customized.color = HostColor::Blue;
+        customized.group_name = Some("This device".into());
+        customized.environment.push(EnvironmentVariable {
+            name: "TERM_PROFILE".into(),
+            value: "custom".into(),
+        });
+        customized_database.save_host(&customized).unwrap();
+        assert!(!customized_database.migrate_welcome_host().unwrap());
+        assert_eq!(
+            customized_database
+                .find_host(customized.id)
+                .unwrap()
+                .unwrap()
+                .label,
+            "Local Ubuntu"
+        );
+    }
 
     #[test]
     fn host_round_trip_and_search() {
