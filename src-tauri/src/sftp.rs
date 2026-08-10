@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -8,13 +10,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use heminus_domain::{Host, IdentityKind};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{Config as SftpConfig, SftpSession};
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -68,7 +70,30 @@ struct SftpConnection {
 #[derive(Default)]
 pub struct SftpManager {
     sessions: Mutex<HashMap<Uuid, Arc<SftpConnection>>>,
-    transfers: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
+    transfers: Mutex<HashMap<Uuid, Arc<TransferCancellation>>>,
+}
+
+#[derive(Default)]
+struct TransferCancellation {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl TransferCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        if !self.is_cancelled() {
+            self.notify.notified().await;
+        }
+    }
 }
 
 impl SftpManager {
@@ -81,7 +106,7 @@ impl SftpManager {
             .ok_or_else(|| "SFTP session not found".to_string())
     }
 
-    fn begin_transfer(&self, id: Uuid) -> Result<Arc<AtomicBool>, String> {
+    fn begin_transfer(&self, id: Uuid) -> Result<Arc<TransferCancellation>, String> {
         let mut transfers = self
             .transfers
             .lock()
@@ -89,7 +114,7 @@ impl SftpManager {
         if transfers.contains_key(&id) {
             return Err("SFTP transfer already exists".into());
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(TransferCancellation::default());
         transfers.insert(id, cancelled.clone());
         Ok(cancelled)
     }
@@ -108,19 +133,47 @@ impl SftpManager {
         let Some(cancelled) = transfers.get(&id) else {
             return Ok(false);
         };
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
         Ok(true)
     }
 }
 
 const TRANSFER_CANCELLED: &str = "Transfer cancelled";
 
-fn ensure_transfer_active(cancelled: &AtomicBool) -> Result<(), String> {
-    if cancelled.load(Ordering::Acquire) {
+fn ensure_transfer_active(cancelled: &TransferCancellation) -> Result<(), String> {
+    if cancelled.is_cancelled() {
         Err(TRANSFER_CANCELLED.into())
     } else {
         Ok(())
     }
+}
+
+async fn await_transfer_operation<T, E>(
+    cancelled: &TransferCancellation,
+    operation: impl Future<Output = Result<T, E>>,
+) -> Result<T, String>
+where
+    E: Display,
+{
+    ensure_transfer_active(cancelled)?;
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => Err(TRANSFER_CANCELLED.into()),
+        result = operation => result.map_err(|error| error.to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn sftp_client_config() -> SftpConfig {
+    SftpConfig {
+        max_concurrent_writes: 1,
+        ..SftpConfig::default()
+    }
+}
+
+#[cfg(not(windows))]
+fn sftp_client_config() -> SftpConfig {
+    SftpConfig::default()
 }
 
 #[derive(Debug, Serialize)]
@@ -286,7 +339,7 @@ pub async fn sftp_open(
     });
     let session = match tokio::time::timeout(
         Duration::from_secs(20),
-        SftpSession::new(ChildStream { reader, writer }),
+        SftpSession::new_with_config(ChildStream { reader, writer }, sftp_client_config()),
     )
     .await
     {
@@ -492,6 +545,19 @@ async fn remove_remote_entry(connection: &SftpConnection, path: String) -> Resul
     }
 }
 
+async fn remove_remote_file_best_effort(connection: &SftpConnection, path: &str) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        connection.session.remove_file(path.to_string()),
+    )
+    .await;
+}
+
+async fn remove_remote_tree_best_effort(connection: &SftpConnection, path: String) {
+    let _ =
+        tokio::time::timeout(Duration::from_secs(2), remove_remote_tree(connection, path)).await;
+}
+
 #[tauri::command]
 pub async fn sftp_rename(
     manager: State<'_, SftpManager>,
@@ -544,9 +610,8 @@ pub async fn sftp_upload(
     let cancelled = manager.begin_transfer(transfer_id)?;
     let result = async {
         let local_path = canonical_home_path(&local_path)?;
-        let metadata = tokio::fs::metadata(&local_path)
-            .await
-            .map_err(|error| error.to_string())?;
+        let metadata =
+            await_transfer_operation(&cancelled, tokio::fs::metadata(&local_path)).await?;
         let connection = manager.get(id)?;
         let total = if metadata.is_dir() {
             local_tree_size(&local_path, &cancelled).await?
@@ -558,7 +623,7 @@ pub async fn sftp_upload(
 
         if metadata.is_dir() {
             let staging_path = remote_temporary_path(&remote_path)?;
-            ensure_remote_directory(&connection, &staging_path).await?;
+            ensure_remote_directory(&connection, &staging_path, &cancelled).await?;
             let transfer_result = async {
                 let mut pending = vec![(local_path, staging_path.clone())];
                 while let Some((local_directory, remote_directory)) = pending.pop() {
@@ -581,7 +646,7 @@ pub async fn sftp_upload(
                         let name = entry.file_name().to_string_lossy().into_owned();
                         let remote_child = remote_join_path(&remote_directory, &name);
                         if metadata.is_dir() {
-                            ensure_remote_directory(&connection, &remote_child).await?;
+                            ensure_remote_directory(&connection, &remote_child, &cancelled).await?;
                             pending.push((entry.path(), remote_child));
                         } else if metadata.is_file() {
                             upload_single_file(
@@ -601,7 +666,7 @@ pub async fn sftp_upload(
             }
             .await;
             if let Err(error) = transfer_result {
-                let _ = remove_remote_tree(&connection, staging_path).await;
+                remove_remote_tree_best_effort(&connection, staging_path).await;
                 return Err(error);
             }
             commit_remote_staging(&connection, staging_path, remote_path, &cancelled).await?;
@@ -638,18 +703,14 @@ async fn upload_single_file(
     total: u64,
     transferred: &mut u64,
     on_progress: &Channel<TransferEvent>,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<(), String> {
     ensure_transfer_active(cancelled)?;
     let temporary_path = remote_temporary_path(&remote_path)?;
-    let mut source = tokio::fs::File::open(local_path)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut destination = connection
-        .session
-        .create(temporary_path.clone())
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut source = await_transfer_operation(cancelled, tokio::fs::File::open(local_path)).await?;
+    let mut destination =
+        await_transfer_operation(cancelled, connection.session.create(temporary_path.clone()))
+            .await?;
     let result = copy_with_progress(
         &mut source,
         &mut destination,
@@ -660,16 +721,16 @@ async fn upload_single_file(
     )
     .await;
     if let Err(error) = result {
-        let _ = connection.session.remove_file(&temporary_path).await;
+        remove_remote_file_best_effort(connection, &temporary_path).await;
         return Err(error);
     }
     if let Err(error) = ensure_transfer_active(cancelled) {
-        let _ = connection.session.remove_file(&temporary_path).await;
+        remove_remote_file_best_effort(connection, &temporary_path).await;
         return Err(error);
     }
-    if let Err(error) = destination.shutdown().await {
-        let _ = connection.session.remove_file(&temporary_path).await;
-        return Err(error.to_string());
+    if let Err(error) = await_transfer_operation(cancelled, destination.shutdown()).await {
+        remove_remote_file_best_effort(connection, &temporary_path).await;
+        return Err(error);
     }
     commit_remote_staging(connection, temporary_path, remote_path, cancelled).await
 }
@@ -687,11 +748,9 @@ pub async fn sftp_download(
     let result = async {
         let local_path = safe_new_local_path(&local_path)?;
         let connection = manager.get(id)?;
-        let metadata = connection
-            .session
-            .metadata(remote_path.clone())
-            .await
-            .map_err(|error| error.to_string())?;
+        let metadata =
+            await_transfer_operation(&cancelled, connection.session.metadata(remote_path.clone()))
+                .await?;
         let total = if metadata.is_dir() {
             remote_tree_size(&connection, &remote_path, &cancelled).await?
         } else {
@@ -707,11 +766,11 @@ pub async fn sftp_download(
                 let mut pending = vec![(remote_path, staging_path.clone())];
                 while let Some((remote_directory, local_directory)) = pending.pop() {
                     ensure_transfer_active(&cancelled)?;
-                    let entries = connection
-                        .session
-                        .read_dir(remote_directory)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let entries = await_transfer_operation(
+                        &cancelled,
+                        connection.session.read_dir(remote_directory),
+                    )
+                    .await?;
                     for entry in entries {
                         ensure_transfer_active(&cancelled)?;
                         let name = entry.file_name();
@@ -781,7 +840,7 @@ async fn download_single_file(
     total: u64,
     transferred: &mut u64,
     on_progress: &Channel<TransferEvent>,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<(), String> {
     ensure_transfer_active(cancelled)?;
     let temporary_path = local_path.with_file_name(format!(
@@ -792,14 +851,10 @@ async fn download_single_file(
             .unwrap_or("download"),
         Uuid::new_v4()
     ));
-    let mut source = connection
-        .session
-        .open(remote_path)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut destination = tokio::fs::File::create(&temporary_path)
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut source =
+        await_transfer_operation(cancelled, connection.session.open(remote_path)).await?;
+    let mut destination =
+        await_transfer_operation(cancelled, tokio::fs::File::create(&temporary_path)).await?;
     let result = copy_with_progress(
         &mut source,
         &mut destination,
@@ -842,11 +897,9 @@ pub async fn sftp_transfer_remote(
     let result = async {
         let source = manager.get(source_id)?;
         let target = manager.get(target_id)?;
-        let metadata = source
-            .session
-            .metadata(source_path.clone())
-            .await
-            .map_err(|error| error.to_string())?;
+        let metadata =
+            await_transfer_operation(&cancelled, source.session.metadata(source_path.clone()))
+                .await?;
         if source_id == target_id
             && metadata.is_dir()
             && remote_path_is_same_or_child(&source_path, &target_path)
@@ -870,16 +923,16 @@ pub async fn sftp_transfer_remote(
 
         if metadata.is_dir() {
             let staging_path = remote_temporary_path(&target_path)?;
-            ensure_remote_directory(&target, &staging_path).await?;
+            ensure_remote_directory(&target, &staging_path, &cancelled).await?;
             let transfer_result = async {
                 let mut pending = vec![(source_path, staging_path.clone())];
                 while let Some((source_directory, target_directory)) = pending.pop() {
                     ensure_transfer_active(&cancelled)?;
-                    let entries = source
-                        .session
-                        .read_dir(source_directory)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    let entries = await_transfer_operation(
+                        &cancelled,
+                        source.session.read_dir(source_directory),
+                    )
+                    .await?;
                     for entry in entries {
                         ensure_transfer_active(&cancelled)?;
                         let name = entry.file_name();
@@ -892,7 +945,7 @@ pub async fn sftp_transfer_remote(
                         if metadata.is_symlink() {
                             continue;
                         } else if metadata.is_dir() {
-                            ensure_remote_directory(&target, &target_child).await?;
+                            ensure_remote_directory(&target, &target_child, &cancelled).await?;
                             pending.push((entry.path(), target_child));
                         } else if metadata.is_regular() {
                             transfer_remote_single_file(
@@ -909,7 +962,7 @@ pub async fn sftp_transfer_remote(
             }
             .await;
             if let Err(error) = transfer_result {
-                let _ = remove_remote_tree(&target, staging_path).await;
+                remove_remote_tree_best_effort(&target, staging_path).await;
                 return Err(error);
             }
             commit_remote_staging(&target, staging_path, target_path, &cancelled).await?;
@@ -936,7 +989,7 @@ struct RemoteTransferContext<'a> {
     target: &'a SftpConnection,
     total: u64,
     on_progress: &'a Channel<TransferEvent>,
-    cancelled: &'a AtomicBool,
+    cancelled: &'a TransferCancellation,
 }
 
 async fn transfer_remote_single_file(
@@ -947,18 +1000,16 @@ async fn transfer_remote_single_file(
 ) -> Result<(), String> {
     ensure_transfer_active(transfer.cancelled)?;
     let temporary_path = remote_temporary_path(&target_path)?;
-    let mut reader = transfer
-        .source
-        .session
-        .open(source_path)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut writer = transfer
-        .target
-        .session
-        .create(temporary_path.clone())
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut reader = await_transfer_operation(
+        transfer.cancelled,
+        transfer.source.session.open(source_path),
+    )
+    .await?;
+    let mut writer = await_transfer_operation(
+        transfer.cancelled,
+        transfer.target.session.create(temporary_path.clone()),
+    )
+    .await?;
     let result = copy_with_progress(
         &mut reader,
         &mut writer,
@@ -969,16 +1020,16 @@ async fn transfer_remote_single_file(
     )
     .await;
     if let Err(error) = result {
-        let _ = transfer.target.session.remove_file(&temporary_path).await;
+        remove_remote_file_best_effort(transfer.target, &temporary_path).await;
         return Err(error);
     }
     if let Err(error) = ensure_transfer_active(transfer.cancelled) {
-        let _ = transfer.target.session.remove_file(&temporary_path).await;
+        remove_remote_file_best_effort(transfer.target, &temporary_path).await;
         return Err(error);
     }
-    if let Err(error) = writer.shutdown().await {
-        let _ = transfer.target.session.remove_file(&temporary_path).await;
-        return Err(error.to_string());
+    if let Err(error) = await_transfer_operation(transfer.cancelled, writer.shutdown()).await {
+        remove_remote_file_best_effort(transfer.target, &temporary_path).await;
+        return Err(error);
     }
     commit_remote_staging(
         transfer.target,
@@ -995,7 +1046,7 @@ async fn copy_with_progress<R, W>(
     total: u64,
     transferred: &mut u64,
     on_progress: &Channel<TransferEvent>,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -1005,17 +1056,11 @@ where
     let mut last_report = *transferred;
     loop {
         ensure_transfer_active(cancelled)?;
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|error| error.to_string())?;
+        let read = await_transfer_operation(cancelled, reader.read(&mut buffer)).await?;
         if read == 0 {
             break;
         }
-        writer
-            .write_all(&buffer[..read])
-            .await
-            .map_err(|error| error.to_string())?;
+        await_transfer_operation(cancelled, writer.write_all(&buffer[..read])).await?;
         ensure_transfer_active(cancelled)?;
         *transferred += read as u64;
         if transferred.saturating_sub(last_report) >= 1024 * 1024 || *transferred == total {
@@ -1037,7 +1082,7 @@ where
     Ok(())
 }
 
-async fn local_tree_size(root: &Path, cancelled: &AtomicBool) -> Result<u64, String> {
+async fn local_tree_size(root: &Path, cancelled: &TransferCancellation) -> Result<u64, String> {
     let mut total = 0_u64;
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -1069,17 +1114,14 @@ async fn local_tree_size(root: &Path, cancelled: &AtomicBool) -> Result<u64, Str
 async fn remote_tree_size(
     connection: &SftpConnection,
     root: &str,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<u64, String> {
     let mut total = 0_u64;
     let mut pending = vec![root.to_string()];
     while let Some(directory) = pending.pop() {
         ensure_transfer_active(cancelled)?;
-        let entries = connection
-            .session
-            .read_dir(directory)
-            .await
-            .map_err(|error| error.to_string())?;
+        let entries =
+            await_transfer_operation(cancelled, connection.session.read_dir(directory)).await?;
         for entry in entries {
             ensure_transfer_active(cancelled)?;
             let name = entry.file_name();
@@ -1107,17 +1149,21 @@ pub fn sftp_cancel_transfer(
     manager.cancel_transfer(transfer_id)
 }
 
-async fn ensure_remote_directory(connection: &SftpConnection, path: &str) -> Result<(), String> {
-    match connection.session.metadata(path.to_string()).await {
+async fn ensure_remote_directory(
+    connection: &SftpConnection,
+    path: &str,
+    cancelled: &TransferCancellation,
+) -> Result<(), String> {
+    match await_transfer_operation(cancelled, connection.session.metadata(path.to_string())).await {
         Ok(metadata) if metadata.is_dir() => Ok(()),
         Ok(_) => Err(format!(
             "Remote destination exists and is not a directory: {path}"
         )),
-        Err(_) => connection
-            .session
-            .create_dir(path.to_string())
-            .await
-            .map_err(|error| error.to_string()),
+        Err(error) if error == TRANSFER_CANCELLED => Err(error),
+        Err(_) => {
+            await_transfer_operation(cancelled, connection.session.create_dir(path.to_string()))
+                .await
+        }
     }
 }
 
@@ -1168,7 +1214,7 @@ async fn commit_remote_staging(
     connection: &SftpConnection,
     staging_path: String,
     target_path: String,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<(), String> {
     if let Err(error) = ensure_transfer_active(cancelled) {
         let _ = remove_remote_entry(connection, staging_path).await;
@@ -1249,7 +1295,7 @@ async fn remove_local_entry(path: &Path) -> Result<(), String> {
 async fn commit_local_staging(
     staging_path: PathBuf,
     target_path: PathBuf,
-    cancelled: &AtomicBool,
+    cancelled: &TransferCancellation,
 ) -> Result<(), String> {
     if let Err(error) = ensure_transfer_active(cancelled) {
         let _ = remove_local_entry(&staging_path).await;
@@ -1334,11 +1380,38 @@ mod tests {
         let manager = SftpManager::default();
         let id = Uuid::new_v4();
         let cancelled = manager.begin_transfer(id).expect("transfer flag");
-        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(!cancelled.is_cancelled());
         assert!(manager.cancel_transfer(id).expect("cancel transfer"));
-        assert!(cancelled.load(Ordering::Acquire));
+        assert!(cancelled.is_cancelled());
         manager.finish_transfer(id);
         assert!(!manager.cancel_transfer(id).expect("finished transfer"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_transfer_operation() {
+        let cancelled = Arc::new(TransferCancellation::default());
+        let pending_cancelled = cancelled.clone();
+        let pending = tokio::spawn(async move {
+            await_transfer_operation(
+                &pending_cancelled,
+                std::future::pending::<Result<(), std::io::Error>>(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        cancelled.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("cancelled operation should wake")
+            .expect("cancelled operation task should finish");
+        assert_eq!(result, Err(TRANSFER_CANCELLED.to_string()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_sftp_writes_are_serialized() {
+        assert_eq!(sftp_client_config().max_concurrent_writes, 1);
     }
 
     #[test]

@@ -4908,6 +4908,32 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.sftp-pointer-drag-preview {
+  position: fixed;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: min(280px, calc(100vw - 32px));
+  height: 44px;
+  padding: 0 12px;
+  overflow: hidden;
+  color: var(--ink);
+  border: 1px solid #cfd9de;
+  border-radius: 6px;
+  background: #fbfcfd;
+  box-shadow: 0 12px 30px #17212a33;
+  pointer-events: none;
+}
+
+.sftp-pointer-drag-preview strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .file-context-menu {
   position: fixed;
   z-index: 800;

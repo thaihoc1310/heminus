@@ -47,6 +47,16 @@
   type SortKey = "name" | "modified" | "size" | "kind";
   type SortDirection = "ascending" | "descending";
   type BrowserEntry = LocalEntry | RemoteEntry;
+  interface EntryPointerDrag {
+    source: PaneName;
+    entry: BrowserEntry;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    dragging: boolean;
+  }
 
   let {
     initialHostId = "",
@@ -111,6 +121,7 @@
   let dragSource = $state<PaneName | null>(null);
   let draggedEntry = $state<BrowserEntry | null>(null);
   let dropTarget = $state<PaneName | null>(null);
+  let entryPointerDrag = $state<EntryPointerDrag | null>(null);
   let permissionTarget = $state<{
     pane: PaneName;
     entry: BrowserEntry;
@@ -122,6 +133,7 @@
   let componentDisposed = false;
   let localDirectoryRequestId = 0;
   let remoteDirectoryRequestId = 0;
+  const usesPointerEntryDrag = navigator.userAgent.includes("Windows");
   let capabilities = $state<PlatformCapabilities>({
     localPermissionEditing: false,
     customApplicationOpen: false,
@@ -200,6 +212,8 @@
     })();
     return () => {
       componentDisposed = true;
+      entryPointerDrag = null;
+      finishEntryDrag();
       localDirectoryRequestId += 1;
       remoteDirectoryRequestId += 1;
       window.removeEventListener("click", closeContextMenu);
@@ -667,6 +681,70 @@
     dropTarget = null;
   }
 
+  function startEntryPointerDrag(
+    event: PointerEvent,
+    pane: PaneName,
+    entry: BrowserEntry
+  ) {
+    if (
+      !usesPointerEntryDrag ||
+      event.button !== 0 ||
+      !session ||
+      transferStatus === "running" ||
+      transferStatus === "cancelling"
+    ) return;
+    entryPointerDrag = {
+      source: pane,
+      entry,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY,
+      dragging: false
+    };
+  }
+
+  function pointerDropTargetAt(x: number, y: number, source: PaneName): PaneName | null {
+    const target = document
+      .elementsFromPoint(x, y)
+      .map((element) => element.closest<HTMLElement>("[data-sftp-pane]"))
+      .find((element) => element?.dataset.sftpPane !== undefined);
+    const pane = target?.dataset.sftpPane as PaneName | undefined;
+    return pane && pane !== source ? pane : null;
+  }
+
+  function moveEntryPointerDrag(event: PointerEvent) {
+    const drag = entryPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag.currentX = event.clientX;
+    drag.currentY = event.clientY;
+    if (
+      !drag.dragging &&
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 8
+    ) return;
+    event.preventDefault();
+    if (!drag.dragging) {
+      drag.dragging = true;
+      dragSource = drag.source;
+      draggedEntry = drag.entry;
+    }
+    dropTarget = pointerDropTargetAt(event.clientX, event.clientY, drag.source);
+  }
+
+  function finishEntryPointerDrag(event: PointerEvent, cancelled = false) {
+    const drag = entryPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const target = cancelled
+      ? null
+      : pointerDropTargetAt(event.clientX, event.clientY, drag.source);
+    entryPointerDrag = null;
+    finishEntryDrag();
+    if (!drag.dragging || !target) return;
+    event.preventDefault();
+    void transferEntryBetweenPanes(drag.source, target, drag.entry);
+  }
+
   function dragOverPane(event: DragEvent, pane: PaneName) {
     if (!session || !dragSource || dragSource === pane || !draggedEntry) return;
     event.preventDefault();
@@ -687,7 +765,16 @@
     const source = dragSource;
     const entry = draggedEntry;
     finishEntryDrag();
-    if (!session || !source || source === pane || !entry) return;
+    if (!source || !entry) return;
+    await transferEntryBetweenPanes(source, pane, entry);
+  }
+
+  async function transferEntryBetweenPanes(
+    source: PaneName,
+    target: PaneName,
+    entry: BrowserEntry
+  ) {
+    if (!session || source === target) return;
     if (source === "local") {
       await uploadEntry(entry as LocalEntry);
     } else {
@@ -1154,12 +1241,33 @@
   }
 </script>
 
+<svelte:window
+  onpointermove={moveEntryPointerDrag}
+  onpointerup={(event) => finishEntryPointerDrag(event)}
+  onpointercancel={(event) => finishEntryPointerDrag(event, true)}
+/>
+
+{#if entryPointerDrag?.dragging}
+  <div
+    class="sftp-pointer-drag-preview"
+    style:left={`${entryPointerDrag.currentX + 12}px`}
+    style:top={`${entryPointerDrag.currentY + 12}px`}
+    aria-hidden="true"
+  >
+    <span class="file-kind-icon {fileInfo(entryPointerDrag.entry.name, entryPointerDrag.entry.isDirectory).tone}">
+      <Icon name={fileInfo(entryPointerDrag.entry.name, entryPointerDrag.entry.isDirectory).icon} size={17} />
+    </span>
+    <strong>{entryPointerDrag.entry.name}</strong>
+  </div>
+{/if}
+
 <section class="sftp-page">
   {#if error}<div class="sftp-banner error-message">{error}</div>{/if}
 
   <div class="sftp-split">
     <div
       class="file-pane"
+      data-sftp-pane="local"
       class:drop-active={dropTarget === "local"}
       role="region"
       aria-label={leftSession ? "Left remote files" : "Local files"}
@@ -1304,12 +1412,13 @@
             <button
               class="file-row"
               class:selected={selectedLocal?.path === entry.path}
-              draggable="true"
+              draggable={!usesPointerEntryDrag}
               onclick={() => (selectedLocal = entry)}
               ondblclick={() => entry.isDirectory && openLocalDirectory(entry.path)}
               oncontextmenu={(event) => showContextMenu(event, "local", entry)}
               ondragstart={(event) => startEntryDrag(event, "local", entry)}
               ondragend={finishEntryDrag}
+              onpointerdown={(event) => startEntryPointerDrag(event, "local", entry)}
             >
               <span class="file-name">
                 <span class="file-kind-icon {fileInfo(entry.name, entry.isDirectory).tone}">
@@ -1338,6 +1447,7 @@
 
     <div
       class="file-pane remote-pane"
+      data-sftp-pane="remote"
       class:drop-active={dropTarget === "remote"}
       role="region"
       aria-label="Remote files"
@@ -1510,12 +1620,13 @@
               <button
                 class="file-row"
                 class:selected={selectedRemote?.path === entry.path}
-                draggable="true"
+                draggable={!usesPointerEntryDrag}
                 onclick={() => (selectedRemote = entry)}
                 ondblclick={() => entry.isDirectory && openRemoteDirectory(entry.path)}
                 oncontextmenu={(event) => showContextMenu(event, "remote", entry)}
                 ondragstart={(event) => startEntryDrag(event, "remote", entry)}
                 ondragend={finishEntryDrag}
+                onpointerdown={(event) => startEntryPointerDrag(event, "remote", entry)}
               >
                 <span class="file-name">
                   <span class="file-kind-icon {fileInfo(entry.name, entry.isDirectory).tone}">
