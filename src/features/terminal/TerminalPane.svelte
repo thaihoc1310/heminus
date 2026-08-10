@@ -60,7 +60,11 @@
     onClose = () => {},
     onBroadcast = () => {},
     onFocus = () => {},
+    headerDraggable = false,
     onHeaderPointerDown = (_event: PointerEvent) => {},
+    onHeaderDragStart = (_event: DragEvent) => {},
+    onHeaderDrag = (_event: DragEvent) => {},
+    onHeaderDragEnd = (_event: DragEvent) => {},
     onSessionReady = (_paneId: string, _sessionId: string) => {},
     onSessionClosed = (_paneId: string) => {},
     onUserInput = (_paneId: string, _bytes: number[]) => {},
@@ -81,7 +85,11 @@
     onClose?: () => void;
     onBroadcast?: () => void;
     onFocus?: () => void;
+    headerDraggable?: boolean;
     onHeaderPointerDown?: (event: PointerEvent) => void;
+    onHeaderDragStart?: (event: DragEvent) => void;
+    onHeaderDrag?: (event: DragEvent) => void;
+    onHeaderDragEnd?: (event: DragEvent) => void;
     onSessionReady?: (paneId: string, sessionId: string) => void;
     onSessionClosed?: (paneId: string) => void;
     onUserInput?: (paneId: string, bytes: number[]) => void;
@@ -822,7 +830,11 @@
       role="group"
       aria-label="Draggable terminal pane header"
       title="Drag to rearrange this pane"
+      draggable={headerDraggable}
       onpointerdown={handleHeaderPointerDown}
+      ondragstart={onHeaderDragStart}
+      ondrag={onHeaderDrag}
+      ondragend={onHeaderDragEnd}
     >
       <div>
         <HostIcon hostId={host?.id} size={15} />

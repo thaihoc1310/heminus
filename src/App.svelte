@@ -12,6 +12,7 @@
   import {
     createNativeTabDragPreviewDataUrl,
     setElementDragPreview,
+    setNativeTabDragPreview,
     type NativeTabDragPreview
   } from "./lib/dragPreview";
   import {
@@ -95,6 +96,8 @@
 
   const appWindow = "__TAURI_INTERNALS__" in window ? getCurrentWindow() : null;
   const detachedMode = new URLSearchParams(window.location.search).has("detached");
+  const terminalTabDragMime = "application/x-heminus-terminal-tab";
+  const usesTauriNativeTerminalDrag = !navigator.userAgent.includes("Linux");
   const vaultPages = new Set<MainPage>([
     "hosts",
     "keychain",
@@ -2273,7 +2276,7 @@
     if (!drag.dragging) {
       drag.dragging = true;
       draggedTabId = drag.sourceId;
-      if (appWindow) {
+      if (appWindow && usesTauriNativeTerminalDrag) {
         nativeTerminalTabDragActive = true;
         void startNativeTerminalTabDrag("workspace-pane", drag.pointerId);
         return;
@@ -2397,7 +2400,7 @@
       )) return;
       drag.dragging = true;
       draggedTabId = drag.sourceId;
-      if (appWindow) {
+      if (appWindow && usesTauriNativeTerminalDrag) {
         event.preventDefault();
         nativeTerminalTabDragActive = true;
         topTabCaptureElement = null;
@@ -2496,6 +2499,154 @@
       clientX,
       clientY
     );
+  }
+
+  function startBrowserTerminalTabDrag(
+    event: DragEvent,
+    sourceId: string,
+    sourceKind: NativeTerminalTabDragSession["sourceKind"]
+  ) {
+    if (usesTauriNativeTerminalDrag) {
+      event.preventDefault();
+      return;
+    }
+    if (
+      (event.target as HTMLElement).closest(".terminal-tab-close") ||
+      (sourceKind === "workspace-pane" &&
+        (event.target as HTMLElement).closest(".workspace-pane-header button")) ||
+      !event.dataTransfer
+    ) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(terminalTabDragMime, sourceId);
+    const drag = {
+      sourceId,
+      pointerId: -1,
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY,
+      screenX: event.screenX,
+      screenY: event.screenY,
+      dragging: true
+    };
+    if (sourceKind === "workspace-pane") {
+      const workspace = workspaceForPane(sourceId);
+      if (workspace) workspace.focusedPaneId = null;
+      activeTerminalId = sourceId;
+      panePointerDrag = drag;
+    } else {
+      topTabPointerDrag = drag;
+    }
+    draggedTabId = sourceId;
+    setNativeTabDragPreview(event, nativeTopTabDragPreview(sourceId));
+  }
+
+  function activeBrowserTerminalTabDrag(): {
+    sourceKind: NativeTerminalTabDragSession["sourceKind"];
+    drag: NonNullable<typeof topTabPointerDrag>;
+  } | null {
+    if (usesTauriNativeTerminalDrag) return null;
+    if (topTabPointerDrag?.dragging && topTabPointerDrag.pointerId === -1) {
+      return { sourceKind: "top-tab", drag: topTabPointerDrag };
+    }
+    if (panePointerDrag?.dragging && panePointerDrag.pointerId === -1) {
+      return { sourceKind: "workspace-pane", drag: panePointerDrag };
+    }
+    return null;
+  }
+
+  function moveBrowserTerminalTabDrag(event: DragEvent) {
+    const current = activeBrowserTerminalTabDrag();
+    if (!current) return;
+    if (event.clientX !== 0 || event.clientY !== 0) {
+      current.drag.currentX = event.clientX;
+      current.drag.currentY = event.clientY;
+    }
+    if (event.screenX !== 0 || event.screenY !== 0) {
+      current.drag.screenX = event.screenX;
+      current.drag.screenY = event.screenY;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (event.clientX === 0 && event.clientY === 0) return;
+    const transfer = transferableTopTab(current.drag.sourceId);
+    updateTopTabDropTargetsAt(
+      current.drag.sourceId,
+      current.sourceKind === "workspace-pane" || Boolean(
+        transfer && !transfer.payload.workspace && transfer.paneIds.length === 1
+      ),
+      event.clientX,
+      event.clientY
+    );
+    if (current.sourceKind === "workspace-pane") {
+      updatePaneExtractTargetAt(
+        current.drag.sourceId,
+        event.clientX,
+        event.clientY
+      );
+    } else {
+      paneExtractTarget = false;
+    }
+  }
+
+  function finishBrowserTerminalTabDrop(event: DragEvent) {
+    const current = activeBrowserTerminalTabDrag();
+    if (!current) return;
+    event.preventDefault();
+    if (current.sourceKind === "workspace-pane") {
+      finishPanePointerDragAt(
+        current.drag.pointerId,
+        event.clientX,
+        event.clientY,
+        event.screenX,
+        event.screenY
+      );
+    } else {
+      finishTopTabPointerDragAt(
+        current.drag.pointerId,
+        event.clientX,
+        event.clientY,
+        event.screenX,
+        event.screenY
+      );
+    }
+  }
+
+  function finishBrowserTerminalTabDrag(event: DragEvent) {
+    const current = activeBrowserTerminalTabDrag();
+    if (!current) return;
+    const clientX = event.clientX !== 0 || event.clientY !== 0
+      ? event.clientX
+      : current.drag.currentX;
+    const clientY = event.clientX !== 0 || event.clientY !== 0
+      ? event.clientY
+      : current.drag.currentY;
+    const screenX = event.screenX !== 0 || event.screenY !== 0
+      ? event.screenX
+      : current.drag.screenX;
+    const screenY = event.screenX !== 0 || event.screenY !== 0
+      ? event.screenY
+      : current.drag.screenY;
+    if (current.sourceKind === "workspace-pane") {
+      finishPanePointerDragAt(
+        current.drag.pointerId,
+        clientX,
+        clientY,
+        screenX,
+        screenY
+      );
+    } else {
+      finishTopTabPointerDragAt(
+        current.drag.pointerId,
+        clientX,
+        clientY,
+        screenX,
+        screenY
+      );
+    }
   }
 
   function updateTopTabDropTargetsAt(
@@ -3072,6 +3223,8 @@
   onpointermove={handleGlobalPointerMove}
   onpointerup={handleGlobalPointerEnd}
   onpointercancel={handleGlobalPointerCancel}
+  ondragover={moveBrowserTerminalTabDrag}
+  ondrop={finishBrowserTerminalTabDrop}
 />
 
 <div
@@ -3138,7 +3291,13 @@
           class:drop-after={topTabDropTarget?.id === "vault" && topTabDropTarget.after}
           data-top-tab-id="vault"
           style:order={topTabOrder.indexOf("vault")}
-          onpointerdown={(event) => startTopTabPointerDrag(event, "vault")}
+          draggable={!usesTauriNativeTerminalDrag}
+          onpointerdown={(event) => {
+            if (usesTauriNativeTerminalDrag) startTopTabPointerDrag(event, "vault");
+          }}
+          ondragstart={(event) => startBrowserTerminalTabDrag(event, "vault", "top-tab")}
+          ondrag={moveBrowserTerminalTabDrag}
+          ondragend={finishBrowserTerminalTabDrag}
           onclick={() => {
             if (!suppressTopTabClick) switchPage("hosts");
           }}
@@ -3154,7 +3313,13 @@
           class:drop-after={topTabDropTarget?.id === "sftp" && topTabDropTarget.after}
           data-top-tab-id="sftp"
           style:order={topTabOrder.indexOf("sftp")}
-          onpointerdown={(event) => startTopTabPointerDrag(event, "sftp")}
+          draggable={!usesTauriNativeTerminalDrag}
+          onpointerdown={(event) => {
+            if (usesTauriNativeTerminalDrag) startTopTabPointerDrag(event, "sftp");
+          }}
+          ondragstart={(event) => startBrowserTerminalTabDrag(event, "sftp", "top-tab")}
+          ondrag={moveBrowserTerminalTabDrag}
+          ondragend={finishBrowserTerminalTabDrag}
           onclick={() => {
             if (!suppressTopTabClick) switchPage("sftp");
           }}
@@ -3175,7 +3340,19 @@
           class:drop-after={topTabDropTarget?.id === workspaceTabId(workspace.id) && topTabDropTarget.after}
           data-top-tab-id={workspaceTabId(workspace.id)}
           style:order={workspaceTabOrder(workspace.id)}
-          onpointerdown={(event) => startTopTabPointerDrag(event, workspaceTabId(workspace.id))}
+          draggable={!usesTauriNativeTerminalDrag}
+          onpointerdown={(event) => {
+            if (usesTauriNativeTerminalDrag) {
+              startTopTabPointerDrag(event, workspaceTabId(workspace.id));
+            }
+          }}
+          ondragstart={(event) => startBrowserTerminalTabDrag(
+            event,
+            workspaceTabId(workspace.id),
+            "top-tab"
+          )}
+          ondrag={moveBrowserTerminalTabDrag}
+          ondragend={finishBrowserTerminalTabDrag}
           oncontextmenu={(event) => openTerminalContextMenu(event, {
             id: workspaceTabId(workspace.id),
             title: workspace.name,
@@ -3217,7 +3394,13 @@
           class:drop-after={topTabDropTarget?.id === tab.id && topTabDropTarget.after}
           data-top-tab-id={tab.id}
           style:order={topTabOrder.indexOf(tab.id)}
-          onpointerdown={(event) => startTopTabPointerDrag(event, tab.id)}
+          draggable={!usesTauriNativeTerminalDrag}
+          onpointerdown={(event) => {
+            if (usesTauriNativeTerminalDrag) startTopTabPointerDrag(event, tab.id);
+          }}
+          ondragstart={(event) => startBrowserTerminalTabDrag(event, tab.id, "top-tab")}
+          ondrag={moveBrowserTerminalTabDrag}
+          ondragend={finishBrowserTerminalTabDrag}
           oncontextmenu={(event) => openTerminalContextMenu(event, tab)}
         >
           <button
@@ -3352,7 +3535,17 @@
                   onClose={() => closeTerminalTab(tab.id)}
                   onBroadcast={() => toggleBroadcast(tab.id)}
                   onFocus={() => focusWorkspacePane(tab.id)}
-                  onHeaderPointerDown={(event: PointerEvent) => startPanePointerDrag(event, tab.id)}
+                  headerDraggable={!usesTauriNativeTerminalDrag}
+                  onHeaderPointerDown={(event: PointerEvent) => {
+                    if (usesTauriNativeTerminalDrag) startPanePointerDrag(event, tab.id);
+                  }}
+                  onHeaderDragStart={(event: DragEvent) => startBrowserTerminalTabDrag(
+                    event,
+                    tab.id,
+                    "workspace-pane"
+                  )}
+                  onHeaderDrag={moveBrowserTerminalTabDrag}
+                  onHeaderDragEnd={finishBrowserTerminalTabDrag}
                   onSessionReady={registerTerminalSession}
                   onSessionClosed={unregisterTerminalSession}
                   onUserInput={broadcastTerminalBytes}
