@@ -9,12 +9,15 @@ The interface and all user-facing messages are in English.
 ## Current features
 
 - Saved hosts with search, nested/movable groups, tags, and reusable identities
+- Multi-select host operations, drag-to-group organization, duplication, and tag filters
 - Structured host profiles with environment variables, ordered app-owned jump-host chains,
   and per-host terminal themes
 - Multiple persistent local or SSH terminal panes, closable/reorderable tabs,
   drag-to-split nested layouts, guarded broadcast input, and workspace restoration
+- Native tab dragging between Heminus windows, detachable terminal workspaces,
+  and standalone local-terminal windows
 - Terminal search, clickable links, command suggestions from snippets/history,
-  and confirmation before multiline paste
+  configurable suggestion thresholds and shortcuts, and confirmation before multiline paste
 - Interactive OpenSSH authentication, host-key verification, key passphrases,
   and app-isolated connection settings
 - A private SSH runtime that never reads system/user SSH config, known hosts,
@@ -23,8 +26,8 @@ The interface and all user-facing messages are in English.
 - Ed25519 key generation and OpenSSH/PEM private-key import into the Heminus
   vault by drag and drop
 - Dual-pane SFTP with remote browsing, directory operations, rename, delete,
-  streaming upload/download, and progress reporting
-- Local, remote, and dynamic/SOCKS forwarding
+  cancellable streaming transfers, progress reporting, and host switching
+- Local, remote, and dynamic/SOCKS forwarding with live state and occupied-port handling
 - Snippets with local persistence and inline terminal completion
 - SHA-256 fingerprints from Heminus's private known-host vault
 - Session history metadata without terminal-output recording
@@ -35,10 +38,13 @@ part of this local desktop build.
 
 ## Install
 
+Download the current installers from the
+[latest GitHub release](https://github.com/thaihoc1310/heminus/releases/latest).
+
 On Ubuntu x86_64:
 
 ```bash
-sudo apt install ./target/release/bundle/deb/Heminus_0.1.0_amd64.deb
+sudo apt install ./Heminus_0.1.2_amd64.deb
 ```
 
 The package depends on Ubuntu's `libwebkit2gtk-4.1-0`, `libgtk-3-0`, and
@@ -48,10 +54,11 @@ transport engine. Heminus passes an isolated configuration on every invocation
 and does not consume the machine's SSH configuration, known hosts, default
 keys, or agent.
 
-On Windows 11 x86-64, run the per-user NSIS installer from
-`target\release\bundle\nsis`. Microsoft OpenSSH Client and WebView2 Runtime are
-required for the complete feature set. See [Windows development and release
-notes](docs/windows.md) for setup, limitations, and release requirements.
+On Windows 11 x86-64, run `Heminus_0.1.2_x64-setup.exe`. Microsoft OpenSSH
+Client and WebView2 Runtime are required for the complete feature set. The
+current installer is unsigned, so Windows may show a SmartScreen warning.
+See [Windows development and release notes](docs/windows.md) for setup,
+limitations, and release requirements.
 
 ## Development
 
@@ -89,14 +96,16 @@ pnpm run tauri:build:windows # Windows
    popup, restart the app, and confirm both the snippet and matching command
    history remain available.
 8. Check Known Hosts and Logs after the SSH session.
-9. Start a tunnel with an occupied local port and confirm the SSH error is
-   shown in the inspector.
+9. Start a tunnel with an occupied local port and confirm the conflict dialog
+   identifies the process and offers the supported recovery action.
 10. Repeat the terminal and SFTP checks on both Wayland and X11 if available.
 11. Create nested groups, move a group, rename a parent, restart, and confirm
     the paths and host assignments persist.
 12. Open multiple local and SSH panes, enable split mode, confirm the broadcast
     warning, reorder tabs, drag tabs onto all four pane edges, save the
     workspace, restart, and restore it.
+13. Drag a top-level tab and an inner workspace pane between windows, then drag
+    each outside every Heminus window and confirm a detached window is created.
 
 Passwords and key passphrases are stored only through the operating system's
 encrypted credential service and are never written to Heminus's SQLite
