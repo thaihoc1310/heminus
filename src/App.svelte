@@ -32,6 +32,7 @@
     listIdentities,
     listGroups,
     listenForCommandHistoryChanges,
+    listenForIdentityChanges,
     listenForNativeTerminalTabDrags,
     listenForSnippetChanges,
     listenForTerminalTabTransfers,
@@ -319,6 +320,13 @@
     let removeNativeDropListener: (() => void) | null = null;
     let removeSnippetListener: (() => void) | null = null;
     let removeCommandHistoryListener: (() => void) | null = null;
+    let removeIdentityListener: (() => void) | null = null;
+    void listenForIdentityChanges(() => {
+      void refreshIdentityDependencies();
+    }).then((unlisten) => {
+      if (transferListenerDisposed) unlisten();
+      else removeIdentityListener = unlisten;
+    }).catch((cause) => showMessage(cause, true));
     void listenForSnippetChanges(() => {
       terminalSnippetVersion += 1;
     }).then((unlisten) => {
@@ -420,6 +428,7 @@
       removeNativeDropListener?.();
       removeSnippetListener?.();
       removeCommandHistoryListener?.();
+      removeIdentityListener?.();
       window.removeEventListener("keydown", onKeydown);
       window.removeEventListener("resize", syncWindowedChrome);
       if (terminalToolsCloseTimer !== null) {
@@ -602,6 +611,14 @@
       showMessage(cause, true);
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshIdentityDependencies() {
+    try {
+      [identities, hosts] = await Promise.all([listIdentities(), listHosts("")]);
+    } catch (cause) {
+      showMessage(cause, true);
     }
   }
 

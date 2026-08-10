@@ -169,20 +169,28 @@ export async function listIdentities(): Promise<Identity[]> {
 
 export async function saveIdentity(identity: Identity): Promise<Identity> {
   if (!isTauri) return identity;
-  return invoke<Identity>("save_identity", { identity });
+  const saved = await invoke<Identity>("save_identity", { identity });
+  await emit("identities-changed");
+  return saved;
 }
 
 export async function deleteIdentity(id: string): Promise<boolean> {
   if (!isTauri) return true;
-  return invoke<boolean>("delete_identity", { id });
+  const deleted = await invoke<boolean>("delete_identity", { id });
+  if (deleted) await emit("identities-changed");
+  return deleted;
 }
 
 export async function setIdentitySecret(id: string, secret: string): Promise<boolean> {
-  return invoke<boolean>("set_identity_secret", { id, secret });
+  const stored = await invoke<boolean>("set_identity_secret", { id, secret });
+  if (stored) await emit("identities-changed");
+  return stored;
 }
 
 export async function deleteIdentitySecret(id: string): Promise<boolean> {
-  return invoke<boolean>("delete_identity_secret", { id });
+  const deleted = await invoke<boolean>("delete_identity_secret", { id });
+  if (deleted) await emit("identities-changed");
+  return deleted;
 }
 
 export async function readKeyMaterial(id: string): Promise<KeyMaterial> {
@@ -195,16 +203,27 @@ export async function generateSshKey(
   comment: string,
   passphrase: string | null
 ): Promise<Identity> {
-  return invoke<Identity>("generate_ssh_key", {
+  const identity = await invoke<Identity>("generate_ssh_key", {
     label,
     fileName,
     comment,
     passphrase
   });
+  await emit("identities-changed");
+  return identity;
 }
 
 export async function importPrivateKey(path: string): Promise<PrivateKeyImport> {
-  return invoke<PrivateKeyImport>("import_private_key", { path });
+  const imported = await invoke<PrivateKeyImport>("import_private_key", { path });
+  await emit("identities-changed");
+  return imported;
+}
+
+export async function listenForIdentityChanges(
+  onChanged: () => void
+): Promise<UnlistenFn> {
+  if (!isTauri) return () => {};
+  return listen("identities-changed", onChanged);
 }
 
 export async function listSnippets(): Promise<Snippet[]> {

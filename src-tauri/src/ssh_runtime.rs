@@ -244,9 +244,10 @@ impl SshRuntime {
     }
 
     pub fn owns_key(&self, path: &Path) -> bool {
-        path.canonicalize()
-            .ok()
-            .is_some_and(|path| path.starts_with(&self.keys))
+        match (path.canonicalize(), self.keys.canonicalize()) {
+            (Ok(path), Ok(keys)) => path.starts_with(keys),
+            _ => false,
+        }
     }
 
     pub fn connection_artifacts(&self, arguments: &[OsString]) -> ConnectionArtifacts {
@@ -419,6 +420,21 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(host_arguments.windows(2).any(|pair| pair == ["-F", "none"]));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owns_only_canonicalized_keys_inside_the_vault() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let managed_key = runtime.keys_directory().join("managed-key");
+        let external_key = root.join("external-key");
+        fs::write(&managed_key, b"managed").unwrap();
+        fs::write(&external_key, b"external").unwrap();
+
+        assert!(runtime.owns_key(&managed_key));
+        assert!(!runtime.owns_key(&external_key));
 
         fs::remove_dir_all(root).unwrap();
     }
