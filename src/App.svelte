@@ -2618,34 +2618,27 @@
   function finishBrowserTerminalTabDrag(event: DragEvent) {
     const current = activeBrowserTerminalTabDrag();
     if (!current) return;
-    const clientX = event.clientX !== 0 || event.clientY !== 0
-      ? event.clientX
-      : current.drag.currentX;
-    const clientY = event.clientX !== 0 || event.clientY !== 0
-      ? event.clientY
-      : current.drag.currentY;
     const screenX = event.screenX !== 0 || event.screenY !== 0
       ? event.screenX
       : current.drag.screenX;
     const screenY = event.screenX !== 0 || event.screenY !== 0
       ? event.screenY
       : current.drag.screenY;
-    if (current.sourceKind === "workspace-pane") {
-      finishPanePointerDragAt(
-        current.drag.pointerId,
-        clientX,
-        clientY,
-        screenX,
-        screenY
-      );
-    } else {
-      finishTopTabPointerDragAt(
-        current.drag.pointerId,
-        clientX,
-        clientY,
-        screenX,
-        screenY
-      );
+    const sourceId = current.drag.sourceId;
+    if (current.sourceKind === "workspace-pane") panePointerDrag = null;
+    else {
+      topTabPointerDrag = null;
+      suppressTopTabClick = true;
+      window.setTimeout(() => (suppressTopTabClick = false), 0);
+    }
+    finishTabDrag();
+    if (
+      Number.isFinite(screenX) &&
+      Number.isFinite(screenY) &&
+      (screenX !== 0 || screenY !== 0) &&
+      transferableTopTab(sourceId)
+    ) {
+      void transferDraggedTopTab(sourceId, screenX, screenY);
     }
   }
 
@@ -3450,7 +3443,10 @@
     </div>
   </header>
 
-  {#if (panePointerDrag?.dragging || topTabPointerDrag?.dragging) && !nativeTerminalTabDragActive}
+  {#if (panePointerDrag?.dragging || topTabPointerDrag?.dragging)
+    && !nativeTerminalTabDragActive
+    && panePointerDrag?.pointerId !== -1
+    && topTabPointerDrag?.pointerId !== -1}
     {@const dragPreview = topTabDragPreview()}
     <div
       class="top-tab-drag-preview"
