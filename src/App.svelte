@@ -20,6 +20,7 @@
     workspaceTabId,
     type RuntimeWorkspace
   } from "./lib/runtimeWorkspace";
+  import { hasPassedTopTabDragThreshold } from "./lib/tabDrag";
   import {
     announceNativeTerminalTabDrag,
     announceNativeTerminalTabDragEnd,
