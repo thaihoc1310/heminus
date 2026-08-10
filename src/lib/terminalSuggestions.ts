@@ -10,10 +10,12 @@ export function buildTerminalSuggestions(
   input: string,
   snippets: Snippet[],
   history: string[],
-  limit = 8
+  limit = 8,
+  minimumCharacters = 2
 ): TerminalSuggestion[] {
   const query = input.trim().toLocaleLowerCase();
-  if (!query) return [];
+  const typedCharacterCount = Array.from(query.replace(/\s+/g, "")).length;
+  if (!query || typedCharacterCount < minimumCharacters) return [];
   const matches = (value: string) => {
     const normalized = value.toLocaleLowerCase();
     return query.split(/\s+/).every((part) => normalized.includes(part));
@@ -80,4 +82,12 @@ export function updateCommandInput(
     }
   }
   return { input: current, submitted };
+}
+
+export function reconcileRenderedCommandInput(
+  trackedInput: string,
+  renderedInput: string | null
+): string {
+  if (!renderedInput || renderedInput.length < trackedInput.length) return trackedInput;
+  return renderedInput;
 }

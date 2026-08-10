@@ -8,6 +8,14 @@
     saveSnippet
   } from "../../lib/ipc";
   import { terminalThemes } from "../../lib/terminalThemes";
+  import {
+    formatTerminalShortcut,
+    setHistorySuggestions,
+    setHistorySuggestionsShortcut,
+    setSuggestionMinimumCharacters,
+    shortcutFromKeyboardEvent,
+    terminalPreferences
+  } from "../../lib/terminalPreferences";
   import type { Snippet, TerminalAppearance } from "../../lib/types";
 
   let {
@@ -32,7 +40,7 @@
     oncatalogchange?: (snippets: Snippet[]) => void;
   } = $props();
 
-  type SidebarSection = "snippets" | "appearance" | "history";
+  type SidebarSection = "snippets" | "appearance" | "history" | "config";
   type ToolSort = "newest" | "oldest" | "az" | "za";
 
   const sortOptions: { value: ToolSort; label: string }[] = [
@@ -58,6 +66,7 @@
   let contextMenu = $state<{ snippet: Snippet; x: number; y: number } | null>(null);
   let historyContextMenu = $state<{ command: string; x: number; y: number } | null>(null);
   let panelElement = $state<HTMLElement>();
+  let capturingHistoryShortcut = $state(false);
 
   const visibleSnippets = $derived.by(() => {
     const query = snippetQuery.trim().toLowerCase();
@@ -223,6 +232,20 @@
     const fontSize = Math.max(9, Math.min(32, appearance.fontSize + delta));
     onappearancechange({ fontSize });
   }
+
+  function captureHistoryShortcut(event: KeyboardEvent) {
+    if (!capturingHistoryShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      capturingHistoryShortcut = false;
+      return;
+    }
+    const shortcut = shortcutFromKeyboardEvent(event);
+    if (!shortcut) return;
+    setHistorySuggestionsShortcut(shortcut);
+    capturingHistoryShortcut = false;
+  }
 </script>
 
 <svelte:window onclick={(event) => {
@@ -256,6 +279,11 @@
         class:active={section === "appearance"}
         title="Appearance"
         onclick={() => setSection("appearance")}
+      ><Icon name="sun" size={18} /></button>
+      <button
+        class:active={section === "config"}
+        title="Terminal configuration"
+        onclick={() => setSection("config")}
       ><Icon name="appearance" size={18} /></button>
     </nav>
     <button class="terminal-tools-close" title="Close terminal tools" onclick={onclose}>
@@ -377,7 +405,7 @@
         </div>
       </section>
     </div>
-  {:else}
+  {:else if section === "history"}
     <div class="terminal-tools-toolbar history-toolbar">
       <label class="terminal-tool-search">
         <Icon name="search" size={15} />
@@ -433,6 +461,69 @@
           {/each}
         </div>
       {/if}
+    </div>
+  {:else}
+    <div class="terminal-tools-scroll terminal-config-scroll">
+      <section class="terminal-config-section">
+        <header>
+          <strong>Suggestions</strong>
+          <small>Choose what appears while you type.</small>
+        </header>
+        <div class="terminal-config-row">
+          <span class="terminal-config-copy">
+            <strong>History suggestions</strong>
+            <small>Mix successful commands with snippets.</small>
+          </span>
+          <button
+            class="terminal-shortcut-button"
+            class:capturing={capturingHistoryShortcut}
+            title="Change history suggestions shortcut"
+            aria-label="Change history suggestions shortcut"
+            onclick={() => capturingHistoryShortcut = true}
+            onkeydown={captureHistoryShortcut}
+            onblur={() => capturingHistoryShortcut = false}
+          >{capturingHistoryShortcut
+              ? "Press shortcut…"
+              : formatTerminalShortcut($terminalPreferences.historySuggestionsShortcut)}</button>
+          <button
+            class="terminal-config-toggle"
+            aria-label="Toggle history suggestions"
+            aria-pressed={$terminalPreferences.historySuggestions}
+            onclick={() => setHistorySuggestions(!$terminalPreferences.historySuggestions)}
+          >
+            <span
+              class="terminal-config-switch"
+              class:active={$terminalPreferences.historySuggestions}
+              aria-hidden="true"
+            ><i></i></span>
+          </button>
+        </div>
+        <div class="terminal-config-row terminal-config-number-row">
+          <span class="terminal-config-copy">
+            <strong>Minimum characters</strong>
+            <small>Start suggesting after this many typed characters.</small>
+          </span>
+          <div class="terminal-config-stepper" aria-label="Minimum suggestion characters">
+            <button
+              title="Decrease minimum characters"
+              aria-label="Decrease minimum characters"
+              disabled={$terminalPreferences.suggestionMinimumCharacters <= 1}
+              onclick={() => setSuggestionMinimumCharacters(
+                $terminalPreferences.suggestionMinimumCharacters - 1
+              )}
+            >−</button>
+            <output aria-live="polite">{$terminalPreferences.suggestionMinimumCharacters}</output>
+            <button
+              title="Increase minimum characters"
+              aria-label="Increase minimum characters"
+              disabled={$terminalPreferences.suggestionMinimumCharacters >= 10}
+              onclick={() => setSuggestionMinimumCharacters(
+                $terminalPreferences.suggestionMinimumCharacters + 1
+              )}
+            >+</button>
+          </div>
+        </div>
+      </section>
     </div>
   {/if}
 

@@ -61,6 +61,75 @@ impl TerminalEventDestination {
 
 const TERMINAL_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
 
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub async fn terminal_clipboard_write(
+    app: AppHandle,
+    text: String,
+    primary: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let selection = if primary {
+            &gdk::SELECTION_PRIMARY
+        } else {
+            &gdk::SELECTION_CLIPBOARD
+        };
+        let clipboard = gtk::Clipboard::get(selection);
+        clipboard.set_text(&text);
+        if !primary {
+            clipboard.store();
+        }
+        let _ = sender.send(());
+    })
+    .map_err(|error| format!("Could not access the Linux clipboard: {error}"))?;
+    receiver
+        .await
+        .map_err(|_| "The Linux clipboard operation was cancelled".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+pub async fn terminal_clipboard_write(
+    _app: AppHandle,
+    _text: String,
+    _primary: bool,
+) -> Result<(), String> {
+    Err("Native terminal clipboard access is only available on Linux".to_string())
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub async fn terminal_clipboard_read(
+    app: AppHandle,
+    primary: bool,
+) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let selection = if primary {
+            &gdk::SELECTION_PRIMARY
+        } else {
+            &gdk::SELECTION_CLIPBOARD
+        };
+        gtk::Clipboard::get(selection).request_text(move |_, text| {
+            let _ = sender.send(text.map(str::to_owned));
+        });
+    })
+    .map_err(|error| format!("Could not access the Linux clipboard: {error}"))?;
+    receiver
+        .await
+        .map_err(|_| "The Linux clipboard operation was cancelled".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+pub async fn terminal_clipboard_read(
+    _app: AppHandle,
+    _primary: bool,
+) -> Result<Option<String>, String> {
+    Err("Native terminal clipboard access is only available on Linux".to_string())
+}
+
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<Uuid, TerminalSession>>>,
 }

@@ -67,8 +67,10 @@
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
   import {
-    hasPassedTopTabDragThreshold
-  } from "./lib/tabDrag";
+    matchesTerminalShortcut,
+    terminalPreferences,
+    toggleHistorySuggestions
+  } from "./lib/terminalPreferences";
   import { parseQuickConnectInput } from "./lib/quickConnect";
   import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
@@ -242,6 +244,7 @@
   } | null>(null);
   let suppressTopTabClick = false;
   let detachedInitialized = $state(!detachedMode);
+  let windowedChrome = $state(true);
   let managerEditorDirty = $state<Record<string, boolean>>({});
   let topTabCaptureElement: HTMLElement | null = null;
   let terminalTabDragPollTimer: number | null = null;
@@ -360,6 +363,13 @@
       }).catch((cause) => showMessage(cause, true));
     }
     const onKeydown = (event: KeyboardEvent) => {
+      if (
+        page === "terminal" &&
+        matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
+      ) {
+        event.preventDefault();
+        toggleHistorySuggestions();
+      }
       if (event.ctrlKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
         void switchPage("new-tab");
@@ -381,7 +391,24 @@
       if (event.key === "Escape") groupContextMenu = null;
       if (event.key === "Escape") terminalContextMenu = null;
     };
+    const syncWindowedChrome = async () => {
+      if (!appWindow) {
+        windowedChrome = true;
+        return;
+      }
+      try {
+        const [maximized, fullscreen] = await Promise.all([
+          appWindow.isMaximized(),
+          appWindow.isFullscreen()
+        ]);
+        windowedChrome = !maximized && !fullscreen;
+      } catch {
+        windowedChrome = true;
+      }
+    };
     window.addEventListener("keydown", onKeydown);
+    window.addEventListener("resize", syncWindowedChrome);
+    void syncWindowedChrome();
     return () => {
       transferListenerDisposed = true;
       removeTransferListener?.();
@@ -390,6 +417,7 @@
       removeSnippetListener?.();
       removeCommandHistoryListener?.();
       window.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("resize", syncWindowedChrome);
       if (terminalToolsCloseTimer !== null) {
         window.clearTimeout(terminalToolsCloseTimer);
       }
@@ -3047,6 +3075,7 @@
 
 <div
   class="application"
+  class:windowed-chrome={windowedChrome}
   class:detached-window={detachedMode}
   class:detached-initialized={detachedInitialized}
   class:terminal-surface={page === "terminal"}

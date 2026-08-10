@@ -14,8 +14,10 @@
     listCommandHistory,
     listSnippets,
     openTerminal,
+    readTerminalClipboard,
     recordCommandHistory,
     resizeTerminal,
+    writeTerminalClipboard,
     writeTerminal
   } from "../../lib/ipc";
   import type {
@@ -27,6 +29,11 @@
   } from "../../lib/types";
   import { terminalTheme } from "../../lib/terminalThemes";
   import {
+    matchesTerminalShortcut,
+    terminalPreferences,
+    toggleHistorySuggestions
+  } from "../../lib/terminalPreferences";
+  import {
     detectHostOperatingSystem,
     rememberHostOperatingSystem
   } from "../../lib/hostOperatingSystem";
@@ -34,6 +41,7 @@
   import {
     buildTerminalSuggestions,
     highlightedCommand,
+    reconcileRenderedCommandInput,
     updateCommandInput,
     type TerminalSuggestion
   } from "../../lib/terminalSuggestions";
@@ -96,9 +104,15 @@
   let snippetCatalog = $state<Snippet[]>([]);
   let commandHistory: string[] = [];
   let searchOpen = $state(false);
+  let searchSettingsOpen = $state(false);
   let searchQuery = $state("");
   let searchResultIndex = $state(-1);
   let searchResultCount = $state(0);
+  let searchCaseSensitive = $state(false);
+  let searchWholeWord = $state(false);
+  let searchRegex = $state(false);
+  let searchWrapAround = $state(true);
+  let searchError = $state("");
   let searchInput = $state<HTMLInputElement>();
   let searchAddonApi: SearchAddon | null = null;
   let lastCommandRequestId = "";
@@ -164,6 +178,11 @@
 
   $effect(() => {
     historyVersion;
+    const historySuggestions = $terminalPreferences.historySuggestions;
+    if (!historySuggestions) {
+      commandHistory = [];
+      return;
+    }
     const hostId = host?.id ?? null;
     let disposed = false;
     void listCommandHistory(hostId).then((items) => {
@@ -188,17 +207,28 @@
 
   function findInTerminal(
     direction: "next" | "previous",
-    query = searchQuery
+    query = searchQuery,
+    force = false
   ) {
+    const queryChanged = query !== searchQuery;
     searchQuery = query;
     const addon = searchAddonApi;
     if (!query || !addon) {
       addon?.clearDecorations();
       searchResultIndex = -1;
       searchResultCount = 0;
+      searchError = "";
       return;
     }
+    if (!force && !queryChanged && !searchWrapAround && searchResultCount > 0) {
+      const reachedStart = direction === "previous" && searchResultIndex <= 0;
+      const reachedEnd = direction === "next" && searchResultIndex >= searchResultCount - 1;
+      if (reachedStart || reachedEnd) return;
+    }
     const options = {
+      caseSensitive: searchCaseSensitive,
+      wholeWord: searchWholeWord,
+      regex: searchRegex,
       incremental: true,
       decorations: {
         matchBackground: "#465363",
@@ -207,8 +237,24 @@
         activeMatchColorOverviewRuler: "#278fe8"
       }
     };
-    if (direction === "previous") addon.findPrevious(query, options);
-    else addon.findNext(query, options);
+    try {
+      if (direction === "previous") addon.findPrevious(query, options);
+      else addon.findNext(query, options);
+      searchError = "";
+    } catch {
+      addon.clearDecorations();
+      searchResultIndex = -1;
+      searchResultCount = 0;
+      searchError = "Invalid regular expression";
+    }
+  }
+
+  function refreshTerminalSearch() {
+    searchAddonApi?.clearDecorations();
+    searchResultIndex = -1;
+    searchResultCount = 0;
+    findInTerminal("next", searchQuery, true);
+    searchInput?.focus();
   }
 
   function handleSearchInput(event: Event) {
@@ -228,9 +274,11 @@
 
   function closeTerminalSearch() {
     searchOpen = false;
+    searchSettingsOpen = false;
     searchAddonApi?.clearDecorations();
     searchResultIndex = -1;
     searchResultCount = 0;
+    searchError = "";
     terminalApi?.focus();
   }
 
@@ -257,6 +305,8 @@
     let resizeObserver: ResizeObserver | null = null;
     let attachedEventUnlisten: (() => void) | null = null;
     let resizeFrame: number | null = null;
+    let primarySelectionFrame: number | null = null;
+    let primarySelectionWrite = Promise.resolve();
     let flushTimer: number | null = null;
     let queuedInput: number[] = [];
     let writeChain = Promise.resolve();
@@ -268,14 +318,21 @@
     let shellIntegrationRemainder = "";
     let outputTail = "";
     let sensitiveInput = false;
+    let commandStartPosition: { row: number; column: number } | null = null;
+    let handleTerminalMiddleMouseEvent: ((event: MouseEvent) => void) | null = null;
+    let handleTerminalMiddlePointerDown: ((event: PointerEvent) => void) | null = null;
+    let handleTerminalMiddlePointerUp: ((event: PointerEvent) => void) | null = null;
+    let handleTerminalAuxClick: ((event: MouseEvent) => void) | null = null;
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
+    const supportsPrimarySelection = navigator.userAgent.includes("Linux");
 
     async function start() {
       if (disposed) return;
 
       terminal = new Terminal({
-        allowProposedApi: false,
+        // SearchAddon uses xterm's decoration API for highlights and result counts.
+        allowProposedApi: true,
         convertEol: false,
         cursorBlink: true,
         fontFamily: "'JetBrains Mono', 'Ubuntu Mono', monospace",
@@ -303,6 +360,80 @@
       });
       terminal.open(container);
       container.addEventListener("focusin", activate);
+      const clearTerminalSelection = () => {
+        terminal?.clearSelection();
+        const domSelection = container.ownerDocument.getSelection();
+        if (
+          domSelection?.anchorNode &&
+          container.contains(domSelection.anchorNode)
+        ) {
+          domSelection.removeAllRanges();
+        }
+      };
+      const finishTerminalPaste = () => {
+        clearTerminalSelection();
+        if (terminal?.modes.bracketedPasteMode) {
+          terminal.input("\x1b[D\x1b[C", true);
+        }
+      };
+      if (supportsPrimarySelection) {
+        const suppressMiddleClick = (event: MouseEvent | PointerEvent) => {
+          if (event.button !== 1) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        };
+        const pastePrimarySelection = async () => {
+          if (primarySelectionFrame !== null) {
+            window.cancelAnimationFrame(primarySelectionFrame);
+            primarySelectionFrame = null;
+            const selection = terminal?.getSelection() ?? "";
+            if (selection) {
+              primarySelectionWrite = primarySelectionWrite
+                .then(() => writeTerminalClipboard(selection, true))
+                .catch(() => {});
+            }
+          }
+          await primarySelectionWrite;
+          const text = await readTerminalClipboard(true);
+          if (!disposed && terminal && text) {
+            terminal.paste(text);
+            finishTerminalPaste();
+          }
+        };
+        handleTerminalMiddlePointerDown = (event: PointerEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+          void pastePrimarySelection();
+        };
+        handleTerminalMiddleMouseEvent = (event: MouseEvent) => {
+          suppressMiddleClick(event);
+        };
+        handleTerminalMiddlePointerUp = (event: PointerEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+        };
+        handleTerminalAuxClick = (event: MouseEvent) => {
+          if (event.button !== 1) return;
+          suppressMiddleClick(event);
+        };
+        container.addEventListener(
+          "pointerdown",
+          handleTerminalMiddlePointerDown,
+          true
+        );
+        container.addEventListener(
+          "mousedown",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+        container.addEventListener(
+          "pointerup",
+          handleTerminalMiddlePointerUp,
+          true
+        );
+        container.addEventListener("mouseup", handleTerminalMiddleMouseEvent, true);
+        container.addEventListener("auxclick", handleTerminalAuxClick, true);
+      }
       fitAddon.fit();
       const channel = new Channel<TerminalEvent>();
       const handleTerminalEvent = (event: TerminalEvent) => {
@@ -399,6 +530,27 @@
       let lastPtyCols = terminal.cols;
       onSessionReady(paneId, sessionId);
       const encoder = new TextEncoder();
+      const cursorPosition = () => terminal
+        ? {
+            row: terminal.buffer.active.baseY + terminal.buffer.active.cursorY,
+            column: terminal.buffer.active.cursorX
+          }
+        : null;
+      const renderedCommand = (): string | null => {
+        if (!terminal || !commandStartPosition) return null;
+        const buffer = terminal.buffer.active;
+        const endRow = buffer.baseY + buffer.cursorY;
+        if (endRow < commandStartPosition.row) return null;
+        const parts: string[] = [];
+        for (let row = commandStartPosition.row; row <= endRow; row += 1) {
+          const line = buffer.getLine(row);
+          if (!line) return null;
+          const from = row === commandStartPosition.row ? commandStartPosition.column : 0;
+          const to = row === endRow ? buffer.cursorX : terminal.cols;
+          parts.push(line.translateToString(false, from, to));
+        }
+        return parts.join("").trimEnd();
+      };
       const flush = () => {
         flushTimer = null;
         if (!sessionId || queuedInput.length === 0) return;
@@ -418,11 +570,13 @@
         if (flushTimer === null) flushTimer = window.setTimeout(flush, 4);
       };
       externalCommandHandler = (command: string, run: boolean) => {
+        commandStartPosition ??= cursorPosition();
         const data = `${command}${run ? "\r" : ""}`;
         queueData(data);
         const update = updateCommandInput(commandInput, data);
         commandInput = update.input;
         pendingCommands.push(...update.submitted);
+        if (update.submitted.length > 0) commandStartPosition = null;
         suggestions = [];
         suggestionIndex = -1;
         terminal?.focus();
@@ -444,7 +598,13 @@
         suggestionStyle = `left:${left}px;top:${Math.max(container.offsetTop + 8, top)}px;width:${width}px`;
       };
       const refreshSuggestions = () => {
-        suggestions = buildTerminalSuggestions(commandInput, snippetCatalog, commandHistory);
+        suggestions = buildTerminalSuggestions(
+          commandInput,
+          snippetCatalog,
+          $terminalPreferences.historySuggestions ? commandHistory : [],
+          8,
+          $terminalPreferences.suggestionMinimumCharacters
+        );
         suggestionIndex = -1;
         requestAnimationFrame(positionSuggestions);
       };
@@ -465,6 +625,12 @@
             suggestions = [];
           }
           return;
+        }
+        const submitting = data.includes("\r") || data.includes("\n");
+        if (!submitting) commandStartPosition ??= cursorPosition();
+        if (submitting) {
+          const rendered = renderedCommand();
+          commandInput = reconcileRenderedCommandInput(commandInput, rendered);
         }
         if (suggestions.length > 0) {
           if (data === "\x1b[A" || data === "\x1b[B") {
@@ -489,9 +655,64 @@
         for (const command of update.submitted) {
           pendingCommands.push(command);
         }
+        if (update.submitted.length > 0 || data.includes("\x03") || data.includes("\x15")) {
+          commandStartPosition = null;
+        }
         refreshSuggestions();
       });
+      terminal.onSelectionChange(() => {
+        if (!supportsPrimarySelection || primarySelectionFrame !== null) return;
+        primarySelectionFrame = window.requestAnimationFrame(() => {
+          primarySelectionFrame = null;
+          const selection = terminal?.getSelection() ?? "";
+          if (selection) {
+            primarySelectionWrite = primarySelectionWrite
+              .then(() => writeTerminalClipboard(selection, true))
+              .catch(() => {});
+          }
+        });
+      });
       terminal.attachCustomKeyEventHandler((event) => {
+        if (
+          event.type === "keydown" &&
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          event.key.toLowerCase() === "c"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          const selection = terminal?.getSelection() ?? "";
+          if (selection) void writeTerminalClipboard(selection);
+          return false;
+        }
+        if (
+          event.type === "keydown" &&
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          event.key.toLowerCase() === "v"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          void readTerminalClipboard().then((text) => {
+            if (!disposed && terminal && text) {
+              terminal.paste(text);
+              finishTerminalPaste();
+            }
+          });
+          return false;
+        }
+        if (
+          event.type === "keydown" &&
+          matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleHistorySuggestions();
+          refreshSuggestions();
+          return false;
+        }
         if (
           event.type === "keydown" &&
           (event.ctrlKey || event.metaKey) &&
@@ -539,10 +760,40 @@
       disposed = true;
       if (flushTimer !== null) window.clearTimeout(flushTimer);
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+      if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
       resizeObserver?.disconnect();
       attachedEventUnlisten?.();
       attachedEventUnlisten = null;
       container?.removeEventListener("focusin", activate);
+      if (handleTerminalMiddlePointerDown) {
+        container?.removeEventListener(
+          "pointerdown",
+          handleTerminalMiddlePointerDown,
+          true
+        );
+      }
+      if (handleTerminalMiddleMouseEvent) {
+        container?.removeEventListener(
+          "mousedown",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+        container?.removeEventListener(
+          "mouseup",
+          handleTerminalMiddleMouseEvent,
+          true
+        );
+      }
+      if (handleTerminalMiddlePointerUp) {
+        container?.removeEventListener(
+          "pointerup",
+          handleTerminalMiddlePointerUp,
+          true
+        );
+      }
+      if (handleTerminalAuxClick) {
+        container?.removeEventListener("auxclick", handleTerminalAuxClick, true);
+      }
       const mountedTerminal = terminal;
       terminal = null;
       mountedTerminal?.dispose();
@@ -595,37 +846,97 @@
   {#if searchOpen}
     <div
       class="terminal-search"
+      class:expanded={searchSettingsOpen}
       role="search"
       onpointerdown={(event) => event.stopPropagation()}
     >
-      <Icon name="search" size={15} />
-      <input
-        bind:this={searchInput}
-        value={searchQuery}
-        aria-label="Find in terminal"
-        placeholder="Find"
-        spellcheck="false"
-        oninput={handleSearchInput}
-        onkeydown={handleSearchKeydown}
-      />
-      <span class="terminal-search-count">
-        {searchResultCount > 0 ? searchResultIndex + 1 : 0}/{searchResultCount}
-      </span>
-      <button
-        class="terminal-search-previous"
-        title="Previous match (Shift+Enter)"
-        disabled={!searchQuery}
-        onclick={() => findInTerminal("previous")}
-      ><Icon name="chevron" size={15} /></button>
-      <button
-        class="terminal-search-next"
-        title="Next match (Enter)"
-        disabled={!searchQuery}
-        onclick={() => findInTerminal("next")}
-      ><Icon name="chevron" size={15} /></button>
-      <button title="Close (Escape)" onclick={closeTerminalSearch}>
-        <Icon name="close" size={14} />
-      </button>
+      <div class="terminal-search-bar">
+        <Icon name="search" size={15} />
+        <input
+          bind:this={searchInput}
+          class:invalid={Boolean(searchError)}
+          value={searchQuery}
+          aria-label="Find in terminal"
+          aria-invalid={Boolean(searchError)}
+          title={searchError}
+          placeholder="Find"
+          spellcheck="false"
+          oninput={handleSearchInput}
+          onkeydown={handleSearchKeydown}
+        />
+        <span class="terminal-search-count">
+          {searchResultCount > 0 ? searchResultIndex + 1 : 0}/{searchResultCount}
+        </span>
+        <button
+          class="terminal-search-previous"
+          title="Previous match (Shift+Enter)"
+          disabled={!searchQuery}
+          onclick={() => findInTerminal("previous")}
+        ><Icon name="chevron" size={15} /></button>
+        <button
+          class="terminal-search-next"
+          title="Next match (Enter)"
+          disabled={!searchQuery}
+          onclick={() => findInTerminal("next")}
+        ><Icon name="chevron" size={15} /></button>
+        <button
+          class="terminal-search-settings-toggle"
+          class:active={searchSettingsOpen}
+          title="Search settings"
+          aria-label="Search settings"
+          aria-expanded={searchSettingsOpen}
+          onclick={() => searchSettingsOpen = !searchSettingsOpen}
+        ><Icon name="appearance" size={15} /></button>
+        <button title="Close (Escape)" onclick={closeTerminalSearch}>
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+      {#if searchSettingsOpen}
+        <div class="terminal-search-options">
+          <label>
+            <input
+              type="checkbox"
+              checked={searchCaseSensitive}
+              onchange={() => {
+                searchCaseSensitive = !searchCaseSensitive;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match case</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchWholeWord}
+              onchange={() => {
+                searchWholeWord = !searchWholeWord;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match entire word only</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchRegex}
+              onchange={() => {
+                searchRegex = !searchRegex;
+                refreshTerminalSearch();
+              }}
+            />
+            <span>Match as regular expression</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={searchWrapAround}
+              onchange={() => searchWrapAround = !searchWrapAround}
+            />
+            <span>Wrap around</span>
+          </label>
+          {#if searchError}<small role="alert">{searchError}</small>{/if}
+        </div>
+      {/if}
     </div>
   {/if}
   <div class="terminal-mount" bind:this={container}></div>

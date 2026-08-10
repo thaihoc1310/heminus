@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTerminalSuggestions,
   highlightedCommand,
+  reconcileRenderedCommandInput,
   updateCommandInput
 } from "./terminalSuggestions";
 import type { Snippet } from "./types";
@@ -25,11 +26,27 @@ describe("terminal suggestions", () => {
     ]);
   });
 
+  it("waits for the configured minimum number of typed characters", () => {
+    expect(buildTerminalSuggestions("p", [snippet], ["pwd"])).toEqual([]);
+    expect(buildTerminalSuggestions("pi", [snippet], ["pwd"])).toEqual([
+      { kind: "snippet", command: "ping google.com", detail: "Ping Google" }
+    ]);
+    expect(buildTerminalSuggestions("p", [snippet], ["pwd"], 8, 1)).toEqual([
+      { kind: "snippet", command: "ping google.com", detail: "Ping Google" },
+      { kind: "history", command: "pwd", detail: "History" }
+    ]);
+  });
+
   it("tracks typed commands, backspace, and submissions", () => {
     expect(updateCommandInput("ping go", "\x7foogle.com\r")).toEqual({
       input: "",
       submitted: ["ping google.com"]
     });
+  });
+
+  it("uses the command rendered by shell completion before saving history", () => {
+    expect(reconcileRenderedCommandInput("cd Wor", "cd Workspace/")).toBe("cd Workspace/");
+    expect(reconcileRenderedCommandInput("printf complete", "printf com")).toBe("printf complete");
   });
 
   it("splits a command into highlighted segments", () => {

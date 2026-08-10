@@ -472,6 +472,34 @@ export async function closeTerminal(id: string): Promise<boolean> {
   return invoke<boolean>("terminal_close", { id });
 }
 
+export async function writeTerminalClipboard(
+  text: string,
+  primary = false
+): Promise<void> {
+  if (isTauri) {
+    try {
+      await invoke("terminal_clipboard_write", { text, primary });
+      return;
+    } catch {
+      if (primary) return;
+    }
+  }
+  if (primary) return;
+  await navigator.clipboard.writeText(text);
+}
+
+export async function readTerminalClipboard(primary = false): Promise<string | null> {
+  if (isTauri) {
+    try {
+      return await invoke<string | null>("terminal_clipboard_read", { primary });
+    } catch {
+      if (primary) return null;
+    }
+  }
+  if (primary) return null;
+  return navigator.clipboard.readText();
+}
+
 export async function openSftpSession(host: Host): Promise<SftpOpenResult> {
   return invoke<SftpOpenResult>("sftp_open", { host });
 }

@@ -6,7 +6,7 @@
   font-size: 13px;
   line-height: 1.35;
   color: #171b2c;
-  background: #edf1f2;
+  background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --nav: #111214;
@@ -308,6 +308,11 @@ select:focus-visible {
   width: 100%;
   height: 100%;
   background: var(--canvas);
+}
+
+.application.windowed-chrome {
+  overflow: hidden;
+  border-radius: 14px;
 }
 
 .window-resize-handle {
@@ -3478,6 +3483,168 @@ select:focus-visible {
   padding-top: 16px;
 }
 
+.terminal-config-scroll {
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  padding-top: 16px;
+}
+
+.terminal-config-section {
+  display: grid;
+  gap: 9px;
+}
+
+.terminal-config-section > header {
+  display: grid;
+  gap: 3px;
+  padding: 0 2px;
+}
+
+.terminal-config-section > header strong {
+  font-size: 12px;
+}
+
+.terminal-config-section > header small {
+  color: var(--terminal-tool-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.terminal-config-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 62px;
+  padding: 9px 10px;
+  color: var(--terminal-tool-foreground);
+  text-align: left;
+  border: 1px solid var(--terminal-tool-border);
+  border-radius: 11px;
+  background: var(--terminal-tool-card);
+}
+
+.terminal-config-number-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.terminal-config-stepper {
+  display: grid;
+  grid-template-columns: 26px 28px 26px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--terminal-tool-border);
+  border-radius: 7px;
+  background: var(--terminal-tool-hover);
+}
+
+.terminal-config-stepper button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  color: var(--terminal-tool-muted);
+  border: 0;
+  background: transparent;
+  font: 500 15px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+}
+
+.terminal-config-stepper button:hover:not(:disabled),
+.terminal-config-stepper button:focus-visible {
+  color: var(--terminal-tool-foreground);
+  background: color-mix(in srgb, var(--terminal-tool-accent) 16%, transparent);
+  outline: none;
+}
+
+.terminal-config-stepper button:disabled {
+  opacity: 0.3;
+}
+
+.terminal-config-stepper output {
+  color: var(--terminal-tool-foreground);
+  font: 600 10px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+  text-align: center;
+}
+
+.terminal-config-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.terminal-config-copy strong {
+  font-size: 11px;
+}
+
+.terminal-config-copy small {
+  color: var(--terminal-tool-muted);
+  font-size: 9px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.terminal-shortcut-button {
+  padding: 5px 7px;
+  color: var(--terminal-tool-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font: 500 8px/1.2 "Ubuntu Sans", Ubuntu, sans-serif;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.terminal-shortcut-button:hover,
+.terminal-shortcut-button:focus-visible,
+.terminal-shortcut-button.capturing {
+  color: var(--terminal-tool-foreground);
+  border-color: var(--terminal-tool-border);
+  background: var(--terminal-tool-hover);
+  opacity: 1;
+  outline: none;
+}
+
+.terminal-config-toggle {
+  display: grid;
+  place-items: center;
+  padding: 5px 0 5px 5px;
+  border: 0;
+  background: transparent;
+}
+
+.terminal-config-switch {
+  position: relative;
+  width: 31px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--terminal-tool-muted) 38%, transparent);
+  transition: background 120ms ease;
+}
+
+.terminal-config-switch i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--terminal-tool-foreground);
+  transition: transform 120ms ease;
+}
+
+.terminal-config-switch.active {
+  background: var(--terminal-tool-accent);
+}
+
+.terminal-config-switch.active i {
+  transform: translateX(13px);
+}
+
 .terminal-appearance-section {
   display: grid;
   gap: 8px;
@@ -3905,12 +4072,10 @@ select:focus-visible {
   z-index: 35;
   top: 10px;
   right: 14px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  width: min(370px, calc(100% - 28px));
-  height: 38px;
-  padding: 0 5px 0 10px;
+  display: grid;
+  width: min(410px, calc(100% - 28px));
+  min-height: 38px;
+  padding: 0 5px;
   color: var(--terminal-header-foreground, var(--terminal-foreground));
   border: 1px solid var(--terminal-header-border, #30363d);
   border-radius: 10px;
@@ -3919,16 +4084,29 @@ select:focus-visible {
   animation: terminal-search-in 120ms ease-out both;
 }
 
+.terminal-search.expanded {
+  padding-bottom: 9px;
+}
+
+.terminal-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 38px;
+  padding-left: 5px;
+}
+
 .terminal-pane.workspace-pane .terminal-search {
   top: 43px;
 }
 
-.terminal-search > svg {
+.terminal-search-bar > svg {
   flex: 0 0 auto;
   color: var(--terminal-header-muted, #8b949e);
 }
 
-.terminal-search input {
+.terminal-search-bar > input {
   flex: 1 1 auto;
   min-width: 36px;
   height: 100%;
@@ -3941,13 +4119,13 @@ select:focus-visible {
   box-shadow: none;
 }
 
-.terminal-search input:focus,
-.terminal-search input:focus-visible {
+.terminal-search-bar > input:focus,
+.terminal-search-bar > input:focus-visible {
   outline: 0;
   box-shadow: none;
 }
 
-.terminal-search input::placeholder {
+.terminal-search-bar > input::placeholder {
   color: var(--terminal-header-muted, #8b949e);
 }
 
@@ -3959,7 +4137,7 @@ select:focus-visible {
   text-align: right;
 }
 
-.terminal-search button {
+.terminal-search-bar > button {
   display: grid;
   flex: 0 0 27px;
   width: 27px;
@@ -3970,12 +4148,13 @@ select:focus-visible {
   cursor: pointer;
 }
 
-.terminal-search button:hover:not(:disabled) {
+.terminal-search-bar > button:hover:not(:disabled),
+.terminal-search-settings-toggle.active {
   color: var(--terminal-header-foreground, var(--terminal-foreground));
   background: var(--terminal-control-hover, #ffffff12);
 }
 
-.terminal-search button:disabled {
+.terminal-search-bar > button:disabled {
   opacity: 0.35;
   cursor: default;
 }
@@ -3986,6 +4165,82 @@ select:focus-visible {
 
 .terminal-search-next svg {
   transform: rotate(90deg);
+}
+
+.terminal-search-options {
+  display: grid;
+  gap: 7px;
+  padding: 4px 9px 2px;
+  border-top: 1px solid var(--terminal-header-border, #30363d);
+}
+
+.terminal-search-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 21px;
+  color: var(--terminal-header-foreground, var(--terminal-foreground));
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.terminal-search-options input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--terminal-header-muted, #8b949e) 72%,
+    transparent
+  );
+  border-radius: 4px;
+  background: color-mix(
+    in srgb,
+    var(--terminal-header-background, #181c21) 90%,
+    var(--terminal-header-foreground, #ffffff) 10%
+  );
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.terminal-search-options input[type="checkbox"]::before {
+  width: 4px;
+  height: 8px;
+  content: "";
+  border: solid var(--terminal-cursor-accent, #ffffff);
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg) scale(0);
+  transition: transform 100ms ease;
+}
+
+.terminal-search-options input[type="checkbox"]:checked {
+  border-color: var(--terminal-active-foreground, #278fe8);
+  background: var(--terminal-active-foreground, #278fe8);
+}
+
+.terminal-search-options input[type="checkbox"]:checked::before {
+  transform: translateY(-1px) rotate(45deg) scale(1);
+}
+
+.terminal-search-options input[type="checkbox"]:hover {
+  border-color: var(--terminal-active-foreground, #278fe8);
+}
+
+.terminal-search-options input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(
+    in srgb,
+    var(--terminal-active-foreground, #278fe8) 48%,
+    transparent
+  );
+  outline-offset: 2px;
+}
+
+.terminal-search-options small {
+  color: #f28b82;
+  font-size: 9px;
 }
 
 @keyframes terminal-search-in {
