@@ -29,6 +29,7 @@ sha2 = "0.10.9"
 ssh-key = { version = "0.6.7", features = ["ed25519", "encryption", "getrandom"] }
 tauri = { version = "2.11.1", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-drag = "2.1.1"
 tauri-plugin-global-shortcut = "2"
 tokio = { version = "1.48", features = ["fs", "io-util", "process", "sync"] }
 tracing.workspace = true
@@ -40,3 +41,11 @@ zeroize = "1.8.2"
 gdk = "0.18.2"
 gio = "0.18.4"
 gtk = "0.18.2"
+keyring = { version = "4.1.5", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "4.1.5", default-features = false, features = ["v1", "windows-native-keyring-store"] }
+netstat2 = "0.11.2"
+sysinfo = "0.39.6"
+whoami = "2.1.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }

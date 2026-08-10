@@ -1925,6 +1925,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tauri-plugin-drag",
  "tauri-plugin-global-shortcut",
  "tokio",
  "tracing",
