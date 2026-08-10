@@ -105,6 +105,8 @@ pub fn join_local_path(parent: &Path, name: &str) -> Result<PathBuf, String> {
     if name.is_empty()
         || name == "."
         || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
         || Path::new(name).components().count() != 1
         || Path::new(name).file_name() != Some(OsStr::new(name))
     {
