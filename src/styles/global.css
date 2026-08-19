@@ -4268,6 +4268,27 @@ select:focus-visible {
   user-select: text;
 }
 
+/*
+ * xterm renders an active IME composition in a DOM overlay until the input
+ * method commits it. Its default hard-coded black/white colors make that
+ * overlay look like a detached input box on non-black terminal themes.
+ * Match the terminal cells so IBus/fcitx preedit reads as ordinary inline
+ * text without emphasis while preserving composition correctness.
+ */
+.terminal-mount .xterm .composition-view {
+  margin: 0;
+  padding: 0;
+  color: var(--terminal-foreground, #c9d1d9);
+  border: 0;
+  outline: 0;
+  background: var(--terminal-background, #1e2228);
+  box-shadow: none;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0.1px;
+  text-decoration: none;
+}
+
 .terminal-mount .xterm .xterm-viewport {
   background-color: var(--terminal-background, #1e2228) !important;
   scrollbar-color: var(--terminal-scrollbar, #465363) var(--terminal-background, #1e2228);

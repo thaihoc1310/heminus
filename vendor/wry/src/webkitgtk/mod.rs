@@ -412,9 +412,11 @@ impl InnerWebView {
   }
 
   fn set_webview_settings(webview: &WebView, attributes: &WebViewAttributes) {
-    // Disable input preedit,fcitx input editor can anchor at edit cursor position
+    // Keep IME preedit inside editable web content. Disabling this forces Linux
+    // input methods such as IBus and fcitx to use a detached popup and delays
+    // DOM composition events until the text is committed.
     if let Some(input_context) = webview.input_method_context() {
-      input_context.set_enable_preedit(false);
+      input_context.set_enable_preedit(true);
     }
 
     // use system scrollbars
