@@ -273,6 +273,7 @@ fn local_shell_command(
     Ok(command)
 }
 
+#[allow(clippy::too_many_arguments)] // Tauri exposes command fields as individual IPC arguments.
 #[tauri::command]
 pub fn terminal_open(
     manager: State<'_, TerminalManager>,
@@ -728,7 +729,10 @@ mod tests {
 
         let missing = Path::new("/heminus-does-not-exist");
         let fallback = local_shell_command(&[], Some(missing)).unwrap();
-        assert_ne!(fallback.get_cwd(), Some(&missing.as_os_str().to_os_string()));
+        assert_ne!(
+            fallback.get_cwd(),
+            Some(&missing.as_os_str().to_os_string())
+        );
         assert!(fallback.get_cwd().is_some());
     }
 

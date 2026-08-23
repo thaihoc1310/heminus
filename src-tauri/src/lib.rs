@@ -32,7 +32,9 @@ pub fn run() {
         .init();
 
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let open_local_terminal_only = arguments.iter().any(|argument| argument == "--new-terminal");
+    let open_local_terminal_only = arguments
+        .iter()
+        .any(|argument| argument == "--new-terminal");
     let initial_cwd = arguments
         .iter()
         .position(|argument| argument == "--cwd")
