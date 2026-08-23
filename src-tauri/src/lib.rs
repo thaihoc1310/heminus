@@ -31,7 +31,13 @@ pub fn run() {
         .compact()
         .init();
 
-    let open_local_terminal_only = std::env::args_os().any(|argument| argument == "--new-terminal");
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let open_local_terminal_only = arguments.iter().any(|argument| argument == "--new-terminal");
+    let initial_cwd = arguments
+        .iter()
+        .position(|argument| argument == "--cwd")
+        .and_then(|index| arguments.get(index + 1))
+        .map(std::path::PathBuf::from);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -40,7 +46,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed
-                        && let Err(error) = commands::build_local_terminal_window(app)
+                        && let Err(error) = commands::build_local_terminal_window(app, None)
                     {
                         tracing::warn!("Could not open the shortcut terminal: {error}");
                     }
@@ -75,7 +81,7 @@ pub fn run() {
                 }
             }
             if open_local_terminal_only {
-                commands::build_local_terminal_window(app.handle())?;
+                commands::build_local_terminal_window(app.handle(), initial_cwd.as_deref())?;
                 if let Some(main) = app.get_webview_window("main") {
                     main.destroy()?;
                 }

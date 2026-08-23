@@ -54,6 +54,7 @@
     snippetVersion = 0,
     historyVersion = 0,
     resumeSessionId = null,
+    initialCwd = null,
     commandRequest = null,
     workspace = false,
     broadcast = false,
@@ -79,6 +80,7 @@
     snippetVersion?: number;
     historyVersion?: number;
     resumeSessionId?: string | null;
+    initialCwd?: string | null;
     commandRequest?: TerminalCommandRequest | null;
     workspace?: boolean;
     broadcast?: boolean;
@@ -367,6 +369,27 @@
         searchResultCount = result.resultCount;
       });
       terminal.open(container);
+      {
+        // WebKitGTK IME (IBus/fcitx) workarounds:
+        //  - `white-space: pre` stops WebKit's editor from rebalancing a
+        //    committed trailing space into U+00A0 inside the hidden textarea.
+        //  - xterm only clears its textarea on Enter/Ctrl+C, so committed
+        //    words linger and are re-sent wholesale when a control key such
+        //    as Tab interrupts the next composition. Clearing the residue in
+        //    the capture phase (before xterm records the composition offset)
+        //    keeps every composition anchored at position 0.
+        const imeTextarea = terminal.textarea;
+        if (imeTextarea) {
+          imeTextarea.style.whiteSpace = "pre";
+          container.addEventListener(
+            "compositionstart",
+            () => {
+              imeTextarea.value = "";
+            },
+            true
+          );
+        }
+      }
       container.addEventListener("focusin", activate);
       const clearTerminalSelection = () => {
         terminal?.clearSelection();
@@ -519,7 +542,7 @@
           sessionId = resumeSessionId;
         } catch {
           if (disposed) return;
-          const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+          const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title, initialCwd);
           if (disposed) {
             void closeTerminal(openedSessionId);
             return;
@@ -527,7 +550,7 @@
           sessionId = openedSessionId;
         }
       } else {
-        const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title);
+        const openedSessionId = await openTerminal(terminal.rows, terminal.cols, channel, host, title, initialCwd);
         if (disposed) {
           void closeTerminal(openedSessionId);
           return;
@@ -625,6 +648,12 @@
         terminal?.focus();
       };
       terminal.onData((data) => {
+        // WebKitGTK rebalances IME-committed trailing spaces into U+00A0
+        // inside xterm's hidden textarea; a shell cannot use that as a word
+        // separator. Bracketed pastes are kept verbatim.
+        if (data.includes("\u00a0") && !data.includes("\x1b[200~")) {
+          data = data.replaceAll("\u00a0", " ");
+        }
         if (sensitiveInput) {
           queueData(data);
           if (data.includes("\r") || data.includes("\n") || data.includes("\x03")) {

@@ -68,6 +68,7 @@ export interface DetachedWindowPayload {
   title: string;
   tabs: DetachedTerminalSpec[];
   workspace: DetachedWorkspaceSpec | null;
+  cwd?: string | null;
 }
 
 export interface TerminalTabTransfer {

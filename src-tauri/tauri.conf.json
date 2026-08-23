@@ -48,7 +48,13 @@
         "desktopTemplate": "linux/heminus.desktop.hbs",
         "depends": [
           "openssh-client"
-        ]
+        ],
+        "recommends": [
+          "python3-nautilus"
+        ],
+        "files": {
+          "/usr/share/nautilus-python/extensions/heminus_nautilus.py": "linux/heminus_nautilus.py"
+        }
       }
     },
     "windows": {

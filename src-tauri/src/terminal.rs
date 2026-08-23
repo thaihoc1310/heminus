@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -240,13 +240,19 @@ fn append_remote_login_target(command: &mut CommandBuilder, username: &str, addr
     command.arg(format!("{username}@{address}"));
 }
 
-fn local_shell_command(environment: &[EnvironmentVariable]) -> Result<CommandBuilder, String> {
+fn local_shell_command(
+    environment: &[EnvironmentVariable],
+    cwd: Option<&Path>,
+) -> Result<CommandBuilder, String> {
     let shell = crate::platform::local_shell()?;
     let mut command = CommandBuilder::new(&shell.executable);
     for argument in shell.arguments {
         command.arg(argument);
     }
-    command.cwd(crate::platform::home_dir()?);
+    match cwd.filter(|path| path.is_dir()) {
+        Some(path) => command.cwd(path),
+        None => command.cwd(crate::platform::home_dir()?),
+    }
     for variable in environment {
         command.env(&variable.name, &variable.value);
     }
@@ -275,6 +281,7 @@ pub fn terminal_open(
     cols: u16,
     host: Option<heminus_domain::Host>,
     session_title: Option<String>,
+    cwd: Option<PathBuf>,
     on_event: Channel<TerminalEvent>,
 ) -> Result<Uuid, String> {
     let history_host_id = host.as_ref().map(|value| value.id);
@@ -295,7 +302,7 @@ pub fn terminal_open(
     let mut command = if let Some(host) = host {
         host.validate().map_err(|error| error.to_string())?;
         if is_local_host(&host) {
-            local_shell_command(&host.environment)?
+            local_shell_command(&host.environment, cwd.as_deref())?
         } else {
             let (identity, host_arguments, credential_environment) = {
                 let database = app_state
@@ -384,7 +391,7 @@ pub fn terminal_open(
             ssh
         }
     } else {
-        local_shell_command(&[])?
+        local_shell_command(&[], cwd.as_deref())?
     };
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -692,7 +699,7 @@ mod tests {
         });
 
         assert!(is_local_host(&host));
-        let command = local_shell_command(&host.environment).unwrap();
+        let command = local_shell_command(&host.environment, None).unwrap();
         assert_eq!(
             command.get_env("hi").and_then(|value| value.to_str()),
             Some("ha")
@@ -711,6 +718,18 @@ mod tests {
     #[test]
     fn remote_addresses_are_not_treated_as_local_profiles() {
         assert!(!is_local_host(&Host::new("Remote", "192.0.2.10", "deploy")));
+    }
+
+    #[test]
+    fn local_shells_start_in_the_requested_directory_when_it_exists() {
+        let requested = std::env::temp_dir();
+        let command = local_shell_command(&[], Some(&requested)).unwrap();
+        assert_eq!(command.get_cwd(), Some(&requested.into_os_string()));
+
+        let missing = Path::new("/heminus-does-not-exist");
+        let fallback = local_shell_command(&[], Some(missing)).unwrap();
+        assert_ne!(fallback.get_cwd(), Some(&missing.as_os_str().to_os_string()));
+        assert!(fallback.get_cwd().is_some());
     }
 
     #[test]

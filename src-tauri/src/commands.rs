@@ -118,8 +118,24 @@ pub async fn create_detached_terminal_window(
     build_detached_terminal_window(&app, state.inner(), payload, &title, None)
 }
 
-pub(crate) fn build_local_terminal_window(app: &AppHandle) -> Result<String, String> {
+pub(crate) fn build_local_terminal_window(
+    app: &AppHandle,
+    cwd: Option<&Path>,
+) -> Result<String, String> {
     let label = format!("detached-{}", Uuid::new_v4().simple());
+    if let Some(cwd) = cwd {
+        let payload = serde_json::json!({
+            "title": "Local Terminal",
+            "tabs": [],
+            "workspace": null,
+            "cwd": cwd,
+        });
+        app.state::<AppState>()
+            .detached_payloads
+            .lock()
+            .map_err(|_| "detached window state lock poisoned".to_string())?
+            .insert(label.clone(), payload.to_string());
+    }
     build_terminal_webview(app, &label, "Local Terminal", None, (720.0, 520.0))?;
     Ok(label)
 }

@@ -121,6 +121,7 @@
     host: Host | null;
     appearance: TerminalAppearance;
     resumeSessionId: string | null;
+    initialCwd?: string | null;
   }
   type HostSubeditor = "environment" | "chain" | "theme";
   type WindowResizeDirection =
@@ -445,7 +446,7 @@
     try {
       const payload = await takeDetachedTerminalPayload();
       if (!payload?.tabs.length) {
-        await openTerminal();
+        await openTerminal(null, false, payload?.cwd ?? null);
         return;
       }
       terminalTabs = payload.tabs.map((spec) => {
@@ -1623,7 +1624,11 @@
     }
   }
 
-  async function openTerminal(host: Host | null = null, pageChangePrepared = false) {
+  async function openTerminal(
+    host: Host | null = null,
+    pageChangePrepared = false,
+    initialCwd: string | null = null
+  ) {
     if (!pageChangePrepared && !(await preparePageChange("terminal"))) return;
     if (terminalTabs.length >= 16) {
       message = "Heminus can keep at most 16 terminal sessions open.";
@@ -1634,7 +1639,8 @@
       title: host?.label ?? "Local Terminal",
       host: host ? cloneHost(host) : null,
       appearance: host ? hostTerminalAppearance(host) : localTerminalAppearance(),
-      resumeSessionId: null
+      resumeSessionId: null,
+      initialCwd
     };
     terminalTabs.push(tab);
     topTabOrder.push(tab.id);
@@ -3542,6 +3548,7 @@
                   snippetVersion={terminalSnippetVersion}
                   historyVersion={terminalHistoryVersion}
                   resumeSessionId={tab.resumeSessionId}
+                  initialCwd={tab.initialCwd ?? null}
                   commandRequest={terminalCommandRequests[tab.id] ?? null}
                   workspace={visibleWorkspace?.paneIds.includes(tab.id) ?? false}
                   broadcast={visibleWorkspace?.broadcastPaneIds.includes(tab.id) ?? false}

@@ -447,14 +447,16 @@ export async function openTerminal(
   cols: number,
   channel: Channel<TerminalEvent>,
   host: Host | null = null,
-  sessionTitle?: string
+  sessionTitle?: string,
+  cwd: string | null = null
 ): Promise<string> {
   return invoke<string>("terminal_open", {
     rows,
     cols,
     host,
     onEvent: channel,
-    sessionTitle
+    sessionTitle,
+    cwd
   });
 }
 
