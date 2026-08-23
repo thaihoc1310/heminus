@@ -1078,6 +1078,11 @@ impl Database {
         Ok(affected > 0)
     }
 
+    pub fn clear_command_history(&self) -> Result<usize> {
+        let affected = self.connection.execute("DELETE FROM command_history", [])?;
+        Ok(affected)
+    }
+
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut statement = self.connection.prepare(
             "
@@ -1650,6 +1655,9 @@ mod tests {
             vec!["pwd", "uname -a"]
         );
         assert!(!database.delete_command_history("missing").unwrap());
+        assert_eq!(database.clear_command_history().unwrap(), 3);
+        assert!(database.list_all_command_history(20).unwrap().is_empty());
+        assert_eq!(database.clear_command_history().unwrap(), 0);
     }
 
     #[test]

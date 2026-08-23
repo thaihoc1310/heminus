@@ -1,12 +1,14 @@
 <script lang="ts">
   import Icon from "../../components/Icon.svelte";
   import {
+    clearCommandHistory,
     deleteCommandHistory,
     deleteSnippet,
     listAllCommandHistory,
     listSnippets,
     saveSnippet
   } from "../../lib/ipc";
+  import { confirmDialog } from "../../lib/dialog";
   import { terminalThemes } from "../../lib/terminalThemes";
   import {
     formatTerminalShortcut,
@@ -55,6 +57,7 @@
   let history = $state<string[]>([]);
   let loadingSnippets = $state(true);
   let loadingHistory = $state(true);
+  let clearingHistory = $state(false);
   let snippetQuery = $state("");
   let historyQuery = $state("");
   let snippetSort = $state<ToolSort>("az");
@@ -127,7 +130,7 @@
   async function refreshHistory() {
     loadingHistory = true;
     try {
-      history = await listAllCommandHistory(300);
+      history = await listAllCommandHistory(50);
     } finally {
       loadingHistory = false;
     }
@@ -218,6 +221,25 @@
     historyContextMenu = null;
     await deleteCommandHistory(command);
     await refreshHistory();
+  }
+
+  async function clearHistory() {
+    if (clearingHistory || history.length === 0) return;
+    if (!(await confirmDialog({
+      title: "Clear command history?",
+      message: "Remove all saved successful commands from every terminal? This cannot be undone.",
+      confirmLabel: "Clear history",
+      danger: true
+    }))) return;
+    clearingHistory = true;
+    try {
+      await clearCommandHistory();
+      history = [];
+      historyQuery = "";
+      historyContextMenu = null;
+    } finally {
+      clearingHistory = false;
+    }
   }
 
   function setSection(next: SidebarSection) {
@@ -411,6 +433,13 @@
         <Icon name="search" size={15} />
         <input bind:value={historyQuery} placeholder="Search history" aria-label="Search command history" />
       </label>
+      <button
+        class="terminal-tool-icon"
+        title="Clear command history"
+        aria-label="Clear command history"
+        disabled={loadingHistory || clearingHistory || history.length === 0}
+        onclick={clearHistory}
+      ><Icon name="trash" size={16} /></button>
       <div class="terminal-tool-menu-anchor">
         <button
           class="terminal-tool-icon"

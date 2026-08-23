@@ -708,6 +708,16 @@ pub fn delete_command_history(state: State<'_, AppState>, command: String) -> Re
 }
 
 #[tauri::command]
+pub fn clear_command_history(state: State<'_, AppState>) -> Result<usize, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "database lock poisoned")?
+        .clear_command_history()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn list_port_forwards(state: State<'_, AppState>) -> Result<Vec<PortForward>, String> {
     let database = state
         .database

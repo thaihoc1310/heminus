@@ -21,6 +21,9 @@
   --accent: #268be3;
   --accent-hover: #167cce;
   --danger: #c34454;
+  --scrollbar-thumb: #aab6bc;
+  --scrollbar-thumb-hover: #7f9098;
+  --scrollbar-thumb-active: var(--accent);
   --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 13px;
@@ -33,6 +36,44 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--scrollbar-thumb-active);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html,
@@ -3059,6 +3100,9 @@ select:focus-visible {
 }
 
 .terminal-pane {
+  --scrollbar-thumb: var(--terminal-scrollbar, #465363);
+  --scrollbar-thumb-hover: var(--terminal-scrollbar-hover, #65758a);
+  --scrollbar-thumb-active: var(--terminal-scrollbar-active, #278fe8);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -3161,6 +3205,16 @@ select:focus-visible {
 .terminal-tool-icon.active {
   color: var(--terminal-tool-foreground);
   background: var(--terminal-tool-active);
+}
+
+.terminal-tool-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.terminal-tool-icon:disabled:hover {
+  color: var(--terminal-tool-muted);
+  background: transparent;
 }
 
 .terminal-tools-toolbar {

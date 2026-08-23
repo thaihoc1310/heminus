@@ -126,6 +126,7 @@ pub fn run() {
             commands::list_all_command_history,
             commands::record_command_history,
             commands::delete_command_history,
+            commands::clear_command_history,
             commands::list_port_forwards,
             commands::save_port_forward,
             commands::delete_port_forward,

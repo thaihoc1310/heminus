@@ -39,6 +39,10 @@
   } from "../../lib/hostOperatingSystem";
   import { consumeShellCompletionMarkers } from "../../lib/terminalShellIntegration";
   import {
+    normalizeLinuxTerminalInput,
+    resetLinuxTerminalComposition
+  } from "../../lib/terminalInput";
+  import {
     buildTerminalSuggestions,
     highlightedCommand,
     reconcileRenderedCommandInput,
@@ -333,6 +337,7 @@
     let handleTerminalMiddlePointerDown: ((event: PointerEvent) => void) | null = null;
     let handleTerminalMiddlePointerUp: ((event: PointerEvent) => void) | null = null;
     let handleTerminalAuxClick: ((event: MouseEvent) => void) | null = null;
+    let handleTerminalCompositionStart: (() => void) | null = null;
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
     const supportsPrimarySelection = navigator.userAgent.includes("Linux");
@@ -369,6 +374,18 @@
         searchResultCount = result.resultCount;
       });
       terminal.open(container);
+      const imeTextarea = terminal.textarea;
+      if (supportsPrimarySelection && imeTextarea) {
+        imeTextarea.style.whiteSpace = "pre";
+        handleTerminalCompositionStart = () => {
+          resetLinuxTerminalComposition(imeTextarea);
+        };
+        container.addEventListener(
+          "compositionstart",
+          handleTerminalCompositionStart,
+          true
+        );
+      }
       container.addEventListener("focusin", activate);
       const clearTerminalSelection = () => {
         terminal?.clearSelection();
@@ -620,6 +637,7 @@
         terminal?.focus();
       };
       terminal.onData((data) => {
+        if (supportsPrimarySelection) data = normalizeLinuxTerminalInput(data);
         if (sensitiveInput) {
           queueData(data);
           if (data.includes("\r") || data.includes("\n") || data.includes("\x03")) {
@@ -796,6 +814,13 @@
       }
       if (handleTerminalAuxClick) {
         container?.removeEventListener("auxclick", handleTerminalAuxClick, true);
+      }
+      if (handleTerminalCompositionStart) {
+        container?.removeEventListener(
+          "compositionstart",
+          handleTerminalCompositionStart,
+          true
+        );
       }
       const mountedTerminal = terminal;
       terminal = null;

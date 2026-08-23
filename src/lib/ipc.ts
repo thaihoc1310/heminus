@@ -254,7 +254,7 @@ export async function listenForSnippetChanges(
 
 export async function listCommandHistory(
   hostId: string | null,
-  limit = 200
+  limit = 50
 ): Promise<string[]> {
   if (!isTauri) {
     const history = JSON.parse(
@@ -265,7 +265,7 @@ export async function listCommandHistory(
   return invoke<string[]>("list_command_history", { hostId, limit });
 }
 
-export async function listAllCommandHistory(limit = 300): Promise<string[]> {
+export async function listAllCommandHistory(limit = 50): Promise<string[]> {
   if (!isTauri) {
     const commands = new Set<string>();
     for (let index = 0; index < localStorage.length; index += 1) {
@@ -285,8 +285,11 @@ export async function recordCommandHistory(
 ): Promise<boolean> {
   if (!isTauri) {
     const key = `heminus-command-history:${hostId ?? "local"}`;
-    const history = await listCommandHistory(hostId, 200);
-    localStorage.setItem(key, JSON.stringify([command, ...history.filter((item) => item !== command)]));
+    const history = await listCommandHistory(hostId, 50);
+    localStorage.setItem(
+      key,
+      JSON.stringify([command, ...history.filter((item) => item !== command)].slice(0, 50))
+    );
     return true;
   }
   return invoke<boolean>("record_command_history", { hostId, command });
@@ -309,6 +312,23 @@ export async function deleteCommandHistory(command: string): Promise<boolean> {
   const deleted = await invoke<boolean>("delete_command_history", { command });
   if (deleted) await emit("command-history-changed");
   return deleted;
+}
+
+export async function clearCommandHistory(): Promise<number> {
+  if (!isTauri) {
+    let cleared = 0;
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith("heminus-command-history:")) continue;
+      const history = JSON.parse(localStorage.getItem(key) ?? "[]") as string[];
+      cleared += history.length;
+      localStorage.removeItem(key);
+    }
+    return cleared;
+  }
+  const cleared = await invoke<number>("clear_command_history");
+  if (cleared > 0) await emit("command-history-changed");
+  return cleared;
 }
 
 export async function listenForCommandHistoryChanges(
