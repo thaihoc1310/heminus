@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
