@@ -20,6 +20,8 @@ pub struct Host {
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
     #[serde(default)]
+    pub proxy: Option<HostProxy>,
+    #[serde(default)]
     pub terminal_theme: TerminalTheme,
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u16,
@@ -51,6 +53,7 @@ impl Host {
             identity_id: None,
             jump_host_ids: Vec::new(),
             environment: Vec::new(),
+            proxy: None,
             terminal_theme: TerminalTheme::default(),
             terminal_font_size: default_terminal_font_size(),
             created_at: now,
@@ -97,6 +100,9 @@ impl Host {
                 return Err(ValidationError::DuplicateEnvironmentVariable);
             }
         }
+        if let Some(proxy) = &self.proxy {
+            proxy.validate()?;
+        }
         Ok(())
     }
 }
@@ -123,6 +129,76 @@ impl EnvironmentVariable {
                 .any(|character| matches!(character, '\0' | '\r' | '\n'))
         {
             return Err(ValidationError::InvalidEnvironmentVariable);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyKind {
+    #[default]
+    Http,
+    Socks5,
+}
+
+impl ProxyKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Http => "HTTP",
+            Self::Socks5 => "SOCKS5",
+        }
+    }
+
+    pub const fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 3128,
+            Self::Socks5 => 1080,
+        }
+    }
+}
+
+/// A proxy the SSH transport is tunnelled through before it reaches the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostProxy {
+    pub kind: ProxyKind,
+    pub hostname: String,
+    pub port: u16,
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The password lives in the operating-system keyring, never in the database.
+    #[serde(default)]
+    pub secret_stored: bool,
+}
+
+impl HostProxy {
+    pub fn new(kind: ProxyKind) -> Self {
+        Self {
+            kind,
+            hostname: String::new(),
+            port: kind.default_port(),
+            username: None,
+            secret_stored: false,
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.hostname, self.port)
+    }
+
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.hostname.trim().is_empty() {
+            return Err(ValidationError::EmptyProxyHostname);
+        }
+        if self.port == 0 {
+            return Err(ValidationError::InvalidProxyPort);
+        }
+        let unsupported = |value: &str| value.contains(['\0', '\r', '\n']);
+        if unsupported(&self.hostname)
+            || self.username.as_deref().is_some_and(unsupported)
+            || self.hostname.trim().contains(char::is_whitespace)
+        {
+            return Err(ValidationError::InvalidProxyValue);
         }
         Ok(())
     }
@@ -474,6 +550,12 @@ pub enum ValidationError {
     InvalidEnvironmentVariable,
     #[error("Environment variable names must be unique")]
     DuplicateEnvironmentVariable,
+    #[error("Proxy hostname cannot be empty")]
+    EmptyProxyHostname,
+    #[error("Proxy port must be between 1 and 65535")]
+    InvalidProxyPort,
+    #[error("Proxy hostname and username cannot contain spaces or control characters")]
+    InvalidProxyValue,
     #[error("Snippet name cannot be empty")]
     EmptySnippetTitle,
     #[error("Snippet command cannot be empty")]
@@ -573,6 +655,33 @@ mod tests {
             created_at: Utc::now(),
         };
         assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn host_proxies_validate_their_endpoint() {
+        let mut host = Host::new("production", "10.0.0.5", "ubuntu");
+        host.proxy = Some(HostProxy::new(ProxyKind::Http));
+        assert_eq!(host.validate(), Err(ValidationError::EmptyProxyHostname));
+
+        let proxy = host.proxy.as_mut().unwrap();
+        proxy.hostname = "proxy.example".into();
+        assert_eq!(proxy.port, 3128);
+        assert!(host.validate().is_ok());
+
+        let proxy = host.proxy.as_mut().unwrap();
+        proxy.port = 0;
+        assert_eq!(host.validate(), Err(ValidationError::InvalidProxyPort));
+
+        let proxy = host.proxy.as_mut().unwrap();
+        proxy.port = 1080;
+        proxy.username = Some("user\nInject".into());
+        assert_eq!(host.validate(), Err(ValidationError::InvalidProxyValue));
+    }
+
+    #[test]
+    fn socks5_proxies_default_to_the_socks_port() {
+        assert_eq!(HostProxy::new(ProxyKind::Socks5).port, 1080);
+        assert_eq!(ProxyKind::Socks5.label(), "SOCKS5");
     }
 
     #[test]

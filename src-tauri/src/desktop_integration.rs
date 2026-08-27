@@ -8,7 +8,8 @@ pub fn ensure_local_terminal_shortcut() -> Result<bool, String> {
     const SHORTCUT_PATH: &str =
         "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/heminus-terminal/";
     const SHORTCUT_BINDING: &str = "<Primary><Alt>h";
-    const SHORTCUT_COMMAND: &str = "/usr/bin/heminus-app --new-terminal";
+    const SHORTCUT_COMMAND: &str = "/usr/bin/heminus --new-terminal";
+    const LEGACY_SHORTCUT_COMMAND: &str = "/usr/bin/heminus-app --new-terminal";
 
     if !std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()
@@ -25,6 +26,13 @@ pub fn ensure_local_terminal_shortcut() -> Result<bool, String> {
         .map(|path| path.to_string())
         .collect::<Vec<_>>();
     if paths.iter().any(|path| path == SHORTCUT_PATH) {
+        let shortcut = gio::Settings::with_path(CUSTOM_KEY_SCHEMA, SHORTCUT_PATH);
+        if shortcut.string("command").as_str() == LEGACY_SHORTCUT_COMMAND {
+            shortcut
+                .set_string("command", SHORTCUT_COMMAND)
+                .map_err(|error| error.to_string())?;
+            gio::Settings::sync();
+        }
         return Ok(true);
     }
 

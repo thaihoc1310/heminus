@@ -12,6 +12,7 @@ import type {
   PortForward,
   PrivateKeyImport,
   RemoteEntry,
+  SessionProcess,
   SessionRecord,
   SavedWorkspace,
   SftpOpenResult,
@@ -191,6 +192,15 @@ export async function deleteIdentitySecret(id: string): Promise<boolean> {
   const deleted = await invoke<boolean>("delete_identity_secret", { id });
   if (deleted) await emit("identities-changed");
   return deleted;
+}
+
+/** Stores a host's proxy password in the operating-system keyring. */
+export async function setHostProxySecret(id: string, secret: string): Promise<boolean> {
+  return invoke<boolean>("set_host_proxy_secret", { id, secret });
+}
+
+export async function deleteHostProxySecret(id: string): Promise<boolean> {
+  return invoke<boolean>("delete_host_proxy_secret", { id });
 }
 
 export async function readKeyMaterial(id: string): Promise<KeyMaterial> {
@@ -509,8 +519,23 @@ export async function resizeTerminal(id: string, rows: number, cols: number): Pr
   return invoke("terminal_resize", { id, rows, cols });
 }
 
-export async function closeTerminal(id: string): Promise<boolean> {
-  return invoke<boolean>("terminal_close", { id });
+export async function closeTerminal(
+  id: string,
+  killProcesses = true
+): Promise<boolean> {
+  return invoke<boolean>("terminal_close", { id, killProcesses });
+}
+
+/** Background processes a terminal session would leave running when closed. */
+export async function terminalProcesses(id: string): Promise<SessionProcess[]> {
+  return invoke<SessionProcess[]>("terminal_processes", { id });
+}
+
+export async function killTerminalProcesses(
+  id: string,
+  pids: number[]
+): Promise<SessionProcess[]> {
+  return invoke<SessionProcess[]>("terminal_kill_processes", { id, pids });
 }
 
 export async function writeTerminalClipboard(
@@ -643,6 +668,7 @@ const demoHosts: Host[] = [
     identity_id: null,
     jump_host_ids: [],
     environment: [],
+    proxy: null,
     terminal_theme: "heminus_dark",
     terminal_font_size: 14,
     created_at: now,
@@ -661,6 +687,7 @@ const demoHosts: Host[] = [
     identity_id: null,
     jump_host_ids: [],
     environment: [],
+    proxy: null,
     terminal_theme: "kanagawa_wave",
     terminal_font_size: 14,
     created_at: now,
@@ -679,6 +706,7 @@ const demoHosts: Host[] = [
     identity_id: null,
     jump_host_ids: [],
     environment: [],
+    proxy: null,
     terminal_theme: "gruvbox_dark",
     terminal_font_size: 14,
     created_at: now,

@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use heminus_domain::{
-    EnvironmentVariable, ForwardKind, Host, HostColor, Identity, IdentityKind, PortForward,
-    SessionRecord, SessionStatus, Snippet, TerminalTheme, VaultGroup, Workspace,
+    EnvironmentVariable, ForwardKind, Host, HostColor, HostProxy, Identity, IdentityKind,
+    PortForward, SessionRecord, SessionStatus, Snippet, TerminalTheme, VaultGroup, Workspace,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
@@ -276,9 +276,13 @@ impl Database {
                 [],
             )?;
         }
+        if !self.table_has_column("hosts", "proxy_json")? {
+            self.connection
+                .execute("ALTER TABLE hosts ADD COLUMN proxy_json TEXT", [])?;
+        }
         self.migrate_legacy_groups()?;
         self.connection.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '9')",
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '10')",
             [],
         )?;
         Ok(())
@@ -360,7 +364,7 @@ impl Database {
             "
             SELECT id, label, address, port, username, group_name, tags_json, color,
                    identity_id, group_id, jump_host_id, jump_host_ids_json,
-                   environment_json, terminal_theme, terminal_font_size,
+                   environment_json, proxy_json, terminal_theme, terminal_font_size,
                    created_at, updated_at
             FROM hosts
             WHERE label LIKE ?1 ESCAPE '\\'
@@ -375,7 +379,7 @@ impl Database {
             "
             SELECT id, label, address, port, username, group_name, tags_json, color,
                    identity_id, group_id, jump_host_id, jump_host_ids_json,
-                   environment_json, terminal_theme, terminal_font_size,
+                   environment_json, proxy_json, terminal_theme, terminal_font_size,
                    created_at, updated_at
             FROM hosts
             ORDER BY label COLLATE NOCASE
@@ -392,9 +396,10 @@ impl Database {
             let jump_host_id: Option<String> = row.get(10)?;
             let jump_host_ids_json: String = row.get(11)?;
             let environment_json: String = row.get(12)?;
-            let terminal_theme: String = row.get(13)?;
-            let created_at: String = row.get(15)?;
-            let updated_at: String = row.get(16)?;
+            let proxy_json: Option<String> = row.get(13)?;
+            let terminal_theme: String = row.get(14)?;
+            let created_at: String = row.get(16)?;
+            let updated_at: String = row.get(17)?;
             let mut jump_host_ids =
                 serde_json::from_str::<Vec<Uuid>>(&jump_host_ids_json).unwrap_or_default();
             if jump_host_ids.is_empty()
@@ -416,8 +421,9 @@ impl Database {
                 jump_host_ids,
                 environment: serde_json::from_str::<Vec<EnvironmentVariable>>(&environment_json)
                     .unwrap_or_default(),
+                proxy: parse_proxy(proxy_json.as_deref()),
                 terminal_theme: parse_terminal_theme(&terminal_theme),
-                terminal_font_size: row.get::<_, u16>(14)?,
+                terminal_font_size: row.get::<_, u16>(15)?,
                 created_at: parse_datetime(&created_at)?,
                 updated_at: parse_datetime(&updated_at)?,
             })
@@ -444,7 +450,7 @@ impl Database {
                 "
                 SELECT id, label, address, port, username, group_name, tags_json, color,
                        identity_id, group_id, jump_host_id, jump_host_ids_json,
-                       environment_json, terminal_theme, terminal_font_size,
+                       environment_json, proxy_json, terminal_theme, terminal_font_size,
                        created_at, updated_at
                 FROM hosts WHERE id = ?1
                 ",
@@ -458,9 +464,10 @@ impl Database {
                     let jump_host_id: Option<String> = row.get(10)?;
                     let jump_host_ids_json: String = row.get(11)?;
                     let environment_json: String = row.get(12)?;
-                    let terminal_theme: String = row.get(13)?;
-                    let created_at: String = row.get(15)?;
-                    let updated_at: String = row.get(16)?;
+                    let proxy_json: Option<String> = row.get(13)?;
+                    let terminal_theme: String = row.get(14)?;
+                    let created_at: String = row.get(16)?;
+                    let updated_at: String = row.get(17)?;
                     let mut jump_host_ids =
                         serde_json::from_str::<Vec<Uuid>>(&jump_host_ids_json).unwrap_or_default();
                     if jump_host_ids.is_empty()
@@ -485,8 +492,9 @@ impl Database {
                             &environment_json,
                         )
                         .unwrap_or_default(),
+                        proxy: parse_proxy(proxy_json.as_deref()),
                         terminal_theme: parse_terminal_theme(&terminal_theme),
-                        terminal_font_size: row.get::<_, u16>(14)?,
+                        terminal_font_size: row.get::<_, u16>(15)?,
                         created_at: parse_datetime(&created_at)?,
                         updated_at: parse_datetime(&updated_at)?,
                     })
@@ -508,11 +516,11 @@ impl Database {
             INSERT INTO hosts (
                 id, label, address, port, username, group_name, tags_json, color,
                 identity_id, group_id, jump_host_id, jump_host_ids_json,
-                environment_json, terminal_theme, terminal_font_size,
+                environment_json, proxy_json, terminal_theme, terminal_font_size,
                 created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17
+                ?15, ?16, ?17, ?18
             )
             ON CONFLICT(id) DO UPDATE SET
                 label = excluded.label,
@@ -528,6 +536,7 @@ impl Database {
                 jump_host_id = excluded.jump_host_id,
                 jump_host_ids_json = excluded.jump_host_ids_json,
                 environment_json = excluded.environment_json,
+                proxy_json = excluded.proxy_json,
                 terminal_theme = excluded.terminal_theme,
                 terminal_font_size = excluded.terminal_font_size,
                 updated_at = excluded.updated_at
@@ -546,6 +555,10 @@ impl Database {
                 host.jump_host_ids.first().map(Uuid::to_string),
                 serde_json::to_string(&host.jump_host_ids)?,
                 serde_json::to_string(&host.environment)?,
+                host.proxy
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 terminal_theme_name(host.terminal_theme),
                 host.terminal_font_size,
                 host.created_at.to_rfc3339(),
@@ -1394,6 +1407,12 @@ fn parse_session_status(value: &str) -> SessionStatus {
     }
 }
 
+fn parse_proxy(value: Option<&str>) -> Option<HostProxy> {
+    serde_json::from_str::<HostProxy>(value?.trim())
+        .ok()
+        .filter(|proxy| proxy.validate().is_ok())
+}
+
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -1554,6 +1573,37 @@ mod tests {
         );
         drop(database);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn host_proxy_round_trips_and_drops_invalid_rows() {
+        let database = Database::in_memory().unwrap();
+        let mut host = Host::new("Behind a proxy", "10.0.0.5", "ubuntu");
+        host.proxy = Some(HostProxy {
+            kind: heminus_domain::ProxyKind::Socks5,
+            hostname: "proxy.example".into(),
+            port: 1080,
+            username: Some("agent".into()),
+            secret_stored: true,
+        });
+        database.save_host(&host).unwrap();
+
+        let stored = database.find_host(host.id).unwrap().unwrap();
+        assert_eq!(stored.proxy, host.proxy);
+        assert_eq!(database.list_hosts(None).unwrap()[0].proxy, host.proxy);
+
+        host.proxy = None;
+        database.save_host(&host).unwrap();
+        assert!(database.find_host(host.id).unwrap().unwrap().proxy.is_none());
+
+        database
+            .connection
+            .execute(
+                "UPDATE hosts SET proxy_json = ?1 WHERE id = ?2",
+                params![r#"{"kind":"http","hostname":"","port":0}"#, host.id.to_string()],
+            )
+            .unwrap();
+        assert!(database.find_host(host.id).unwrap().unwrap().proxy.is_none());
     }
 
     #[test]

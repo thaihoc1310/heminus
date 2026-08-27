@@ -3,6 +3,7 @@ mod credential;
 mod desktop_integration;
 mod key_management;
 mod platform;
+mod proxy;
 mod sftp;
 mod ssh_runtime;
 mod terminal;
@@ -105,6 +106,8 @@ pub fn run() {
             commands::list_hosts,
             commands::save_host,
             commands::delete_host,
+            commands::set_host_proxy_secret,
+            commands::delete_host_proxy_secret,
             commands::list_groups,
             commands::save_group,
             commands::delete_group,
@@ -155,6 +158,8 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_processes,
+            terminal::terminal_kill_processes,
             terminal::terminal_clipboard_write,
             terminal::terminal_clipboard_read,
             terminal::terminal_disconnect_history,
@@ -171,4 +176,8 @@ pub fn run() {
 
 pub fn run_askpass_if_requested() -> bool {
     credential::run_askpass_if_requested()
+}
+
+pub fn run_proxy_connect_if_requested() -> bool {
+    proxy::run_proxy_connect_if_requested()
 }

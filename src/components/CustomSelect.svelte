@@ -54,6 +54,22 @@
     trigger?.focus();
   }
 
+  /**
+   * Moves the menu to the document body.
+   *
+   * The menu is `position: fixed`, but any ancestor with a transform — such as
+   * the host sub-editor's slide-in animation — becomes its containing block and
+   * drags it off screen. Re-parenting keeps the viewport coordinates honest.
+   */
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      }
+    };
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       open = false;
@@ -83,7 +99,13 @@
     <Icon name="chevron" size={14} />
   </button>
   {#if open}
-    <span class="custom-select-menu" style={menuStyle} role="listbox" aria-label={ariaLabel}>
+    <span
+      use:portal
+      class="custom-select-menu"
+      style={menuStyle}
+      role="listbox"
+      aria-label={ariaLabel}
+    >
       {#each options as option (option.value)}
         <button
           type="button"

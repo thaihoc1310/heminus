@@ -9,7 +9,7 @@ from urllib.parse import unquote, urlparse
 
 from gi.repository import GObject, Nautilus
 
-HEMINUS_BINARY = "/usr/bin/heminus-app"
+HEMINUS_BINARY = "/usr/bin/heminus"
 
 
 def _local_folder_path(item):

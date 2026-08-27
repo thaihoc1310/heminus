@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
-use heminus_domain::{Host, IdentityKind};
+use heminus_domain::{Host, HostProxy, IdentityKind};
 
 #[derive(Debug)]
 pub struct SshRuntime {
@@ -14,14 +14,60 @@ pub struct SshRuntime {
     connections: PathBuf,
 }
 
+/// How OpenSSH should treat a host key it has never seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKeyPolicy {
+    /// Ask in the terminal, where the person can read the fingerprint.
+    Ask,
+    /// Pin on first use.
+    ///
+    /// `SSH_ASKPASS_REQUIRE=force` sends *every* prompt to the Heminus askpass
+    /// helper, including the host-key question, so `ask` would leave the
+    /// session stuck on a prompt nobody can answer.
+    AcceptNew,
+}
+
+impl HostKeyPolicy {
+    pub const fn for_forced_askpass(forced: bool) -> Self {
+        if forced { Self::AcceptNew } else { Self::Ask }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AcceptNew => "accept-new",
+        }
+    }
+}
+
+/// One leg of a connection: a jump host, or the host itself.
+///
+/// Every leg is a separate OpenSSH process with its own `-E` log, which is what
+/// lets the connecting screen show real progress per hop instead of one opaque
+/// wait — and keeps the inner hops from spraying debug output into the terminal.
+#[derive(Clone, Debug)]
+pub struct ConnectionHop {
+    pub label: String,
+    pub log: PathBuf,
+}
+
+/// Per-session scratch files that must not outlive the connection.
 #[derive(Default)]
 pub struct ConnectionArtifacts {
     config: Option<PathBuf>,
+    logs: Vec<PathBuf>,
+}
+
+impl ConnectionArtifacts {
+    pub fn with_logs(mut self, paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.logs.extend(paths);
+        self
+    }
 }
 
 impl Drop for ConnectionArtifacts {
     fn drop(&mut self) {
-        if let Some(path) = self.config.take() {
+        for path in self.config.take().into_iter().chain(self.logs.drain(..)) {
             let _ = fs::remove_file(path);
         }
     }
@@ -57,12 +103,12 @@ impl SshRuntime {
         Ok(runtime)
     }
 
-    pub fn arguments(&self) -> Vec<OsString> {
-        self.arguments_with_host_key_policy("ask")
+    pub fn interactive_arguments(&self, policy: HostKeyPolicy) -> Vec<OsString> {
+        self.arguments_with_host_key_policy(policy.as_str())
     }
 
     pub fn sftp_arguments(&self) -> Vec<OsString> {
-        self.arguments_with_host_key_policy("accept-new")
+        self.arguments_with_host_key_policy(HostKeyPolicy::AcceptNew.as_str())
     }
 
     fn arguments_with_host_key_policy(&self, policy: &str) -> Vec<OsString> {
@@ -94,12 +140,30 @@ impl SshRuntime {
         .collect()
     }
 
-    pub fn host_arguments(
+    /// Builds the arguments for an interactive session plus one log per hop.
+    ///
+    /// The last hop is the host itself; its log belongs on the caller's own
+    /// `ssh -E`, while the inner hops carry theirs inside the generated config.
+    pub fn interactive_connection(
         &self,
         database: &heminus_storage::Database,
         host: &Host,
-    ) -> Result<Vec<OsString>, String> {
-        self.host_arguments_with_policy(database, host, "ask")
+        policy: HostKeyPolicy,
+    ) -> Result<(Vec<OsString>, Vec<ConnectionHop>), String> {
+        let mut hops = jump_hosts(database, host)?
+            .iter()
+            .map(|jump_host| jump_host.label.clone())
+            .chain(std::iter::once(host.label.clone()))
+            .map(|label| {
+                Ok(ConnectionHop {
+                    label,
+                    log: self.connection_log_path()?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let arguments =
+            self.host_arguments_with_policy(database, host, policy.as_str(), Some(&mut hops))?;
+        Ok((arguments, hops))
     }
 
     pub fn sftp_host_arguments(
@@ -107,7 +171,17 @@ impl SshRuntime {
         database: &heminus_storage::Database,
         host: &Host,
     ) -> Result<Vec<OsString>, String> {
-        self.host_arguments_with_policy(database, host, "accept-new")
+        self.host_arguments_with_policy(database, host, HostKeyPolicy::AcceptNew.as_str(), None)
+    }
+
+    /// Per-host arguments for a connection that does not stream a hop log.
+    pub fn host_arguments(
+        &self,
+        database: &heminus_storage::Database,
+        host: &Host,
+        policy: HostKeyPolicy,
+    ) -> Result<Vec<OsString>, String> {
+        self.host_arguments_with_policy(database, host, policy.as_str(), None)
     }
 
     fn host_arguments_with_policy(
@@ -115,20 +189,52 @@ impl SshRuntime {
         database: &heminus_storage::Database,
         host: &Host,
         host_key_policy: &str,
+        hops: Option<&mut Vec<ConnectionHop>>,
     ) -> Result<Vec<OsString>, String> {
         let jump_hosts = jump_hosts(database, host)?;
+        let hop_logs = hops.map(|hops| {
+            hops.iter()
+                .map(|hop| hop.log.clone())
+                .collect::<Vec<PathBuf>>()
+        });
+        // A proxy wraps the very first TCP hop, so a chain tunnels its entry
+        // jump host and a direct connection tunnels the host itself.
+        let target_proxy = jump_hosts.is_empty().then(|| host.proxy.as_ref()).flatten();
         let mut arguments = if jump_hosts.is_empty() {
             vec![OsString::from("-F"), OsString::from("none")]
         } else {
-            let (config_path, aliases) =
-                self.write_jump_host_config(database, &jump_hosts, host_key_policy)?;
+            let (config_path, entry) = self.write_jump_host_config(
+                database,
+                &jump_hosts,
+                host_key_policy,
+                host.proxy.as_ref().map(|proxy| (proxy, host.id)),
+                hop_logs.as_deref(),
+            )?;
+            // Heminus builds the chain itself rather than using ProxyJump, so
+            // each hop can be given its own log file. OpenSSH's own expansion
+            // would instead pass -v down and leak the inner hops' debug output
+            // into the terminal.
+            let hop_command = ssh_hop_command(
+                &config_path,
+                &entry,
+                hop_logs
+                    .as_ref()
+                    .and_then(|logs| logs.get(jump_hosts.len() - 1)),
+            )?;
             vec![
                 OsString::from("-F"),
                 config_path.into_os_string(),
                 OsString::from("-o"),
-                OsString::from(format!("ProxyJump={}", aliases.join(","))),
+                OsString::from(format!("ProxyCommand={hop_command}")),
             ]
         };
+        if let Some(proxy) = target_proxy {
+            arguments.push(OsString::from("-o"));
+            arguments.push(OsString::from(format!(
+                "ProxyCommand={}",
+                proxy_command(proxy, host.id)?
+            )));
+        }
         for variable in &host.environment {
             let value = variable.value.replace(['\r', '\n'], " ");
             let quoted = value.replace('\\', "\\\\").replace('"', "\\\"");
@@ -142,14 +248,20 @@ impl SshRuntime {
         Ok(arguments)
     }
 
+    /// Writes the chain config and returns it with the alias of the last hop.
     fn write_jump_host_config(
         &self,
         database: &heminus_storage::Database,
         jump_hosts: &[Host],
         host_key_policy: &str,
-    ) -> Result<(PathBuf, Vec<String>), String> {
+        entry_proxy: Option<(&HostProxy, uuid::Uuid)>,
+        hop_logs: Option<&[PathBuf]>,
+    ) -> Result<(PathBuf, String), String> {
+        let config_path = self
+            .connections
+            .join(format!("{}.conf", uuid::Uuid::new_v4()));
         let mut config = String::new();
-        let mut aliases = Vec::with_capacity(jump_hosts.len());
+        let mut aliases: Vec<String> = Vec::with_capacity(jump_hosts.len());
         for (index, jump_host) in jump_hosts.iter().enumerate() {
             let jump_identity = jump_host
                 .identity_id
@@ -191,6 +303,25 @@ impl SshRuntime {
             config.push_str(&format!(
                 "  StrictHostKeyChecking {host_key_policy}\n  HashKnownHosts yes\n  IdentitiesOnly yes\n  IdentityAgent none\n  IdentityFile none\n  AddKeysToAgent no\n"
             ));
+            // ssh_config takes the rest of the line verbatim for ProxyCommand,
+            // so neither the encoded proxy settings nor the nested SSH command
+            // needs escaping here.
+            if index == 0 {
+                if let Some((proxy, host_id)) = entry_proxy {
+                    config.push_str(&format!(
+                        "  ProxyCommand {}\n",
+                        proxy_command(proxy, host_id)?
+                    ));
+                }
+            } else {
+                let previous = &aliases[index - 1];
+                let hop_command = ssh_hop_command(
+                    &config_path,
+                    previous,
+                    hop_logs.and_then(|logs| logs.get(index - 1)),
+                )?;
+                config.push_str(&format!("  ProxyCommand {hop_command}\n"));
+            }
             match jump_identity.kind {
                 IdentityKind::KeyFile => {
                     let key_path = jump_identity
@@ -222,9 +353,6 @@ impl SshRuntime {
             config.push('\n');
         }
 
-        let config_path = self
-            .connections
-            .join(format!("{}.conf", uuid::Uuid::new_v4()));
         fs::write(&config_path, config).map_err(|error| {
             format!(
                 "Could not write the Heminus SSH connection config {}: {error}",
@@ -232,7 +360,10 @@ impl SshRuntime {
             )
         })?;
         secure_file(&config_path)?;
-        Ok((config_path, aliases))
+        let entry = aliases
+            .pop()
+            .ok_or_else(|| "The connection chain is empty".to_string())?;
+        Ok((config_path, entry))
     }
 
     pub fn known_hosts_path(&self) -> &Path {
@@ -250,13 +381,25 @@ impl SshRuntime {
         }
     }
 
+    /// Creates the private file OpenSSH `-E` appends its connection log to.
+    fn connection_log_path(&self) -> Result<PathBuf, String> {
+        let path = self
+            .connections
+            .join(format!("{}.log", uuid::Uuid::new_v4()));
+        ensure_private_file(&path, b"")?;
+        Ok(path)
+    }
+
     pub fn connection_artifacts(&self, arguments: &[OsString]) -> ConnectionArtifacts {
         let config = arguments.windows(2).find_map(|pair| {
             (pair[0] == "-F" && pair[1] != "none")
                 .then(|| PathBuf::from(&pair[1]))
                 .filter(|path| path.starts_with(&self.connections))
         });
-        ConnectionArtifacts { config }
+        ConnectionArtifacts {
+            config,
+            logs: Vec::new(),
+        }
     }
 }
 
@@ -264,6 +407,50 @@ impl Drop for SshRuntime {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.connections);
     }
+}
+
+/// Builds the nested `ssh -W` command that reaches one hop of a chain.
+///
+/// Each hop logs to its own file so the connecting screen can attribute
+/// progress, and so no hop writes debug output onto the session's terminal.
+fn ssh_hop_command(config: &Path, alias: &str, log: Option<&PathBuf>) -> Result<String, String> {
+    let ssh = crate::platform::ssh_executable()?;
+    let ssh = quoted_command_word(&ssh.to_string_lossy())?;
+    let config = quoted_command_word(&config.to_string_lossy())?;
+    let logging = match log {
+        Some(log) => format!(" -o LogLevel=DEBUG1 -E {}", quoted_command_word(&log.to_string_lossy())?),
+        None => String::new(),
+    };
+    Ok(format!("{ssh} -F {config}{logging} -W \"[%h]:%p\" {alias}"))
+}
+
+/// Wraps a path for the shell OpenSSH runs `ProxyCommand` through.
+///
+/// Double quotes work in both `/bin/sh` and `cmd.exe`; a path that contains one
+/// cannot be expressed safely, so it is rejected rather than mis-quoted.
+fn quoted_command_word(value: &str) -> Result<String, String> {
+    if value.contains(['"', '\r', '\n']) {
+        return Err(format!(
+            "Heminus cannot build an SSH command from a path containing quotes: {value}"
+        ));
+    }
+    Ok(format!("\"{value}\""))
+}
+
+/// Builds the `ProxyCommand` that re-executes Heminus as a proxy client.
+///
+/// The settings travel as one base64url token so no quoting, password, or
+/// shell metacharacter ever reaches the command line.
+fn proxy_command(proxy: &HostProxy, host_id: uuid::Uuid) -> Result<String, String> {
+    proxy.validate().map_err(|error| error.to_string())?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not resolve the Heminus executable: {error}"))?;
+    let executable = quoted_command_word(&executable.to_string_lossy())?;
+    let spec = crate::proxy::ProxySpec::from_host_proxy(proxy, host_id).encode()?;
+    Ok(format!(
+        "{executable} {} {spec} %h %p",
+        crate::proxy::connect_flag()
+    ))
 }
 
 fn push_config_value(config: &mut String, name: &str, value: &str) -> Result<(), String> {
@@ -389,12 +576,19 @@ mod tests {
             .expect("jump-host config should be readable")
     }
 
+    fn proxy_command_argument(arguments: &[String]) -> &str {
+        arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("ProxyCommand="))
+            .expect("a chained host should reach its entry hop through a command")
+    }
+
     #[test]
     fn runtime_uses_only_app_private_ssh_files() {
         let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
         let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
         let arguments = runtime
-            .arguments()
+            .interactive_arguments(HostKeyPolicy::Ask)
             .into_iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
@@ -414,7 +608,7 @@ mod tests {
         let database = heminus_storage::Database::in_memory().unwrap();
         let host = Host::new("Server", "192.0.2.20", "deploy");
         let host_arguments = runtime
-            .host_arguments(&database, &host)
+            .host_arguments(&database, &host, HostKeyPolicy::Ask)
             .unwrap()
             .into_iter()
             .map(|value| value.to_string_lossy().into_owned())
@@ -453,7 +647,7 @@ mod tests {
         let mut target = Host::new("Private node", "10.0.0.20", "deploy");
         target.jump_host_ids = vec![jump_host.id];
 
-        let arguments = runtime.host_arguments(&database, &target).unwrap();
+        let arguments = runtime.host_arguments(&database, &target, HostKeyPolicy::Ask).unwrap();
         let artifacts = runtime.connection_artifacts(&arguments);
         let config = artifacts.config.clone().expect("connection config");
         assert!(config.is_file());
@@ -511,13 +705,13 @@ mod tests {
         });
 
         let arguments = runtime
-            .host_arguments(&database, &target)
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
             .unwrap()
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(arguments.contains(&"SetEnv=LANG=\"en_US.UTF-8\"".to_string()));
-        assert!(arguments.contains(&"ProxyJump=heminus-jump-1".to_string()));
+        assert!(proxy_command_argument(&arguments).contains("heminus-jump-1"));
         let config = jump_config(&arguments);
         assert!(config.contains("Host heminus-jump-1"));
         assert!(config.contains("HostName \"192.0.2.10\""));
@@ -564,12 +758,12 @@ mod tests {
         target.jump_host_ids = vec![jump_host.id];
 
         let arguments = runtime
-            .host_arguments(&database, &target)
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
             .unwrap()
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(arguments.contains(&"ProxyJump=heminus-jump-1".to_string()));
+        assert!(proxy_command_argument(&arguments).contains("heminus-jump-1"));
         let config = jump_config(&arguments);
         assert!(config.contains("BatchMode no"));
         assert!(config.contains("PreferredAuthentications keyboard-interactive,password"));
@@ -602,18 +796,19 @@ mod tests {
         let mut target = Host::new("Private node", "10.0.1.20", "deploy");
         target.jump_host_ids = vec![first_jump.id, second_jump.id];
         let arguments = runtime
-            .host_arguments(&database, &target)
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
             .unwrap()
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(arguments.contains(&"ProxyJump=heminus-jump-1,heminus-jump-2".to_string()));
+        assert!(proxy_command_argument(&arguments).contains("heminus-jump-2"));
         let config = jump_config(&arguments);
         let first_position = config.find("HostName \"192.0.2.10\"").unwrap();
         let second_position = config.find("HostName \"10.0.0.10\"").unwrap();
         assert!(first_position < second_position);
         assert!(config.contains("PreferredAuthentications keyboard-interactive,password"));
-        assert!(!config.contains("ProxyCommand"));
+        // The second hop reaches the first through a nested SSH command.
+        assert!(config.contains("-W \"[%h]:%p\" heminus-jump-1"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -635,7 +830,7 @@ mod tests {
         target.jump_host_ids = vec![jump_host.id];
 
         let arguments = runtime
-            .host_arguments(&database, &target)
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
             .unwrap()
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
@@ -644,6 +839,168 @@ mod tests {
         assert!(config.contains("BatchMode no"));
         assert!(config.contains("IdentityFile"));
         assert!(config.contains("gateway\""));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_direct_host_tunnels_through_its_proxy_command() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let mut host = Host::new("Behind a proxy", "10.0.0.20", "deploy");
+        host.proxy = Some(heminus_domain::HostProxy {
+            kind: heminus_domain::ProxyKind::Socks5,
+            hostname: "proxy.example".into(),
+            port: 1080,
+            username: Some("agent".into()),
+            secret_stored: true,
+        });
+
+        let arguments = runtime
+            .host_arguments(&database, &host, HostKeyPolicy::Ask)
+            .unwrap()
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let proxy_command = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("ProxyCommand="))
+            .expect("a direct host should proxy through Heminus");
+        assert!(proxy_command.contains(crate::proxy::connect_flag()));
+        assert!(proxy_command.ends_with(" %h %p"));
+        assert!(!proxy_command.contains("proxy.example"), "settings stay encoded");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_chained_host_tunnels_only_its_entry_jump_host() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let mut identity = Identity::new("Gateway password", IdentityKind::Password);
+        identity.secret_stored = true;
+        database.save_identity(&identity).unwrap();
+        let mut first_jump = Host::new("Edge", "192.0.2.10", "edge");
+        first_jump.identity_id = Some(identity.id);
+        database.save_host(&first_jump).unwrap();
+        let mut second_jump = Host::new("Relay", "10.0.0.10", "relay");
+        second_jump.identity_id = Some(identity.id);
+        database.save_host(&second_jump).unwrap();
+        let mut target = Host::new("Private node", "10.0.1.20", "deploy");
+        target.jump_host_ids = vec![first_jump.id, second_jump.id];
+        target.proxy = Some(heminus_domain::HostProxy {
+            kind: heminus_domain::ProxyKind::Http,
+            hostname: "proxy.example".into(),
+            port: 3128,
+            username: None,
+            secret_stored: false,
+        });
+
+        let arguments = runtime
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
+            .unwrap()
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let entry = proxy_command_argument(&arguments);
+        assert!(
+            entry.contains("heminus-jump-2") && !entry.contains(crate::proxy::connect_flag()),
+            "the target should reach the last hop over SSH, not the proxy: {entry}"
+        );
+        let config = jump_config(&arguments);
+        let first = config.find("Host heminus-jump-1").unwrap();
+        let second = config.find("Host heminus-jump-2").unwrap();
+        let proxy = config
+            .find(crate::proxy::connect_flag())
+            .expect("the entry hop tunnels through the proxy");
+        assert!(
+            (first..second).contains(&proxy),
+            "only the entry jump host should tunnel through the proxy"
+        );
+        assert_eq!(config.matches(crate::proxy::connect_flag()).count(), 1);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Guards the bug where OpenSSH's own `ProxyJump` expansion inherited `-v`
+    /// and sprayed each hop's debug output over the session's terminal.
+    #[test]
+    fn every_hop_of_a_chain_logs_to_its_own_file() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let database = heminus_storage::Database::in_memory().unwrap();
+        let mut identity = Identity::new("Chain password", IdentityKind::Password);
+        identity.secret_stored = true;
+        database.save_identity(&identity).unwrap();
+        let mut edge = Host::new("Edge", "192.0.2.10", "edge");
+        edge.identity_id = Some(identity.id);
+        database.save_host(&edge).unwrap();
+        let mut relay = Host::new("Relay", "10.0.0.10", "relay");
+        relay.identity_id = Some(identity.id);
+        database.save_host(&relay).unwrap();
+        let mut target = Host::new("Private node", "10.0.1.20", "deploy");
+        target.jump_host_ids = vec![edge.id, relay.id];
+
+        let (arguments, hops) = runtime
+            .interactive_connection(&database, &target, HostKeyPolicy::AcceptNew)
+            .unwrap();
+        assert_eq!(
+            hops.iter().map(|hop| hop.label.as_str()).collect::<Vec<_>>(),
+            ["Edge", "Relay", "Private node"],
+            "the chain runs entry-first and ends at the host itself"
+        );
+        let logs = hops.iter().map(|hop| &hop.log).collect::<std::collections::HashSet<_>>();
+        assert_eq!(logs.len(), 3, "each hop needs a log of its own");
+        assert!(hops.iter().all(|hop| hop.log.is_file()));
+
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let config = jump_config(&arguments);
+        // Relay is reached by a nested SSH that logs to Edge's file...
+        assert!(config.contains(&format!("-E \"{}\"", hops[0].log.display())));
+        // ...and the outermost ProxyCommand reaches Relay, logging to its file.
+        let entry = proxy_command_argument(&arguments);
+        assert!(entry.contains("heminus-jump-2"), "{entry}");
+        assert!(entry.contains(&format!("-E \"{}\"", hops[1].log.display())), "{entry}");
+        // The host's own log is left for the caller to pass as its -E.
+        assert!(!config.contains(&hops[2].log.display().to_string()));
+        assert!(
+            !arguments.iter().any(|argument| argument == "-v"),
+            "verbosity must not be inherited by the nested hops"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forced_askpass_pins_unknown_host_keys_instead_of_asking() {
+        assert_eq!(HostKeyPolicy::for_forced_askpass(true).as_str(), "accept-new");
+        assert_eq!(HostKeyPolicy::for_forced_askpass(false).as_str(), "ask");
+
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let arguments = runtime
+            .interactive_arguments(HostKeyPolicy::AcceptNew)
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"StrictHostKeyChecking=accept-new".to_string()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connection_artifacts_remove_the_session_log_too() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+        let log = runtime.connection_log_path().unwrap();
+        assert!(log.is_file());
+        drop(ConnectionArtifacts::default().with_logs([log.clone()]));
+        assert!(!log.exists());
 
         fs::remove_dir_all(root).unwrap();
     }

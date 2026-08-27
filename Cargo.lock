@@ -1912,6 +1912,7 @@ dependencies = [
  "heminus-storage",
  "hmac",
  "keyring",
+ "libc",
  "netstat2",
  "open",
  "portable-pty",

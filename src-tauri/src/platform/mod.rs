@@ -21,6 +21,17 @@ pub struct LocalShell {
     pub arguments: Vec<OsString>,
 }
 
+/// A process still running inside a terminal session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProcess {
+    pub pid: u32,
+    pub name: String,
+    pub command: String,
+    /// The shell or SSH client Heminus itself started.
+    pub leader: bool,
+}
+
 pub struct ProcessSupervisor {
     inner: implementation::ProcessSupervisor,
 }
@@ -30,8 +41,37 @@ impl ProcessSupervisor {
         implementation::ProcessSupervisor::attach(pid).map(|inner| Self { inner })
     }
 
+    /// Everything the session still owns, leader first.
+    pub fn processes(&self) -> Vec<SessionProcess> {
+        self.inner.processes()
+    }
+
+    /// Processes the session started that outlive closing the tab.
+    ///
+    /// Heminus's own transport helpers — the proxy connector and the askpass
+    /// responder, both re-executions of this binary — are part of the plumbing,
+    /// not work the person started, so they are never offered up for review.
+    pub fn background_processes(&self) -> Vec<SessionProcess> {
+        let own_executable = std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.processes()
+            .into_iter()
+            .filter(|process| !process.leader)
+            .filter(|process| {
+                own_executable
+                    .as_deref()
+                    .is_none_or(|executable| !process.command.contains(executable))
+            })
+            .collect()
+    }
+
     pub fn terminate(&self) {
         self.inner.terminate();
+    }
+
+    pub fn terminate_processes(&self, pids: &[u32]) -> Result<(), String> {
+        self.inner.terminate_processes(pids)
     }
 }
 
@@ -198,6 +238,63 @@ mod tests {
         assert!(join_local_path(&home, "../outside").is_err());
         assert!(join_local_path(&home, "folder/name").is_err());
         assert!(join_local_path(&home, "folder\\name").is_err());
+    }
+
+    /// The bug this guards: killing only the PTY child left `npm run dev` and
+    /// friends running after the tab closed.
+    #[test]
+    #[cfg(unix)]
+    fn unix_supervisor_sees_and_stops_everything_the_session_started() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::time::{Duration, Instant};
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut command = CommandBuilder::new("/bin/sh");
+        // The detached subshell is reparented to init, so a parent-tree walk
+        // would lose it; only the session scan still finds it.
+        command.arg("-c");
+        command.arg("(sleep 120 &) ; sleep 120");
+        let mut child = pair.slave.spawn_command(command).expect("shell");
+        drop(pair.slave);
+        let supervisor = ProcessSupervisor::attach(child.process_id()).expect("supervisor");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut background = supervisor.background_processes();
+        while background.len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            background = supervisor.background_processes();
+        }
+        assert!(
+            background.iter().filter(|p| p.name.contains("sleep")).count() >= 2,
+            "expected both sleeps in the session, saw {background:?}"
+        );
+        assert!(
+            supervisor.processes().iter().any(|process| process.leader),
+            "the shell itself should be reported as the leader"
+        );
+
+        supervisor.terminate();
+        assert!(
+            supervisor.background_processes().is_empty(),
+            "closing the tab must not leave background processes behind"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_supervisor_refuses_pids_outside_its_session() {
+        let supervisor = ProcessSupervisor::attach(Some(std::process::id())).expect("supervisor");
+        let error = supervisor.terminate_processes(&[1]).unwrap_err();
+        assert!(error.contains("no longer part of this terminal session"), "{error}");
     }
 
     #[test]

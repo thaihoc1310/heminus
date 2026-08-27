@@ -6,18 +6,23 @@ use std::process::{Command, Stdio};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    CREATE_NO_WINDOW, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 
-use super::{LocalShell, executable_from_path};
+use super::{LocalShell, SessionProcess, executable_from_path};
+
+/// Room for the job's process list; a terminal session never grows this large.
+const MAX_TRACKED_PROCESSES: usize = 1024;
 
 pub struct ProcessSupervisor {
     job: HANDLE,
+    leader: Option<u32>,
 }
 
 unsafe impl Send for ProcessSupervisor {}
@@ -64,8 +69,44 @@ impl ProcessSupervisor {
                     "Could not assign child process {pid} to its job: {error}"
                 ));
             }
-            Ok(Self { job })
+            Ok(Self {
+                job,
+                leader: Some(pid),
+            })
         }
+    }
+
+    pub fn processes(&self) -> Vec<SessionProcess> {
+        let own = std::process::id();
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        self.job_process_ids()
+            .into_iter()
+            .filter(|pid| *pid != own)
+            .map(|pid| {
+                let process = system.process(sysinfo::Pid::from_u32(pid));
+                let name = process
+                    .map(|process| process.name().to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("Process {pid}"));
+                let command = process
+                    .map(|process| {
+                        process
+                            .cmd()
+                            .iter()
+                            .map(|part| part.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .filter(|value: &String| !value.trim().is_empty())
+                    .unwrap_or_else(|| name.clone());
+                SessionProcess {
+                    pid,
+                    name,
+                    command,
+                    leader: Some(pid) == self.leader,
+                }
+            })
+            .collect()
     }
 
     pub fn terminate(&self) {
@@ -73,6 +114,53 @@ impl ProcessSupervisor {
             unsafe {
                 TerminateJobObject(self.job, 1);
             }
+        }
+    }
+
+    pub fn terminate_processes(&self, pids: &[u32]) -> Result<(), String> {
+        let members = self.job_process_ids();
+        if let Some(pid) = pids.iter().find(|pid| !members.contains(pid)) {
+            return Err(format!(
+                "Process {pid} is no longer part of this terminal session"
+            ));
+        }
+        let own = std::process::id();
+        for pid in pids.iter().filter(|pid| **pid != own) {
+            unsafe {
+                let process = OpenProcess(PROCESS_TERMINATE, 0, *pid);
+                if !process.is_null() {
+                    TerminateProcess(process, 1);
+                    CloseHandle(process);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn job_process_ids(&self) -> Vec<u32> {
+        if self.job.is_null() {
+            return Vec::new();
+        }
+        // The variable-length ID array follows the fixed header, so over-allocate
+        // a single buffer and read the reported count back out of it.
+        let header = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+        let capacity = header + MAX_TRACKED_PROCESSES * std::mem::size_of::<usize>();
+        let mut buffer = vec![0_u8; capacity];
+        unsafe {
+            if QueryInformationJobObject(
+                self.job,
+                JobObjectBasicProcessIdList,
+                buffer.as_mut_ptr().cast(),
+                capacity as u32,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return self.leader.into_iter().collect();
+            }
+            let list = &*(buffer.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
+            let count = (list.NumberOfProcessIdsInList as usize).min(MAX_TRACKED_PROCESSES);
+            let identifiers = std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count);
+            identifiers.iter().map(|pid| *pid as u32).collect()
         }
     }
 }

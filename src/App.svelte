@@ -7,6 +7,7 @@
   import CustomSelect from "./components/CustomSelect.svelte";
   import Icon from "./components/Icon.svelte";
   import HostIcon from "./components/HostIcon.svelte";
+  import TerminalCloseDialog from "./features/terminal/TerminalCloseDialog.svelte";
   import TerminalToolsSidebar from "./features/terminal/TerminalToolsSidebar.svelte";
   import { confirmDialog, promptDialog } from "./lib/dialog";
   import {
@@ -25,9 +26,11 @@
   import {
     announceNativeTerminalTabDrag,
     announceNativeTerminalTabDragEnd,
+    closeTerminal,
     createDetachedTerminalWindow,
     deleteGroup,
     deleteHost,
+    deleteHostProxySecret,
     listHosts,
     listIdentities,
     listGroups,
@@ -36,11 +39,14 @@
     listenForNativeTerminalTabDrags,
     listenForSnippetChanges,
     listenForTerminalTabTransfers,
+    killTerminalProcesses,
     saveHost,
     saveGroup,
     saveIdentity,
+    setHostProxySecret,
     setIdentitySecret,
     takeDetachedTerminalPayload,
+    terminalProcesses,
     terminalTabPointerState,
     transferTerminalTab,
     renameTerminalSession,
@@ -50,13 +56,17 @@
   import type {
     DetachedWindowPayload,
     Host,
+    HostProxy,
     Identity,
     MainPage,
+    ProxyKind,
+    SessionProcess,
     TerminalAppearance,
     TerminalCommandRequest,
     VaultGroup,
     WorkspaceLayout
   } from "./lib/types";
+  import { proxyDefaultPort, proxyKindLabel } from "./lib/types";
   import {
     type DropZone,
     type SplitDivider,
@@ -123,7 +133,7 @@
     resumeSessionId: string | null;
     initialCwd?: string | null;
   }
-  type HostSubeditor = "environment" | "chain" | "theme";
+  type HostSubeditor = "environment" | "chain" | "proxy" | "theme";
   type WindowResizeDirection =
     | "East"
     | "North"
@@ -167,6 +177,11 @@
   let themeSubeditorBaseline = $state<TerminalAppearance | null>(null);
   let environmentDraft = $state<Array<{ name: string; value: string }>>([]);
   let jumpHostDraft = $state<string[]>([]);
+  let proxyDraft = $state<HostProxy | null>(null);
+  let proxyPassword = $state("");
+  let showProxyPassword = $state(false);
+  /** Set when the editor removes a proxy, so its keyring entry goes with it. */
+  let proxySecretCleared = $state(false);
   let chainPickerOpen = $state(false);
   let hostContextMenu = $state<{ host: Host; x: number; y: number } | null>(null);
   let bulkHostContextMenu = $state<{ x: number; y: number } | null>(null);
@@ -211,6 +226,17 @@
   let terminalHistoryVersion = $state(0);
   let terminalSnippetVersion = $state(0);
   let terminalCommandRequests = $state<Record<string, TerminalCommandRequest>>({});
+  /** Bumped per pane by "Start over" so the pane remounts with a fresh session. */
+  let terminalRetryTokens = $state<Record<string, number>>({});
+  let terminalCloseRequest = $state<{
+    paneId: string;
+    sessionId: string;
+    title: string;
+    processes: SessionProcess[];
+    busy: boolean;
+    error: string;
+    settle: (closed: boolean) => void;
+  } | null>(null);
   let topTabOrder = $state<string[]>(detachedMode ? [] : ["vault", "sftp"]);
   let activeTerminalId = $state<string | null>(null);
   let terminalSessionIds = $state<Record<string, string>>({});
@@ -759,8 +785,11 @@
     if (!(await canLeaveHostEditor())) return;
     const now = new Date().toISOString();
     try {
+      const copy = cloneHost(host);
+      // Proxy passwords are keyed by host, so the copy starts without one.
+      if (copy.proxy) copy.proxy.secret_stored = false;
       const duplicate = await saveHost({
-        ...cloneHost(host),
+        ...copy,
         id: crypto.randomUUID(),
         label: `${host.label} copy`,
         created_at: now,
@@ -813,6 +842,7 @@
       identity_id: null,
       jump_host_ids: [],
       environment: [],
+      proxy: null,
       terminal_theme: "heminus_dark",
       terminal_font_size: 14,
       created_at: now,
@@ -822,6 +852,10 @@
     credentialMode = "password";
     hostPassword = "";
     showHostPassword = false;
+    proxyDraft = null;
+    proxyPassword = "";
+    showProxyPassword = false;
+    proxySecretCleared = false;
     hostSubeditor = null;
     inspectorOpen = true;
     hostEditorMenuOpen = false;
@@ -842,7 +876,11 @@
       await persistSelectedCredential();
       selected.group_name = selected.group_id ? groupPath(selected.group_id) : null;
       selected.updated_at = new Date().toISOString();
+      // The proxy row has to advertise its stored password before it is
+      // written, or the connector would never look the password up.
+      if (selected.proxy && proxyPassword) selected.proxy.secret_stored = true;
       const saved = await saveHost(selected);
+      await persistProxyCredential(saved);
       selected = cloneHost(saved);
       terminalTabs = terminalTabs.map((tab) =>
         tab.host?.id === saved.id ? { ...tab, host: cloneHost(saved) } : tab
@@ -914,6 +952,64 @@
     themeSubeditorBaseline = null;
   }
 
+  function openProxyEditor() {
+    if (!selected) return;
+    proxyDraft = selected.proxy
+      ? { ...selected.proxy }
+      : {
+          kind: "http",
+          hostname: "",
+          port: proxyDefaultPort.http,
+          username: null,
+          secret_stored: false
+        };
+    proxyPassword = "";
+    showProxyPassword = false;
+    hostSubeditorClosing = false;
+    hostSubeditor = "proxy";
+    hostSubeditorBaseline = draftSnapshot({ proxy: proxyDraft, password: "" });
+    themeSubeditorBaseline = null;
+  }
+
+  function setProxyKind(kind: ProxyKind) {
+    if (!proxyDraft || proxyDraft.kind === kind) return;
+    // Only move the port when it still holds the other type's default.
+    const usedDefault = proxyDraft.port === proxyDefaultPort[proxyDraft.kind];
+    proxyDraft.kind = kind;
+    if (usedDefault) proxyDraft.port = proxyDefaultPort[kind];
+  }
+
+  function removeProxyDraft() {
+    proxyDraft = null;
+    proxyPassword = "";
+    showProxyPassword = false;
+  }
+
+  /** Drops the saved proxy password while keeping the proxy itself. */
+  function clearProxySecret() {
+    if (!proxyDraft) return;
+    proxyDraft.secret_stored = false;
+    proxyPassword = "";
+    proxySecretCleared = true;
+  }
+
+  function proxyDraftValid(): boolean {
+    if (!proxyDraft) return true;
+    return (
+      proxyDraft.hostname.trim().length > 0 &&
+      !/\s/.test(proxyDraft.hostname.trim()) &&
+      Number.isInteger(proxyDraft.port) &&
+      proxyDraft.port >= 1 &&
+      proxyDraft.port <= 65535
+    );
+  }
+
+  function proxySummary(): string {
+    const proxy = selected?.proxy;
+    if (!proxy) return "Direct";
+    return `${proxyKindLabel[proxy.kind]} ${proxy.hostname}:${proxy.port}`;
+  }
+
   function openThemeEditor() {
     if (!selected) return;
     hostSubeditorClosing = false;
@@ -928,12 +1024,14 @@
   function hostSubeditorTitle(): string {
     if (hostSubeditor === "environment") return "Environment Variables";
     if (hostSubeditor === "chain") return "Edit Chain";
+    if (hostSubeditor === "proxy") return selected?.proxy ? "Proxy" : "New Proxy";
     return "Select Color Theme";
   }
 
   function hostSubeditorState(): unknown {
     if (hostSubeditor === "environment") return environmentDraft;
     if (hostSubeditor === "chain") return jumpHostDraft;
+    if (hostSubeditor === "proxy") return { proxy: proxyDraft, password: proxyPassword };
     if (hostSubeditor === "theme" && selected) {
       return { theme: selected.terminal_theme, fontSize: selected.terminal_font_size };
     }
@@ -952,6 +1050,17 @@
       selected.environment = environmentDraft.map((variable) => ({ ...variable }));
     }
     if (save && hostSubeditor === "chain") selected.jump_host_ids = [...jumpHostDraft];
+    if (save && hostSubeditor === "proxy") {
+      if (!proxyDraftValid()) return;
+      if (selected.proxy && !proxyDraft) proxySecretCleared = true;
+      selected.proxy = proxyDraft
+        ? {
+            ...proxyDraft,
+            hostname: proxyDraft.hostname.trim(),
+            username: proxyDraft.username?.trim() || null
+          }
+        : null;
+    }
     if (!save && hostSubeditor === "theme" && themeSubeditorBaseline) {
       selected.terminal_theme = themeSubeditorBaseline.theme;
       selected.terminal_font_size = themeSubeditorBaseline.fontSize;
@@ -964,6 +1073,7 @@
       hostSubeditorBaseline = null;
       themeSubeditorBaseline = null;
       chainPickerOpen = false;
+      showProxyPassword = false;
     }, 180);
   }
 
@@ -1039,11 +1149,29 @@
     return "Legacy identity · unsupported";
   }
 
+  /**
+   * The password box only earns its place when there is a password to type.
+   *
+   * Picking a saved identity means the secret already lives in the keyring, and
+   * Heminus never reads it back, so an empty box would say nothing. It reappears
+   * for an identity whose password was never stored, which is the one case where
+   * the host cannot connect without it.
+   */
+  function hostPasswordFieldVisible(): boolean {
+    if (!selected?.identity_id) return true;
+    const identity = identities.find((candidate) => candidate.id === selected?.identity_id);
+    return identity?.kind === "password" && !identity.secret_stored;
+  }
+
   function prepareCredentialEditor(host: Host) {
     const identity = identities.find((candidate) => candidate.id === host.identity_id);
     credentialMode = identity?.kind === "key_file" ? "key" : "password";
     hostPassword = "";
     showHostPassword = false;
+    proxyDraft = null;
+    proxyPassword = "";
+    showProxyPassword = false;
+    proxySecretCleared = false;
   }
 
   function setCredentialMode(mode: "password" | "key") {
@@ -1087,6 +1215,30 @@
     if (hostPassword) {
       await setIdentitySecret(passwordIdentity.id, hostPassword);
       hostPassword = "";
+    }
+  }
+
+  /**
+   * Keeps the proxy password in the OS keyring in step with the saved host.
+   *
+   * It runs after the host row exists, because the backend refuses to store a
+   * password for a proxy it cannot find.
+   */
+  async function persistProxyCredential(saved: Host) {
+    if (proxySecretCleared) {
+      proxySecretCleared = false;
+      await deleteHostProxySecret(saved.id);
+    }
+    if (!saved.proxy || !proxyPassword) return;
+    try {
+      await setHostProxySecret(saved.id, proxyPassword);
+      proxyPassword = "";
+    } catch (cause) {
+      // Never leave the host claiming a password the keyring does not hold.
+      saved.proxy.secret_stored = false;
+      if (selected?.proxy) selected.proxy.secret_stored = false;
+      await saveHost(saved);
+      throw cause;
     }
   }
 
@@ -1865,6 +2017,15 @@
     for (const id of [...workspace.paneIds]) closeTerminalTab(id);
   }
 
+  /** Closes every pane of a workspace, asking about each one that is busy. */
+  async function requestCloseWorkspace(workspaceId = activeWorkspaceId) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return;
+    for (const id of [...workspace.paneIds]) {
+      if (!(await requestCloseTerminalTab(id))) return;
+    }
+  }
+
   function focusWorkspacePane(id: string) {
     const workspace = workspaceForPane(id);
     if (!workspace) return;
@@ -1904,7 +2065,100 @@
     terminalSessionIds = remaining;
     const { [id]: _request, ...remainingRequests } = terminalCommandRequests;
     terminalCommandRequests = remainingRequests;
+    const { [id]: _retry, ...remainingRetries } = terminalRetryTokens;
+    terminalRetryTokens = remainingRetries;
+    // The pane is gone, so a prompt still open for it has nothing left to ask.
+    if (terminalCloseRequest?.paneId === id) settleTerminalCloseRequest(true);
     if (terminalTabs.length === 0) closeTerminalTools();
+  }
+
+  /**
+   * Closes a tab the way the person asked for.
+   *
+   * A terminal that still owns background processes asks first, because
+   * closing it stops everything the shell started.
+   */
+  async function requestCloseTerminalTab(id: string): Promise<boolean> {
+    if (terminalCloseRequest) return false;
+    const tab = terminalTabs.find((candidate) => candidate.id === id);
+    const sessionId = terminalSessionIds[id];
+    if (!tab || !sessionId) {
+      closeTerminalTab(id);
+      return true;
+    }
+    let processes: SessionProcess[] = [];
+    try {
+      processes = await terminalProcesses(sessionId);
+    } catch {
+      // A session that cannot be inspected is closed the usual way.
+    }
+    if (processes.length === 0) {
+      closeTerminalTab(id);
+      return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      terminalCloseRequest = {
+        paneId: id,
+        sessionId,
+        title: tab.title,
+        processes,
+        busy: false,
+        error: "",
+        settle: resolve
+      };
+    });
+  }
+
+  function settleTerminalCloseRequest(closed: boolean) {
+    const request = terminalCloseRequest;
+    if (!request) return;
+    terminalCloseRequest = null;
+    request.settle(closed);
+  }
+
+  async function finishTerminalCloseRequest(killProcesses: boolean) {
+    const request = terminalCloseRequest;
+    if (!request || request.busy) return;
+    request.busy = true;
+    request.error = "";
+    try {
+      // Closing here decides the fate of the processes; the pane teardown then
+      // finds the session already gone and leaves them alone.
+      await closeTerminal(request.sessionId, killProcesses);
+      settleTerminalCloseRequest(true);
+      closeTerminalTab(request.paneId);
+    } catch (cause) {
+      request.error = cause instanceof Error ? cause.message : String(cause);
+      request.busy = false;
+    }
+  }
+
+  /** Stops the chosen processes, then closes the tab and leaves the rest running. */
+  async function stopTerminalCloseProcesses(pids: number[]) {
+    const request = terminalCloseRequest;
+    if (!request || request.busy || pids.length === 0) return;
+    request.busy = true;
+    request.error = "";
+    try {
+      await killTerminalProcesses(request.sessionId, pids);
+    } catch (cause) {
+      request.error = cause instanceof Error ? cause.message : String(cause);
+      request.busy = false;
+      return;
+    }
+    request.busy = false;
+    await finishTerminalCloseRequest(false);
+  }
+
+  function retryTerminalPane(id: string) {
+    const tab = terminalTabs.find((candidate) => candidate.id === id);
+    if (!tab) return;
+    // A retry must not re-attach to the session that just failed.
+    if (tab.resumeSessionId) tab.resumeSessionId = null;
+    terminalRetryTokens = {
+      ...terminalRetryTokens,
+      [id]: (terminalRetryTokens[id] ?? 0) + 1
+    };
   }
 
   function standaloneTerminalTabs(): TerminalTab[] {
@@ -3210,7 +3464,8 @@
       ...host,
       tags: [...host.tags],
       jump_host_ids: [...host.jump_host_ids],
-      environment: host.environment.map((variable) => ({ ...variable }))
+      environment: host.environment.map((variable) => ({ ...variable })),
+      proxy: host.proxy ? { ...host.proxy } : null
     };
   }
 
@@ -3384,7 +3639,7 @@
             onclick={() => {
               if (!suppressTopTabClick) activateWorkspace(workspace.id);
             }}
-            onauxclick={(event) => event.button === 1 && closeWorkspace(workspace.id)}
+            onauxclick={(event) => event.button === 1 && void requestCloseWorkspace(workspace.id)}
           >
             <Icon name="grid" /><span>{workspace.name || "Workspace"}</span>
           </button>
@@ -3393,7 +3648,7 @@
             title="Close workspace"
             onclick={(event) => {
               event.stopPropagation();
-              closeWorkspace(workspace.id);
+              void requestCloseWorkspace(workspace.id);
             }}
           ><Icon name="close" size={13} /></button>
         </div>
@@ -3427,7 +3682,7 @@
               if (!suppressTopTabClick) activateStandaloneTerminal(tab.id);
             }}
             onauxclick={(event) => {
-              if (event.button === 1) closeTerminalTab(tab.id);
+              if (event.button === 1) void requestCloseTerminalTab(tab.id);
             }}
           >
             <HostIcon hostId={tab.host?.id} /><span>{tab.title}</span>
@@ -3437,7 +3692,7 @@
             title={`Close ${tab.title}`}
             onclick={(event) => {
               event.stopPropagation();
-              closeTerminalTab(tab.id);
+              void requestCloseTerminalTab(tab.id);
             }}
           ><Icon name="close" size={13} /></button>
         </div>
@@ -3540,6 +3795,7 @@
               style={terminalPaneStyle(tab.id)}
             >
               {#if TerminalComponent}
+                {#key terminalRetryTokens[tab.id] ?? 0}
                 <TerminalComponent
                   paneId={tab.id}
                   title={tab.title}
@@ -3552,7 +3808,7 @@
                   commandRequest={terminalCommandRequests[tab.id] ?? null}
                   workspace={visibleWorkspace?.paneIds.includes(tab.id) ?? false}
                   broadcast={visibleWorkspace?.broadcastPaneIds.includes(tab.id) ?? false}
-                  onClose={() => closeTerminalTab(tab.id)}
+                  onClose={() => void requestCloseTerminalTab(tab.id)}
                   onBroadcast={() => toggleBroadcast(tab.id)}
                   onFocus={() => focusWorkspacePane(tab.id)}
                   headerDraggable={!usesTauriNativeTerminalDrag}
@@ -3572,7 +3828,9 @@
                   onActivate={activateTerminalPane}
                   onCommandRecorded={commandHistoryRecorded}
                   shouldPreserveSession={() => detachingPaneIds.includes(tab.id)}
+                  onRetry={() => retryTerminalPane(tab.id)}
                 />
+                {/key}
               {:else}
                 <div class="terminal-runtime-state" class:error={Boolean(terminalLoadError)}>
                   <Icon name="terminal" size={25} />
@@ -4107,7 +4365,7 @@
                     }}
                   />
                 </div>
-                {#if credentialMode === "password"}
+                {#if credentialMode === "password" && hostPasswordFieldVisible()}
                   <div class="editor-control with-icon password-control">
                     <Icon name="key" size={16} />
                     <input
@@ -4116,9 +4374,7 @@
                       type={showHostPassword ? "text" : "password"}
                       autocomplete="new-password"
                       bind:value={hostPassword}
-                      placeholder={identities.find((identity) => identity.id === selected?.identity_id)?.secret_stored
-                        ? "Stored · enter to replace"
-                        : "Password"}
+                      placeholder="Password"
                     />
                     <button
                       class="password-visibility"
@@ -4141,6 +4397,13 @@
                   <span class="option-icon"><Icon name="forward" size={17} /></span>
                   <span><strong>Host chain</strong><small>Connect through ordered jump hosts</small></span>
                   <span class="option-value">{chainSummary()}</span>
+                  <Icon name="chevron-right" size={16} />
+                </button>
+
+                <button class="option-row option-link" onclick={openProxyEditor}>
+                  <span class="option-icon"><Icon name="forward" size={17} /></span>
+                  <span><strong>Proxy</strong><small>Tunnel SSH through an HTTP or SOCKS5 proxy</small></span>
+                  <span class="option-value">{proxySummary()}</span>
                   <Icon name="chevron-right" size={16} />
                 </button>
 
@@ -4211,7 +4474,8 @@
                   {#if hostSubeditor !== "theme"}
                     <button
                       class="subeditor-save"
-                      disabled={hostSubeditor === "environment" && !environmentDraftValid()}
+                      disabled={(hostSubeditor === "environment" && !environmentDraftValid())
+                        || (hostSubeditor === "proxy" && !proxyDraftValid())}
                       onclick={() => closeHostSubeditor(true)}
                     >Save</button>
                   {:else}
@@ -4264,6 +4528,94 @@
                           </section>
                         {/each}
                       </div>
+                    {/if}
+                  {:else if hostSubeditor === "proxy"}
+                    {#if proxyDraft}
+                      <section class="subeditor-card proxy-card">
+                        <div class="proxy-type-row">
+                          <span>Type</span>
+                          <CustomSelect
+                            value={proxyDraft.kind}
+                            options={[
+                              { value: "http", label: proxyKindLabel.http },
+                              { value: "socks5", label: proxyKindLabel.socks5 }
+                            ]}
+                            ariaLabel="Proxy type"
+                            onchange={(value) => setProxyKind(value as ProxyKind)}
+                          />
+                        </div>
+                        <div class="proxy-endpoint-row">
+                          <input
+                            aria-label="Proxy hostname"
+                            bind:value={proxyDraft.hostname}
+                            placeholder="Hostname *"
+                            spellcheck="false"
+                          />
+                          <label class="proxy-port">
+                            <span>Port *</span>
+                            <input
+                              aria-label="Proxy port"
+                              type="number"
+                              min="1"
+                              max="65535"
+                              bind:value={proxyDraft.port}
+                            />
+                          </label>
+                        </div>
+                        <input
+                          aria-label="Proxy username"
+                          value={proxyDraft.username ?? ""}
+                          placeholder="Username"
+                          spellcheck="false"
+                          oninput={(event) => {
+                            if (proxyDraft) proxyDraft.username = event.currentTarget.value || null;
+                          }}
+                        />
+                        <div class="editor-control with-icon password-control proxy-password">
+                          <Icon name="key" size={16} />
+                          <input
+                            aria-label="Proxy password"
+                            type={showProxyPassword ? "text" : "password"}
+                            autocomplete="new-password"
+                            bind:value={proxyPassword}
+                            placeholder={proxyDraft.secret_stored
+                              ? "Stored · enter to replace"
+                              : "Password"}
+                          />
+                          <button
+                            class="password-visibility"
+                            title={showProxyPassword ? "Hide password" : "Show password"}
+                            onclick={() => (showProxyPassword = !showProxyPassword)}
+                          >
+                            <Icon name={showProxyPassword ? "eye-off" : "eye"} size={16} />
+                          </button>
+                        </div>
+                        {#if proxyDraft.secret_stored}
+                          <div class="proxy-stored-row">
+                            <span><Icon name="shield" size={14} /> Password saved in the keyring</span>
+                            <button class="text-button" onclick={clearProxySecret}>Clear</button>
+                          </div>
+                        {/if}
+                        <p class="proxy-hint">
+                          Heminus tunnels the SSH transport itself, so no external
+                          proxy helper is needed. The password is kept in the
+                          operating-system keyring.
+                        </p>
+                      </section>
+                      {#if selected.proxy}
+                        <button class="subeditor-wide-action danger-copy" onclick={removeProxyDraft}>
+                          <Icon name="trash" size={17} /> Remove proxy
+                        </button>
+                      {/if}
+                    {:else}
+                      <section class="subeditor-empty">
+                        <span class="option-icon"><Icon name="forward" size={20} /></span>
+                        <strong>No proxy</strong>
+                        <small>This host connects directly. Save to confirm.</small>
+                      </section>
+                      <button class="subeditor-wide-action" onclick={openProxyEditor}>
+                        <Icon name="plus" size={17} /> Add a proxy
+                      </button>
                     {/if}
                   {:else if hostSubeditor === "chain"}
                     <section class="subeditor-card chain-intro">
@@ -4519,7 +4871,7 @@
           role="menuitem"
           onclick={() => {
             terminalContextMenu = null;
-            closeWorkspace(contextWorkspaceId);
+            void requestCloseWorkspace(contextWorkspaceId);
           }}
         ><Icon name="close" size={17} /><span>Close</span></button>
       {:else}
@@ -4562,7 +4914,7 @@
           onclick={() => {
             const id = terminalContextMenu?.tab.id;
             terminalContextMenu = null;
-            if (id) closeTerminalTab(id);
+            if (id) void requestCloseTerminalTab(id);
           }}
         ><Icon name="close" size={17} /><span>Close</span></button>
       {/if}
@@ -4773,3 +5125,18 @@
 </div>
 
 <AppDialog />
+
+{#if terminalCloseRequest}
+  <TerminalCloseDialog
+    title={terminalCloseRequest.title}
+    processes={terminalCloseRequest.processes}
+    busy={terminalCloseRequest.busy}
+    error={terminalCloseRequest.error}
+    onCancel={() => {
+      if (!terminalCloseRequest?.busy) settleTerminalCloseRequest(false);
+    }}
+    onCloseAndStop={() => void finishTerminalCloseRequest(true)}
+    onCloseAndKeep={() => void finishTerminalCloseRequest(false)}
+    onStopSelected={(pids) => void stopTerminalCloseProcesses(pids)}
+  />
+{/if}

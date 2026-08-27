@@ -25,6 +25,26 @@ export interface EnvironmentVariable {
   value: string;
 }
 
+export type ProxyKind = "http" | "socks5";
+
+export interface HostProxy {
+  kind: ProxyKind;
+  hostname: string;
+  port: number;
+  username: string | null;
+  secret_stored: boolean;
+}
+
+export const proxyDefaultPort: Record<ProxyKind, number> = {
+  http: 3128,
+  socks5: 1080
+};
+
+export const proxyKindLabel: Record<ProxyKind, string> = {
+  http: "HTTP",
+  socks5: "SOCKS5"
+};
+
 export interface Host {
   id: string;
   label: string;
@@ -38,6 +58,7 @@ export interface Host {
   identity_id: string | null;
   jump_host_ids: string[];
   environment: EnvironmentVariable[];
+  proxy: HostProxy | null;
   terminal_theme: TerminalTheme;
   terminal_font_size: number;
   created_at: string;
@@ -271,11 +292,39 @@ export interface SessionRecord {
   status: SessionStatus;
 }
 
+export type ConnectionLogLevel = "debug" | "info" | "warning" | "error";
+
+export type ConnectionStage =
+  | "connecting"
+  | "handshake"
+  | "authenticating"
+  | "authenticated"
+  | "ready"
+  | "failed";
+
+export interface ConnectionLogEntry {
+  /** Index into the connection's hops: jump hosts in order, then the host. */
+  hop: number;
+  level: ConnectionLogLevel;
+  message: string;
+  stage: ConnectionStage | null;
+}
+
 export type TerminalEvent =
   | { kind: "output"; bytes: number[] }
   | { kind: "exit" }
   | { kind: "disconnect" }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  | { kind: "hops"; labels: string[] }
+  | ({ kind: "log" } & ConnectionLogEntry);
+
+/** A process a terminal session started and would leave behind when closed. */
+export interface SessionProcess {
+  pid: number;
+  name: string;
+  command: string;
+  leader: boolean;
+}
 
 export type MainPage =
   | "hosts"

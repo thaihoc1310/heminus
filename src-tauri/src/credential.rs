@@ -18,35 +18,68 @@ fn account(id: Uuid) -> String {
     format!("identity:{id}")
 }
 
+/// Proxy passwords are stored per host, so they never collide with identities.
+fn proxy_account(host_id: Uuid) -> String {
+    format!("proxy:{host_id}")
+}
+
 fn entry(id: Uuid) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, &account(id))
+    entry_for(&account(id))
+}
+
+fn entry_for(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SERVICE, account)
         .map_err(|error| format!("Could not access the operating-system credential store: {error}"))
 }
 
-pub fn set(id: Uuid, secret: String) -> Result<(), String> {
+fn store(entry: &keyring::Entry, secret: String) -> Result<(), String> {
     if secret.is_empty() {
         return Err("Password cannot be empty".into());
     }
     let secret = Zeroizing::new(secret);
-    entry(id)?
+    entry
         .set_password(secret.as_str())
         .map_err(|error| format!("Could not save the password in the system keyring: {error}"))
 }
 
-pub fn get(id: Uuid) -> Result<Zeroizing<String>, String> {
-    entry(id)?
+fn load(entry: &keyring::Entry) -> Result<Zeroizing<String>, String> {
+    entry
         .get_password()
         .map(Zeroizing::new)
         .map_err(|error| format!("Could not read the password from the system keyring: {error}"))
 }
 
-pub fn delete(id: Uuid) -> Result<(), String> {
-    match entry(id)?.delete_credential() {
+fn discard(entry: keyring::Entry) -> Result<(), String> {
+    match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!(
             "Could not remove the password from the system keyring: {error}"
         )),
     }
+}
+
+pub fn set(id: Uuid, secret: String) -> Result<(), String> {
+    store(&entry(id)?, secret)
+}
+
+pub fn get(id: Uuid) -> Result<Zeroizing<String>, String> {
+    load(&entry(id)?)
+}
+
+pub fn delete(id: Uuid) -> Result<(), String> {
+    discard(entry(id)?)
+}
+
+pub fn set_proxy(host_id: Uuid, secret: String) -> Result<(), String> {
+    store(&entry_for(&proxy_account(host_id))?, secret)
+}
+
+pub fn get_proxy(host_id: Uuid) -> Result<Zeroizing<String>, String> {
+    load(&entry_for(&proxy_account(host_id))?)
+}
+
+pub fn delete_proxy(host_id: Uuid) -> Result<(), String> {
+    discard(entry_for(&proxy_account(host_id))?)
 }
 
 pub fn connection_askpass_environment(
@@ -146,8 +179,35 @@ pub fn run_askpass_if_requested() -> bool {
     true
 }
 
+/// Prompts that ask a question rather than request a secret.
+///
+/// `SSH_ASKPASS_REQUIRE=force` routes *every* prompt here, including host-key
+/// confirmation and two-factor challenges. Answering those with the saved
+/// password would leak it to the wrong reader and, for host keys, loop forever
+/// on "Please type 'yes', 'no' or the fingerprint".
+fn is_credential_prompt(prompt: &str) -> bool {
+    const QUESTIONS: [&str; 6] = [
+        "yes/no",
+        "fingerprint",
+        "authenticity of host",
+        "continue connecting",
+        "(y/n)",
+        "please type",
+    ];
+    if QUESTIONS.iter().any(|question| prompt.contains(question)) {
+        return false;
+    }
+    prompt.contains("password") || prompt.contains("passphrase")
+}
+
 fn choose_candidate(prompt: &str, candidates: &[AskpassCandidate]) -> Result<Uuid, String> {
     let prompt = prompt.to_lowercase();
+    if !is_credential_prompt(&prompt) {
+        return Err(
+            "Heminus only answers password and passphrase prompts. Answer this one in the terminal."
+                .into(),
+        );
+    }
     let matches = candidates
         .iter()
         .filter(|candidate| {
@@ -203,6 +263,38 @@ mod tests {
             .unwrap(),
             jump.id
         );
+    }
+
+    #[test]
+    fn askpass_refuses_host_key_confirmation_instead_of_replying_with_the_password() {
+        let candidates = vec![AskpassCandidate {
+            id: Uuid::new_v4(),
+            needles: vec!["deploy@10.0.0.20".into(), "10.0.0.20".into()],
+        }];
+        for prompt in [
+            "The authenticity of host '10.0.0.20 (10.0.0.20)' can't be established.\n\
+             ED25519 key fingerprint is SHA256:abc.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? ",
+            "Please type 'yes', 'no' or the fingerprint: ",
+            "Verification code: ",
+        ] {
+            assert!(
+                choose_candidate(prompt, &candidates).is_err(),
+                "answered a non-credential prompt: {prompt}"
+            );
+        }
+        assert!(choose_candidate("deploy@10.0.0.20's password: ", &candidates).is_ok());
+        assert!(choose_candidate("Password: ", &candidates).is_ok());
+    }
+
+    #[test]
+    fn proxy_secrets_use_their_own_keyring_account() {
+        let host_id = Uuid::parse_str("4f75b7ec-c010-4f30-afd2-7e8582fcf071").unwrap();
+        assert_eq!(
+            proxy_account(host_id),
+            "proxy:4f75b7ec-c010-4f30-afd2-7e8582fcf071"
+        );
+        assert_ne!(proxy_account(host_id), account(host_id));
     }
 
     #[test]
@@ -266,7 +358,7 @@ mod tests {
         let executable = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root")
-            .join("target/release/heminus-app.exe");
+            .join("target/release/heminus.exe");
         assert!(executable.is_file(), "build the Windows release first");
         let candidates = serde_json::to_string(&vec![AskpassCandidate {
             id,

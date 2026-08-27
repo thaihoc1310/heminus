@@ -410,7 +410,47 @@ pub fn delete_host(state: State<'_, AppState>, id: Uuid) -> Result<bool, String>
         .database
         .lock()
         .map_err(|_| "database lock poisoned")?;
-    database.delete_host(id).map_err(|error| error.to_string())
+    let removed = database.delete_host(id).map_err(|error| error.to_string())?;
+    if removed {
+        // The proxy password lives in the keyring, not the database, so it has
+        // to be cleared here or it would outlive the host forever.
+        let _ = crate::credential::delete_proxy(id);
+    }
+    Ok(removed)
+}
+
+/// Saves the password for a host's proxy in the operating-system keyring.
+#[tauri::command]
+pub async fn set_host_proxy_secret(
+    state: State<'_, AppState>,
+    id: Uuid,
+    secret: String,
+) -> Result<bool, String> {
+    {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "database lock poisoned")?;
+        let host = database
+            .find_host(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Save the host before storing its proxy password".to_string())?;
+        if host.proxy.is_none() {
+            return Err("This host does not use a proxy".into());
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::credential::set_proxy(id, secret))
+        .await
+        .map_err(|error| error.to_string())??;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn delete_host_proxy_secret(id: Uuid) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::credential::delete_proxy(id))
+        .await
+        .map_err(|error| error.to_string())??;
+    Ok(true)
 }
 
 #[tauri::command]

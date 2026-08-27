@@ -5,7 +5,7 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import Icon from "../../components/Icon.svelte";
   import HostIcon from "../../components/HostIcon.svelte";
   import {
@@ -21,6 +21,8 @@
     writeTerminal
   } from "../../lib/ipc";
   import type {
+    ConnectionLogEntry,
+    ConnectionStage,
     Host,
     Snippet,
     TerminalAppearance,
@@ -63,6 +65,7 @@
     workspace = false,
     broadcast = false,
     onClose = () => {},
+    onRetry = () => {},
     onBroadcast = () => {},
     onFocus = () => {},
     headerDraggable = false,
@@ -89,6 +92,7 @@
     workspace?: boolean;
     broadcast?: boolean;
     onClose?: () => void;
+    onRetry?: () => void;
     onBroadcast?: () => void;
     onFocus?: () => void;
     headerDraggable?: boolean;
@@ -106,6 +110,141 @@
 
   let container: HTMLDivElement;
   let error = $state("");
+  const loopbackAddresses = ["127.0.0.1", "localhost", "::1"];
+  // A pane keeps the same host and session for its whole lifetime, so these are
+  // deliberately read once rather than tracked.
+  const remoteSession = untrack(
+    () => Boolean(host) && !loopbackAddresses.includes((host?.address ?? "").trim().toLowerCase())
+  );
+  /**
+   * Remote sessions open behind a progress screen. OpenSSH writes each hop's
+   * handshake to a private log file (`-E`) instead of the terminal, so this
+   * overlay is the only place a refused connection, a rejected password, or a
+   * jump host that never answered becomes visible.
+   */
+  let connectionState = $state<"connecting" | "ready" | "failed">(
+    untrack(() => (remoteSession && !resumeSessionId ? "connecting" : "ready"))
+  );
+  /** Jump hosts in order, then the host itself. */
+  let hops = $state<string[]>(untrack(() => (host ? [host.label] : [])));
+  let hopStages = $state<ConnectionStage[]>(["connecting"]);
+  let connectionLog = $state<ConnectionLogEntry[]>([]);
+  let connectionError = $state("");
+  let showConnectionLog = $state(false);
+  let logScroller = $state<HTMLDivElement>();
+  const connectionSteps: Array<{ stage: ConnectionStage; label: string }> = [
+    { stage: "connecting", label: "Reaching the server" },
+    { stage: "handshake", label: "Negotiating the SSH transport" },
+    { stage: "authenticating", label: "Authenticating" },
+    { stage: "authenticated", label: "Opening the shell" },
+    { stage: "ready", label: "Connected" }
+  ];
+
+  function stageIndex(stage: ConnectionStage): number {
+    const index = connectionSteps.findIndex((step) => step.stage === stage);
+    return index < 0 ? 0 : index;
+  }
+
+  /** 0…1 along the leg that reaches this hop. */
+  function hopProgress(index: number): number {
+    if (connectionState === "ready") return 1;
+    const stage = hopStages[index] ?? "connecting";
+    if (stage === "failed") return 1;
+    return stageIndex(stage) / (connectionSteps.length - 1);
+  }
+
+  function hopReached(index: number): boolean {
+    return connectionState === "ready" || hopStages[index] === "ready";
+  }
+
+  function hopFailed(index: number): boolean {
+    return hopStages[index] === "failed";
+  }
+
+  /** The hop the person is waiting on: the first one not yet through. */
+  const activeHop = $derived(
+    Math.min(
+      Math.max(
+        0,
+        hopStages.findIndex((stage) => stage !== "ready") < 0
+          ? hops.length - 1
+          : hopStages.findIndex((stage) => stage !== "ready")
+      ),
+      Math.max(0, hops.length - 1)
+    )
+  );
+  const connectionHeadline = $derived(
+    connectionState === "failed"
+      ? "Could not connect"
+      : (connectionSteps[stageIndex(hopStages[activeHop] ?? "connecting")]?.label ??
+        "Connecting…")
+  );
+  const connectionSubhead = $derived(
+    hops.length > 1 && connectionState !== "ready"
+      ? `${hopFailed(activeHop) || connectionState === "failed" ? "at" : "via"} ${hops[activeHop] ?? ""}`
+      : ""
+  );
+
+  function setHops(labels: string[]) {
+    if (labels.length === 0) return;
+    hops = labels;
+    hopStages = labels.map(() => "connecting");
+  }
+
+  function recordConnectionLog(entry: ConnectionLogEntry) {
+    connectionLog = [...connectionLog, entry].slice(-500);
+    if (connectionState !== "connecting") {
+      // The handshake screen is gone, but `-E` also keeps later failures out of
+      // the terminal, so a dropped session still has to say why.
+      if (entry.level === "error") error = entry.message;
+      return;
+    }
+    if (entry.stage === "failed") {
+      connectionState = "failed";
+      hopStages = hopStages.map((stage, index) =>
+        index === entry.hop ? "failed" : stage
+      );
+      if (!connectionError) {
+        connectionError =
+          hops.length > 1 && hops[entry.hop]
+            ? `${hops[entry.hop]}: ${entry.message}`
+            : entry.message;
+      }
+      showConnectionLog = true;
+    } else if (entry.stage) {
+      const stage = entry.stage;
+      hopStages = hopStages.map((current, index) =>
+        // Stages only move forward, so a late line cannot rewind a hop.
+        index === entry.hop && stageIndex(stage) > stageIndex(current) ? stage : current
+      );
+      if (hopStages.length > 0 && hopStages.every((current) => current === "ready")) {
+        connectionState = "ready";
+      }
+    }
+    if (showConnectionLog) {
+      void tick().then(() => {
+        if (logScroller) logScroller.scrollTop = logScroller.scrollHeight;
+      });
+    }
+  }
+
+  function markConnected() {
+    connectionState = "ready";
+    hopStages = hopStages.map(() => "ready");
+  }
+
+  const connectionLogIcons: Record<ConnectionLogEntry["level"], string> = {
+    debug: "chevron-right",
+    info: "connect",
+    warning: "shield",
+    error: "stop"
+  };
+
+  function connectionLogText(): string {
+    return connectionLog
+      .map((entry) => `[${hops[entry.hop] ?? entry.hop}] [${entry.level}] ${entry.message}`)
+      .join("\n");
+  }
   let commandInput = $state("");
   let suggestions = $state<TerminalSuggestion[]>([]);
   let suggestionIndex = $state(-1);
@@ -459,6 +598,9 @@
       const handleTerminalEvent = (event: TerminalEvent) => {
         if (!terminal) return;
         if (event.kind === "output") {
+          // Every hop logs to its own file, so anything on the PTY is the
+          // real shell — a safe fallback if a log line is ever missed.
+          if (connectionState === "connecting" && event.bytes.length > 0) markConnected();
           terminal.write(new Uint8Array(event.bytes));
           const text = outputDecoder
             .decode(new Uint8Array(event.bytes), { stream: true })
@@ -498,10 +640,31 @@
             suggestions = [];
           }
         }
+        if (event.kind === "hops") setHops(event.labels);
+        if (event.kind === "log") {
+          recordConnectionLog({
+            hop: event.hop,
+            level: event.level,
+            message: event.message,
+            stage: event.stage
+          });
+        }
         if (event.kind === "error") {
           error = event.message;
+          if (connectionState === "connecting") {
+            connectionState = "failed";
+            connectionError = event.message;
+            showConnectionLog = true;
+          }
         }
         if (event.kind === "exit") {
+          if (connectionState === "connecting") {
+            connectionState = "failed";
+            if (!connectionError) {
+              connectionError = "SSH exited before the session was ready.";
+            }
+            showConnectionLog = true;
+          }
           if (sessionId) {
             onSessionClosed(paneId);
             sessionId = null;
@@ -972,6 +1135,90 @@
     </div>
   {/if}
   <div class="terminal-mount" bind:this={container}></div>
+  {#if remoteSession && connectionState !== "ready"}
+    <div
+      class="terminal-connecting"
+      class:failed={connectionState === "failed"}
+      role="status"
+      aria-live="polite"
+    >
+      <div class="terminal-connecting-card">
+        <header>
+          <span class="host-badge terminal-connecting-badge {host?.color ?? 'slate'}">
+            <HostIcon hostId={host?.id} size={26} />
+          </span>
+          <span class="terminal-connecting-title">
+            <strong>{host?.label ?? title}</strong>
+            <small>SSH {host?.username}@{host?.address}:{host?.port}</small>
+          </span>
+          <button
+            class="terminal-connecting-logs"
+            aria-expanded={showConnectionLog}
+            onclick={() => (showConnectionLog = !showConnectionLog)}
+          >{showConnectionLog ? "Hide logs" : "Show logs"}</button>
+        </header>
+
+        <div class="terminal-connecting-track" aria-label="Connection progress">
+          <span class="terminal-connecting-node origin">
+            <Icon name="connect" size={16} />
+          </span>
+          {#each hops as hop, index (index)}
+            <span
+              class="terminal-connecting-rail"
+              class:failed={hopFailed(index)}
+              style={`--connection-progress:${Math.round(hopProgress(index) * 100)}%`}
+            ><i></i></span>
+            <span
+              class="terminal-connecting-node"
+              class:reached={hopReached(index)}
+              class:failed={hopFailed(index)}
+              class:pending={!hopReached(index) && index === activeHop}
+              title={hop}
+            >
+              <Icon name={index === hops.length - 1 ? "terminal" : "server"} size={16} />
+              {#if hops.length > 1}<small>{hop}</small>{/if}
+            </span>
+          {/each}
+        </div>
+
+        <p class="terminal-connecting-status">
+          {connectionHeadline}{#if connectionSubhead}<span> {connectionSubhead}</span>{/if}
+        </p>
+        {#if connectionError}
+          <p class="terminal-connecting-error">{connectionError}</p>
+        {/if}
+
+        {#if showConnectionLog}
+          <div class="terminal-connecting-log" bind:this={logScroller} tabindex="-1">
+            {#if connectionLog.length === 0}
+              <p class="terminal-connecting-log-empty">Waiting for OpenSSH…</p>
+            {:else}
+              {#each connectionLog as entry, index (index)}
+                <p class="log-{entry.level}">
+                  <Icon name={connectionLogIcons[entry.level]} size={14} />
+                  <span>
+                    {#if hops.length > 1}<em>{hops[entry.hop] ?? `hop ${entry.hop + 1}`}</em>{/if}
+                    {entry.message}
+                  </span>
+                </p>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+
+        <footer>
+          {#if connectionLog.length > 0}
+            <button
+              class="terminal-connecting-copy"
+              onclick={() => void writeTerminalClipboard(connectionLogText())}
+            >Copy log</button>
+          {/if}
+          <button class="terminal-connecting-close" onclick={onClose}>Close</button>
+          <button class="terminal-connecting-retry" onclick={onRetry}>Start over</button>
+        </footer>
+      </div>
+    </div>
+  {/if}
   {#if suggestions.length > 0}
     <div
       class="terminal-suggestions"

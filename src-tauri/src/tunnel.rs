@@ -124,11 +124,20 @@ pub fn tunnel_start(
                     .ok_or_else(|| "The selected SSH identity no longer exists".to_string())
             })
             .transpose()?;
-        let host_arguments = app_state.ssh.host_arguments(&database, &host)?;
         let credential_environment =
             crate::credential::connection_askpass_environment(&database, &host, identity.as_ref())?;
+        // A background tunnel has no terminal at all, and forced askpass would
+        // swallow the host-key question, so pin unknown keys on first use.
+        let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
+            credential_environment.is_some(),
+        );
+        let host_arguments = app_state
+            .ssh
+            .host_arguments(&database, &host, policy)?;
         (identity, host_arguments, credential_environment)
     };
+    let host_key_policy =
+        crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(credential_environment.is_some());
     let username = identity
         .as_ref()
         .and_then(|value| value.username.as_deref())
@@ -179,7 +188,7 @@ pub fn tunnel_start(
     let password_identity = identity
         .as_ref()
         .filter(|value| value.kind == IdentityKind::Password);
-    for argument in app_state.ssh.arguments() {
+    for argument in app_state.ssh.interactive_arguments(host_key_policy) {
         command.arg(argument);
     }
     for argument in host_arguments {

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -17,6 +17,8 @@ struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// True for SSH sessions, whose local processes are all Heminus transport.
+    remote: bool,
     history_id: Uuid,
     event_sink: Arc<Mutex<TerminalEventSink>>,
     supervisor: crate::platform::ProcessSupervisor,
@@ -163,10 +165,191 @@ impl Drop for TerminalManager {
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalEvent {
-    Output { bytes: Vec<u8> },
+    Output {
+        bytes: Vec<u8>,
+    },
     Exit,
     Disconnect,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    /// The legs of the connection, in order, announced before it starts.
+    Hops {
+        labels: Vec<String>,
+    },
+    /// One line of a hop's OpenSSH log, for the connecting overlay.
+    Log {
+        hop: usize,
+        level: LogLevel,
+        message: String,
+        stage: Option<ConnectionStage>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+/// How far the SSH handshake has progressed, mirrored by the connecting screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionStage {
+    Connecting,
+    Handshake,
+    Authenticating,
+    Authenticated,
+    Ready,
+    Failed,
+}
+
+/// Classifies one line of `ssh -v -E <file>` output.
+///
+/// `-E` keeps the handshake chatter out of the terminal, so this is the only
+/// place a failure such as "Connection refused" can still reach the person.
+fn classify_connection_log(line: &str) -> Option<(LogLevel, String, Option<ConnectionStage>)> {
+    let line = line.trim_end_matches(['\r', '\n']).trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (level, message) = match line.split_once(": ") {
+        Some((prefix, rest)) if prefix.starts_with("debug") => (LogLevel::Debug, rest),
+        _ => (LogLevel::Info, line),
+    };
+    let lowered = message.to_ascii_lowercase();
+    // Internal plumbing: it only names Heminus's own temporary files and the
+    // command that builds the next hop, both of which the screen already shows.
+    const NOISE: [&str; 3] = [
+        "reading configuration data",
+        "executing proxy command",
+        "applying options for",
+    ];
+    if NOISE.iter().any(|prefix| lowered.starts_with(prefix)) {
+        return None;
+    }
+    let failed = [
+        "permission denied",
+        "connection refused",
+        "connection timed out",
+        "connection closed by",
+        "closed by remote host",
+        "no route to host",
+        "could not resolve hostname",
+        "host key verification failed",
+        "name or service not known",
+        "too many authentication failures",
+        "operation timed out",
+        "network is unreachable",
+        "not responding",
+        "broken pipe",
+        "no matching host key",
+        "unable to negotiate",
+        "heminus proxy:",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker));
+    if failed {
+        return Some((LogLevel::Error, message.to_string(), Some(ConnectionStage::Failed)));
+    }
+    // Heminus pins unknown keys on first use, so report that as news rather
+    // than as OpenSSH's generic warning.
+    if lowered.contains("permanently added") {
+        return Some((LogLevel::Info, message.to_string(), None));
+    }
+    if lowered.contains("warning:") {
+        return Some((LogLevel::Warning, message.to_string(), None));
+    }
+    let stage = if lowered.starts_with("connecting to") {
+        Some(ConnectionStage::Connecting)
+    } else if lowered.starts_with("connection established") {
+        Some(ConnectionStage::Handshake)
+    } else if lowered.starts_with("authenticating to") || lowered.starts_with("next authentication")
+    {
+        Some(ConnectionStage::Authenticating)
+    } else if lowered.starts_with("authentication succeeded") || lowered.starts_with("authenticated")
+    {
+        Some(ConnectionStage::Authenticated)
+    } else if lowered.starts_with("entering interactive session")
+        || lowered.starts_with("pledge: ")
+    {
+        Some(ConnectionStage::Ready)
+    } else {
+        None
+    };
+    Some((level, message.to_string(), stage))
+}
+
+/// Streams one hop's OpenSSH `-E` log file into the session channel as it grows.
+fn spawn_connection_log_reader(
+    hop: usize,
+    path: PathBuf,
+    event_sink: Arc<Mutex<TerminalEventSink>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let _ = thread::Builder::new()
+        .name("heminus-ssh-log".into())
+        .spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut offset = 0_u64;
+            let mut remainder = String::new();
+            // Poll briskly while the handshake is on screen, then back off: an
+            // established session only writes here when something goes wrong.
+            let mut interval = std::time::Duration::from_millis(60);
+            loop {
+                let finished = stop.load(Ordering::Relaxed);
+                if let Ok(mut file) = std::fs::File::open(&path)
+                    && file.seek(std::io::SeekFrom::Start(offset)).is_ok()
+                {
+                    let mut chunk = String::new();
+                    if let Ok(read) = file.read_to_string(&mut chunk)
+                        && read > 0
+                    {
+                        offset += read as u64;
+                        remainder.push_str(&chunk);
+                        while let Some(index) = remainder.find('\n') {
+                            let line = remainder[..index].to_string();
+                            remainder.drain(..=index);
+                            if let Some((level, message, stage)) = classify_connection_log(&line) {
+                                if matches!(
+                                    stage,
+                                    Some(ConnectionStage::Ready | ConnectionStage::Failed)
+                                ) {
+                                    interval = std::time::Duration::from_millis(500);
+                                }
+                                publish_terminal_event(
+                                    &event_sink,
+                                    TerminalEvent::Log {
+                                        hop,
+                                        level,
+                                        message,
+                                        stage,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                if finished {
+                    if let Some((level, message, stage)) = classify_connection_log(&remainder) {
+                        publish_terminal_event(
+                            &event_sink,
+                            TerminalEvent::Log {
+                                hop,
+                                level,
+                                message,
+                                stage,
+                            },
+                        );
+                    }
+                    return;
+                }
+                thread::sleep(interval);
+            }
+        });
 }
 
 fn publish_terminal_output(event_sink: &Arc<Mutex<TerminalEventSink>>, bytes: &[u8]) {
@@ -299,12 +482,15 @@ pub fn terminal_open(
         .map_err(|error| error.to_string())?;
 
     let mut connection_artifacts = crate::ssh_runtime::ConnectionArtifacts::default();
+    let mut connection_log: Option<Vec<crate::ssh_runtime::ConnectionHop>> = None;
+    let mut remote_session = false;
     let mut command = if let Some(host) = host {
         host.validate().map_err(|error| error.to_string())?;
         if is_local_host(&host) {
             local_shell_command(&host.environment, cwd.as_deref())?
         } else {
-            let (identity, host_arguments, credential_environment) = {
+            remote_session = true;
+            let (identity, host_arguments, hops, credential_environment) = {
                 let database = app_state
                     .database
                     .lock()
@@ -318,21 +504,38 @@ pub fn terminal_open(
                             .ok_or_else(|| "The selected SSH identity no longer exists".to_string())
                     })
                     .transpose()?;
-                let host_arguments = app_state.ssh.host_arguments(&database, &host)?;
                 let credential_environment = crate::credential::connection_askpass_environment(
                     &database,
                     &host,
                     identity.as_ref(),
                 )?;
-                (identity, host_arguments, credential_environment)
+                // Forced askpass swallows the host-key question too, so the
+                // policy has to depend on whether Heminus is answering prompts.
+                let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
+                    credential_environment.is_some(),
+                );
+                let (host_arguments, hops) =
+                    app_state
+                        .ssh
+                        .interactive_connection(&database, &host, policy)?;
+                (identity, host_arguments, hops, credential_environment)
             };
-            connection_artifacts = app_state.ssh.connection_artifacts(&host_arguments);
+            let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
+                credential_environment.is_some(),
+            );
+            connection_artifacts = app_state
+                .ssh
+                .connection_artifacts(&host_arguments)
+                .with_logs(hops.iter().map(|hop| hop.log.clone()));
+            // The last hop is the host itself, so its log belongs on this
+            // process; the inner hops carry theirs inside the chain config.
+            connection_log = Some(hops.clone());
             let username = identity
                 .as_ref()
                 .and_then(|value| value.username.as_deref())
                 .unwrap_or(&host.username);
             let mut ssh = CommandBuilder::new(crate::platform::ssh_executable()?);
-            for argument in app_state.ssh.arguments() {
+            for argument in app_state.ssh.interactive_arguments(policy) {
                 ssh.arg(argument);
             }
             for argument in host_arguments {
@@ -350,6 +553,16 @@ pub fn terminal_open(
                 if std::env::var_os("DISPLAY").is_none() {
                     ssh.env("DISPLAY", "heminus:0");
                 }
+            }
+            if let Some(hop) = connection_log.as_ref().and_then(|hops| hops.last()) {
+                // -E keeps the handshake chatter out of the terminal; the app
+                // streams it into the connecting screen instead. LogLevel is
+                // used rather than -v so the verbosity is not inherited by the
+                // chain's nested SSH processes, which log to their own files.
+                ssh.arg("-o");
+                ssh.arg("LogLevel=DEBUG1");
+                ssh.arg("-E");
+                ssh.arg(&hop.log);
             }
             ssh.arg("-p");
             ssh.arg(host.port.to_string());
@@ -452,12 +665,31 @@ pub fn terminal_open(
                 master: pair.master,
                 writer,
                 killer: session_killer,
+                remote: remote_session,
                 history_id,
                 event_sink: Arc::clone(&event_sink),
                 supervisor,
                 _artifacts: connection_artifacts,
             },
         );
+
+    let log_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(hops) = connection_log {
+        publish_terminal_event(
+            &event_sink,
+            TerminalEvent::Hops {
+                labels: hops.iter().map(|hop| hop.label.clone()).collect(),
+            },
+        );
+        for (index, hop) in hops.into_iter().enumerate() {
+            spawn_connection_log_reader(
+                index,
+                hop.log,
+                Arc::clone(&event_sink),
+                Arc::clone(&log_finished),
+            );
+        }
+    }
 
     thread::Builder::new()
         .name(format!("heminus-pty-{id}"))
@@ -487,6 +719,7 @@ pub fn terminal_open(
                 }
             }
             let _ = child.wait();
+            log_finished.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Ok(database) = heminus_storage::Database::open_default() {
                 let _ = database
                     .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
@@ -597,11 +830,54 @@ pub fn terminal_resize(
         .map_err(|error| error.to_string())
 }
 
+/// Lists the processes a terminal session started and would leave behind.
+///
+/// SSH tabs report nothing: every local process under them is Heminus's own
+/// transport — the client, its jump-host hops, the proxy connector — and the
+/// work the person actually started lives on the server, out of reach.
+#[tauri::command]
+pub fn terminal_processes(
+    manager: State<'_, TerminalManager>,
+    id: Uuid,
+) -> Result<Vec<crate::platform::SessionProcess>, String> {
+    let sessions = manager
+        .sessions
+        .lock()
+        .map_err(|_| "terminal lock poisoned")?;
+    let Some(session) = sessions.get(&id).filter(|session| !session.remote) else {
+        return Ok(Vec::new());
+    };
+    Ok(session.supervisor.background_processes())
+}
+
+/// Stops the chosen processes without closing the terminal itself.
+#[tauri::command]
+pub fn terminal_kill_processes(
+    manager: State<'_, TerminalManager>,
+    id: Uuid,
+    pids: Vec<u32>,
+) -> Result<Vec<crate::platform::SessionProcess>, String> {
+    let supervisor_result = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "terminal lock poisoned")?;
+        let session = sessions
+            .get(&id)
+            .filter(|session| !session.remote)
+            .ok_or_else(|| "terminal session not found".to_string())?;
+        session.supervisor.terminate_processes(&pids)?;
+        session.supervisor.background_processes()
+    };
+    Ok(supervisor_result)
+}
+
 #[tauri::command]
 pub fn terminal_close(
     manager: State<'_, TerminalManager>,
     app_state: State<'_, AppState>,
     id: Uuid,
+    kill_processes: Option<bool>,
 ) -> Result<bool, String> {
     let removed = manager
         .sessions
@@ -611,7 +887,11 @@ pub fn terminal_close(
     let Some(mut session) = removed else {
         return Ok(false);
     };
-    session.supervisor.terminate();
+    // Closing a tab kills the whole session by default; opting out leaves the
+    // background processes the person chose to keep.
+    if kill_processes.unwrap_or(true) {
+        session.supervisor.terminate();
+    }
     let _ = session.killer.kill();
     app_state
         .database
@@ -743,6 +1023,82 @@ mod tests {
         assert!(prompt.contains("633;D;%s"));
         assert!(prompt.ends_with("; update_terminal_title"));
         assert!(successful_command_prompt("/bin/zsh", None).is_none());
+    }
+
+    #[test]
+    fn connection_log_lines_drive_the_connecting_screen() {
+        let stage = |line: &str| classify_connection_log(line).and_then(|entry| entry.2);
+        assert_eq!(
+            stage("debug1: Connecting to 10.0.0.5 [10.0.0.5] port 22."),
+            Some(ConnectionStage::Connecting)
+        );
+        assert_eq!(
+            stage("debug1: Connection established."),
+            Some(ConnectionStage::Handshake)
+        );
+        assert_eq!(
+            stage("debug1: Authenticating to 10.0.0.5:22 as 'deploy'"),
+            Some(ConnectionStage::Authenticating)
+        );
+        assert_eq!(
+            stage("debug1: Authentication succeeded (password)."),
+            Some(ConnectionStage::Authenticated)
+        );
+        assert_eq!(
+            stage("debug1: Entering interactive session."),
+            Some(ConnectionStage::Ready)
+        );
+        assert_eq!(stage("debug1: Reading configuration data none"), None);
+        // A tidy logout is not a failure.
+        assert_eq!(stage("Connection to 10.0.0.5 closed."), None);
+    }
+
+    #[test]
+    fn connection_log_hides_heminus_plumbing() {
+        for line in [
+            "debug1: Reading configuration data /home/x/.local/share/Heminus/ssh/connections/a.conf",
+            "debug1: Executing proxy command: exec \"/usr/bin/ssh\" -F /tmp/a.conf -W \"[10.0.0.5]:22\" heminus-jump-1",
+            "debug1: Applying options for heminus-jump-1",
+        ] {
+            assert!(
+                classify_connection_log(line).is_none(),
+                "internal plumbing should stay out of the log: {line}"
+            );
+        }
+        assert!(classify_connection_log("debug1: Connection established.").is_some());
+    }
+
+    #[test]
+    fn connection_log_failures_are_reported_as_errors() {
+        for line in [
+            "ssh: connect to host 10.0.0.5 port 22: Connection refused",
+            "deploy@10.0.0.5: Permission denied (publickey,password).",
+            "Host key verification failed.",
+            "heminus proxy: The proxy rejected the credentials (407 Proxy Authentication Required)",
+            "kex_exchange_identification: Connection closed by remote host",
+            "Timeout, server 10.0.0.5 not responding.",
+            "Unable to negotiate with 10.0.0.5 port 22: no matching host key type found",
+        ] {
+            let (level, _, stage) = classify_connection_log(line).expect("a failure entry");
+            assert_eq!(level, LogLevel::Error, "{line}");
+            assert_eq!(stage, Some(ConnectionStage::Failed), "{line}");
+        }
+    }
+
+    #[test]
+    fn connection_log_separates_debug_chatter_from_plain_messages() {
+        let (level, message, _) =
+            classify_connection_log("debug1: Local version string SSH-2.0-OpenSSH_9.6").unwrap();
+        assert_eq!(level, LogLevel::Debug);
+        assert_eq!(message, "Local version string SSH-2.0-OpenSSH_9.6");
+
+        let (level, message, _) =
+            classify_connection_log("Warning: Permanently added '10.0.0.5' to the list of known hosts.")
+                .unwrap();
+        assert_eq!(level, LogLevel::Info, "a pinned key is news, not a warning");
+        assert!(message.contains("Permanently added"));
+
+        assert!(classify_connection_log("   ").is_none());
     }
 
     #[test]

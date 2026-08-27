@@ -57,7 +57,8 @@
     minimize: "M6 12h12",
     maximize: "M6 6h12v12H6z",
     close: "M7 7l10 10M17 7 7 17",
-    stop: "M7 7h10v10H7z"
+    stop: "M7 7h10v10H7z",
+    alert: "M12 3.6 2.7 19.4h18.6zM12 10v4M12 17h.01"
   };
 </script>
 
