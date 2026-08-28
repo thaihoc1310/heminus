@@ -555,10 +555,7 @@ impl Database {
                 host.jump_host_ids.first().map(Uuid::to_string),
                 serde_json::to_string(&host.jump_host_ids)?,
                 serde_json::to_string(&host.environment)?,
-                host.proxy
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
+                host.proxy.as_ref().map(serde_json::to_string).transpose()?,
                 terminal_theme_name(host.terminal_theme),
                 host.terminal_font_size,
                 host.created_at.to_rfc3339(),
@@ -1594,16 +1591,33 @@ mod tests {
 
         host.proxy = None;
         database.save_host(&host).unwrap();
-        assert!(database.find_host(host.id).unwrap().unwrap().proxy.is_none());
+        assert!(
+            database
+                .find_host(host.id)
+                .unwrap()
+                .unwrap()
+                .proxy
+                .is_none()
+        );
 
         database
             .connection
             .execute(
                 "UPDATE hosts SET proxy_json = ?1 WHERE id = ?2",
-                params![r#"{"kind":"http","hostname":"","port":0}"#, host.id.to_string()],
+                params![
+                    r#"{"kind":"http","hostname":"","port":0}"#,
+                    host.id.to_string()
+                ],
             )
             .unwrap();
-        assert!(database.find_host(host.id).unwrap().unwrap().proxy.is_none());
+        assert!(
+            database
+                .find_host(host.id)
+                .unwrap()
+                .unwrap()
+                .proxy
+                .is_none()
+        );
     }
 
     #[test]

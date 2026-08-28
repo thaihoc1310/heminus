@@ -199,7 +199,10 @@ impl SshRuntime {
         });
         // A proxy wraps the very first TCP hop, so a chain tunnels its entry
         // jump host and a direct connection tunnels the host itself.
-        let target_proxy = jump_hosts.is_empty().then_some(host.proxy.as_ref()).flatten();
+        let target_proxy = jump_hosts
+            .is_empty()
+            .then_some(host.proxy.as_ref())
+            .flatten();
         let mut arguments = if jump_hosts.is_empty() {
             vec![OsString::from("-F"), OsString::from("none")]
         } else {
@@ -418,7 +421,10 @@ fn ssh_hop_command(config: &Path, alias: &str, log: Option<&PathBuf>) -> Result<
     let ssh = quoted_command_word(&ssh.to_string_lossy())?;
     let config = quoted_command_word(&config.to_string_lossy())?;
     let logging = match log {
-        Some(log) => format!(" -o LogLevel=DEBUG1 -E {}", quoted_command_word(&log.to_string_lossy())?),
+        Some(log) => format!(
+            " -o LogLevel=DEBUG1 -E {}",
+            quoted_command_word(&log.to_string_lossy())?
+        ),
         None => String::new(),
     };
     Ok(format!("{ssh} -F {config}{logging} -W \"[%h]:%p\" {alias}"))
@@ -647,7 +653,9 @@ mod tests {
         let mut target = Host::new("Private node", "10.0.0.20", "deploy");
         target.jump_host_ids = vec![jump_host.id];
 
-        let arguments = runtime.host_arguments(&database, &target, HostKeyPolicy::Ask).unwrap();
+        let arguments = runtime
+            .host_arguments(&database, &target, HostKeyPolicy::Ask)
+            .unwrap();
         let artifacts = runtime.connection_artifacts(&arguments);
         let config = artifacts.config.clone().expect("connection config");
         assert!(config.is_file());
@@ -869,7 +877,10 @@ mod tests {
             .expect("a direct host should proxy through Heminus");
         assert!(proxy_command.contains(crate::proxy::connect_flag()));
         assert!(proxy_command.ends_with(" %h %p"));
-        assert!(!proxy_command.contains("proxy.example"), "settings stay encoded");
+        assert!(
+            !proxy_command.contains("proxy.example"),
+            "settings stay encoded"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -947,11 +958,16 @@ mod tests {
             .interactive_connection(&database, &target, HostKeyPolicy::AcceptNew)
             .unwrap();
         assert_eq!(
-            hops.iter().map(|hop| hop.label.as_str()).collect::<Vec<_>>(),
+            hops.iter()
+                .map(|hop| hop.label.as_str())
+                .collect::<Vec<_>>(),
             ["Edge", "Relay", "Private node"],
             "the chain runs entry-first and ends at the host itself"
         );
-        let logs = hops.iter().map(|hop| &hop.log).collect::<std::collections::HashSet<_>>();
+        let logs = hops
+            .iter()
+            .map(|hop| &hop.log)
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(logs.len(), 3, "each hop needs a log of its own");
         assert!(hops.iter().all(|hop| hop.log.is_file()));
 
@@ -965,7 +981,10 @@ mod tests {
         // ...and the outermost ProxyCommand reaches Relay, logging to its file.
         let entry = proxy_command_argument(&arguments);
         assert!(entry.contains("heminus-jump-2"), "{entry}");
-        assert!(entry.contains(&format!("-E \"{}\"", hops[1].log.display())), "{entry}");
+        assert!(
+            entry.contains(&format!("-E \"{}\"", hops[1].log.display())),
+            "{entry}"
+        );
         // The host's own log is left for the caller to pass as its -E.
         assert!(!config.contains(&hops[2].log.display().to_string()));
         assert!(
@@ -978,7 +997,10 @@ mod tests {
 
     #[test]
     fn forced_askpass_pins_unknown_host_keys_instead_of_asking() {
-        assert_eq!(HostKeyPolicy::for_forced_askpass(true).as_str(), "accept-new");
+        assert_eq!(
+            HostKeyPolicy::for_forced_askpass(true).as_str(),
+            "accept-new"
+        );
         assert_eq!(HostKeyPolicy::for_forced_askpass(false).as_str(), "ask");
 
         let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));

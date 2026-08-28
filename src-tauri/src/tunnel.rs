@@ -128,12 +128,9 @@ pub fn tunnel_start(
             crate::credential::connection_askpass_environment(&database, &host, identity.as_ref())?;
         // A background tunnel has no terminal at all, and forced askpass would
         // swallow the host-key question, so pin unknown keys on first use.
-        let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
-            credential_environment.is_some(),
-        );
-        let host_arguments = app_state
-            .ssh
-            .host_arguments(&database, &host, policy)?;
+        let policy =
+            crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(credential_environment.is_some());
+        let host_arguments = app_state.ssh.host_arguments(&database, &host, policy)?;
         (identity, host_arguments, credential_environment)
     };
     let host_key_policy =

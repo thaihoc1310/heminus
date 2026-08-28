@@ -272,7 +272,11 @@ mod tests {
             background = supervisor.background_processes();
         }
         assert!(
-            background.iter().filter(|p| p.name.contains("sleep")).count() >= 2,
+            background
+                .iter()
+                .filter(|p| p.name.contains("sleep"))
+                .count()
+                >= 2,
             "expected both sleeps in the session, saw {background:?}"
         );
         assert!(
@@ -294,7 +298,10 @@ mod tests {
     fn unix_supervisor_refuses_pids_outside_its_session() {
         let supervisor = ProcessSupervisor::attach(Some(std::process::id())).expect("supervisor");
         let error = supervisor.terminate_processes(&[1]).unwrap_err();
-        assert!(error.contains("no longer part of this terminal session"), "{error}");
+        assert!(
+            error.contains("no longer part of this terminal session"),
+            "{error}"
+        );
     }
 
     #[test]

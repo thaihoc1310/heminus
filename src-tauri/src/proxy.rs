@@ -237,7 +237,11 @@ fn socks5_connect(
                 "The SOCKS5 proxy rejected every authentication method Heminus offers".into(),
             );
         }
-        method => return Err(format!("The SOCKS5 proxy asked for unsupported method {method}")),
+        method => {
+            return Err(format!(
+                "The SOCKS5 proxy asked for unsupported method {method}"
+            ));
+        }
     }
 
     let host = target_host.as_bytes();
@@ -280,7 +284,11 @@ fn socks5_connect(
             read_exact(stream, &mut length, "the SOCKS5 bound address")?;
             usize::from(length[0])
         }
-        kind => return Err(format!("The SOCKS5 proxy replied with unknown address type {kind}")),
+        kind => {
+            return Err(format!(
+                "The SOCKS5 proxy replied with unknown address type {kind}"
+            ));
+        }
     };
     let mut bound = vec![0_u8; bound_length + 2];
     read_exact(stream, &mut bound, "the SOCKS5 bound address")?;

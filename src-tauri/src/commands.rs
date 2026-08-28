@@ -410,7 +410,9 @@ pub fn delete_host(state: State<'_, AppState>, id: Uuid) -> Result<bool, String>
         .database
         .lock()
         .map_err(|_| "database lock poisoned")?;
-    let removed = database.delete_host(id).map_err(|error| error.to_string())?;
+    let removed = database
+        .delete_host(id)
+        .map_err(|error| error.to_string())?;
     if removed {
         // The proxy password lives in the keyring, not the database, so it has
         // to be cleared here or it would outlive the host forever.

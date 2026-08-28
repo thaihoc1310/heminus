@@ -253,7 +253,11 @@ fn classify_connection_log(line: &str) -> Option<(LogLevel, String, Option<Conne
     .iter()
     .any(|marker| lowered.contains(marker));
     if failed {
-        return Some((LogLevel::Error, message.to_string(), Some(ConnectionStage::Failed)));
+        return Some((
+            LogLevel::Error,
+            message.to_string(),
+            Some(ConnectionStage::Failed),
+        ));
     }
     // Heminus pins unknown keys on first use, so report that as news rather
     // than as OpenSSH's generic warning.
@@ -270,11 +274,11 @@ fn classify_connection_log(line: &str) -> Option<(LogLevel, String, Option<Conne
     } else if lowered.starts_with("authenticating to") || lowered.starts_with("next authentication")
     {
         Some(ConnectionStage::Authenticating)
-    } else if lowered.starts_with("authentication succeeded") || lowered.starts_with("authenticated")
+    } else if lowered.starts_with("authentication succeeded")
+        || lowered.starts_with("authenticated")
     {
         Some(ConnectionStage::Authenticated)
-    } else if lowered.starts_with("entering interactive session")
-        || lowered.starts_with("pledge: ")
+    } else if lowered.starts_with("entering interactive session") || lowered.starts_with("pledge: ")
     {
         Some(ConnectionStage::Ready)
     } else {
@@ -514,10 +518,9 @@ pub fn terminal_open(
                 let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
                     credential_environment.is_some(),
                 );
-                let (host_arguments, hops) =
-                    app_state
-                        .ssh
-                        .interactive_connection(&database, &host, policy)?;
+                let (host_arguments, hops) = app_state
+                    .ssh
+                    .interactive_connection(&database, &host, policy)?;
                 (identity, host_arguments, hops, credential_environment)
             };
             let policy = crate::ssh_runtime::HostKeyPolicy::for_forced_askpass(
@@ -697,41 +700,42 @@ pub fn terminal_open(
             let log_finished = Arc::clone(&log_finished);
             let sessions = Arc::clone(&sessions);
             move || {
-            let mut buffer = vec![0_u8; 16 * 1024];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        publish_terminal_output(&event_sink, &buffer[..read]);
-                    }
-                    Err(error) => {
-                        let normal_close = matches!(
-                            error.kind(),
-                            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
-                        ) || error.raw_os_error() == Some(5);
-                        if !normal_close {
-                            publish_terminal_event(
-                                &event_sink,
-                                TerminalEvent::Error {
-                                    message: error.to_string(),
-                                },
-                            );
+                let mut buffer = vec![0_u8; 16 * 1024];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            publish_terminal_output(&event_sink, &buffer[..read]);
                         }
-                        break;
+                        Err(error) => {
+                            let normal_close = matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+                            ) || error.raw_os_error() == Some(5);
+                            if !normal_close {
+                                publish_terminal_event(
+                                    &event_sink,
+                                    TerminalEvent::Error {
+                                        message: error.to_string(),
+                                    },
+                                );
+                            }
+                            break;
+                        }
                     }
                 }
+                let _ = child.wait();
+                log_finished.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(database) = heminus_storage::Database::open_default() {
+                    let _ = database
+                        .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
+                }
+                if let Ok(mut sessions) = sessions.lock() {
+                    sessions.remove(&id);
+                }
+                publish_terminal_event(&event_sink, TerminalEvent::Exit);
             }
-            let _ = child.wait();
-            log_finished.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(database) = heminus_storage::Database::open_default() {
-                let _ = database
-                    .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
-            }
-            if let Ok(mut sessions) = sessions.lock() {
-                sessions.remove(&id);
-            }
-            publish_terminal_event(&event_sink, TerminalEvent::Exit);
-        } });
+        });
     if let Err(error) = spawned {
         // The reader never started, so nothing would ever stop the log
         // readers, finish the history row, or drop the session's artifacts.
@@ -742,8 +746,8 @@ pub fn terminal_open(
             let _ = session.killer.kill();
         }
         if let Ok(database) = heminus_storage::Database::open_default() {
-            let _ = database
-                .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
+            let _ =
+                database.finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
         }
         return Err(error.to_string());
     }
@@ -1109,9 +1113,10 @@ mod tests {
         assert_eq!(level, LogLevel::Debug);
         assert_eq!(message, "Local version string SSH-2.0-OpenSSH_9.6");
 
-        let (level, message, _) =
-            classify_connection_log("Warning: Permanently added '10.0.0.5' to the list of known hosts.")
-                .unwrap();
+        let (level, message, _) = classify_connection_log(
+            "Warning: Permanently added '10.0.0.5' to the list of known hosts.",
+        )
+        .unwrap();
         assert_eq!(level, LogLevel::Info, "a pinned key is news, not a warning");
         assert!(message.contains("Permanently added"));
 

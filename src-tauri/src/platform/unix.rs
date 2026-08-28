@@ -146,7 +146,10 @@ fn session_processes(session: u32) -> Vec<SessionProcess> {
 /// macOS and the BSDs have no `/proc`, so walk the descendants of the leader.
 #[cfg(not(target_os = "linux"))]
 fn session_processes(session: u32) -> Vec<SessionProcess> {
-    let Ok(output) = Command::new("ps").args(["-Ao", "pid=,ppid=,comm=,args="]).output() else {
+    let Ok(output) = Command::new("ps")
+        .args(["-Ao", "pid=,ppid=,comm=,args="])
+        .output()
+    else {
         return Vec::new();
     };
     let mut rows: BTreeMap<u32, (u32, String, String)> = BTreeMap::new();
@@ -155,7 +158,10 @@ fn session_processes(session: u32) -> Vec<SessionProcess> {
         let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
             continue;
         };
-        let Some(parent) = fields.next().and_then(|value| value.trim().parse::<u32>().ok()) else {
+        let Some(parent) = fields
+            .next()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        else {
             continue;
         };
         let name = fields
