@@ -1430,6 +1430,11 @@ select:focus-visible {
   min-height: 0;
   overflow: auto;
 }
+/* Without the inspector the list's scrollbar sits on the window resize
+ * border; keep it clear of the grip. */
+.host-workspace:not(.with-inspector) .host-scroll {
+  margin-right: 12px;
+}
 
 .host-content {
   padding: 20px 30px 32px;
@@ -2013,7 +2018,7 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #f8fafb;
+  background: #edf2f4;
   border-left: 1px solid var(--line);
 }
 
@@ -2108,6 +2113,7 @@ select:focus-visible {
 
 .inspector-scroll {
   min-height: 0;
+  margin-right: 12px;
   overflow: auto;
   padding-bottom: 14px;
   background: #edf2f4;
@@ -2815,6 +2821,7 @@ select:focus-visible {
 
 .host-subeditor-scroll {
   min-height: 0;
+  margin-right: 12px;
   overflow: auto;
   padding: 14px 0 24px;
 }
@@ -3650,10 +3657,12 @@ select:focus-visible {
 .terminal-tools-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  margin-right: 3px;
+  margin-right: 12px;
   padding: 12px;
   overflow: auto;
-  --scrollbar-thumb: var(--terminal-tool-muted);
+  --scrollbar-thumb: var(--terminal-scrollbar, var(--terminal-tool-muted));
+  --scrollbar-thumb-hover: var(--terminal-scrollbar-hover, var(--terminal-tool-muted));
+  --scrollbar-thumb-active: var(--terminal-scrollbar-active, var(--terminal-tool-accent));
   overscroll-behavior: contain;
 }
 
@@ -5375,6 +5384,9 @@ select:focus-visible {
   touch-action: pan-y;
   overflow: auto;
 }
+.remote-pane .file-list {
+  margin-right: 12px;
+}
 
 .file-row {
   width: 100%;
@@ -6413,6 +6425,9 @@ select:focus-visible {
   padding: 20px 24px 32px;
   overflow: auto;
 }
+.manager-page:not(.with-inspector) .manager-scroll {
+  margin-right: 12px;
+}
 
 .manager-count {
   color: var(--muted);
@@ -7027,6 +7042,7 @@ select:focus-visible {
 
 .known-hosts-content {
   min-height: 0;
+  margin-right: 12px;
   padding: 16px 24px 32px;
   overflow: auto;
 }
@@ -7129,6 +7145,7 @@ select:focus-visible {
 
 .logs-content {
   min-height: 0;
+  margin-right: 12px;
   padding: 20px 24px 32px;
   overflow: auto;
 }

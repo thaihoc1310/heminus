@@ -2292,7 +2292,10 @@
       `--terminal-tool-hover:${theme.chrome.controlHover}`,
       `--terminal-tool-active:${theme.chrome.activeBackground}`,
       `--terminal-tool-accent:${theme.chrome.activeForeground}`,
-      `--terminal-tool-selection:${theme.palette.selectionBackground ?? theme.chrome.activeBackground}`
+      `--terminal-tool-selection:${theme.palette.selectionBackground ?? theme.chrome.activeBackground}`,
+      `--terminal-scrollbar:${theme.palette.scrollbarSliderBackground ?? theme.chrome.headerBorder}`,
+      `--terminal-scrollbar-hover:${theme.palette.scrollbarSliderHoverBackground ?? theme.chrome.headerMuted}`,
+      `--terminal-scrollbar-active:${theme.palette.scrollbarSliderActiveBackground ?? theme.chrome.activeBackground}`
     ].join(";");
   }
 

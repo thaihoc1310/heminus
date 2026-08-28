@@ -199,7 +199,7 @@ impl SshRuntime {
         });
         // A proxy wraps the very first TCP hop, so a chain tunnels its entry
         // jump host and a direct connection tunnels the host itself.
-        let target_proxy = jump_hosts.is_empty().then(|| host.proxy.as_ref()).flatten();
+        let target_proxy = jump_hosts.is_empty().then_some(host.proxy.as_ref()).flatten();
         let mut arguments = if jump_hosts.is_empty() {
             vec![OsString::from("-F"), OsString::from("none")]
         } else {

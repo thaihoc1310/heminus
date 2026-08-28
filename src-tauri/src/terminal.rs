@@ -691,9 +691,12 @@ pub fn terminal_open(
         }
     }
 
-    thread::Builder::new()
+    let spawned = thread::Builder::new()
         .name(format!("heminus-pty-{id}"))
-        .spawn(move || {
+        .spawn({
+            let log_finished = Arc::clone(&log_finished);
+            let sessions = Arc::clone(&sessions);
+            move || {
             let mut buffer = vec![0_u8; 16 * 1024];
             loop {
                 match reader.read(&mut buffer) {
@@ -728,8 +731,22 @@ pub fn terminal_open(
                 sessions.remove(&id);
             }
             publish_terminal_event(&event_sink, TerminalEvent::Exit);
-        })
-        .map_err(|error| error.to_string())?;
+        } });
+    if let Err(error) = spawned {
+        // The reader never started, so nothing would ever stop the log
+        // readers, finish the history row, or drop the session's artifacts.
+        log_finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut sessions) = sessions.lock()
+            && let Some(mut session) = sessions.remove(&id)
+        {
+            let _ = session.killer.kill();
+        }
+        if let Ok(database) = heminus_storage::Database::open_default() {
+            let _ = database
+                .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
+        }
+        return Err(error.to_string());
+    }
 
     Ok(id)
 }
