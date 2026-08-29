@@ -11,6 +11,12 @@ use heminus_domain::{
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
+/// How many finished terminal sessions the log keeps.
+const SESSION_HISTORY_LIMIT: i64 = 1000;
+
+/// How many commands the suggestion history keeps.
+const COMMAND_HISTORY_LIMIT: i64 = 2000;
+
 pub struct Database {
     connection: Connection,
     path: Option<PathBuf>,
@@ -23,7 +29,19 @@ impl Database {
         let data_dir = project_dirs.data_local_dir();
         fs::create_dir_all(data_dir)
             .with_context(|| format!("Could not create {}", data_dir.display()))?;
-        Self::open(data_dir.join("heminus.db"))
+        let database = Self::open(data_dir.join("heminus.db"))?;
+        // The SSH vault next door is already 0700/0600; the database holds the
+        // host inventory, usernames and key paths, so it gets the same care.
+        restrict_to_owner(data_dir, 0o700);
+        if let Some(path) = database.path() {
+            restrict_to_owner(path, 0o600);
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                restrict_to_owner(Path::new(&sidecar), 0o600);
+            }
+        }
+        Ok(database)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -220,18 +238,7 @@ impl Database {
                 [],
             )?;
         }
-        self.connection.execute(
-            "
-            DELETE FROM command_history
-            WHERE id NOT IN (
-                SELECT id
-                FROM command_history
-                ORDER BY executed_at DESC, id DESC
-                LIMIT 500
-            )
-            ",
-            [],
-        )?;
+        self.prune_command_history()?;
         if !self.table_has_column("hosts", "startup_snippet_id")? {
             self.connection.execute(
                 "ALTER TABLE hosts ADD COLUMN startup_snippet_id TEXT REFERENCES snippets(id) ON DELETE SET NULL",
@@ -566,6 +573,10 @@ impl Database {
     }
 
     pub fn delete_host(&self, id: Uuid) -> Result<bool> {
+        // Dropping the host and unlinking it from every chain that references it
+        // has to be one unit: a failure partway through used to leave hosts
+        // pointing at a jump host that no longer exists.
+        let transaction = self.connection.unchecked_transaction()?;
         for mut host in self.list_hosts(None)? {
             if host.id != id && host.jump_host_ids.contains(&id) {
                 host.jump_host_ids
@@ -576,6 +587,7 @@ impl Database {
         let affected = self
             .connection
             .execute("DELETE FROM hosts WHERE id = ?1", [id.to_string()])?;
+        transaction.commit()?;
         Ok(affected > 0)
     }
 
@@ -587,25 +599,23 @@ impl Database {
             ORDER BY name COLLATE NOCASE
             ",
         )?;
-        let rows = statement.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let parent_id: Option<String> = row.get(2)?;
-            let created_at: String = row.get(3)?;
-            let updated_at: String = row.get(4)?;
-            Ok(VaultGroup {
-                id: parse_uuid(&id)?,
-                name: row.get(1)?,
-                parent_id: parent_id.as_deref().map(parse_uuid).transpose()?,
-                created_at: parse_datetime(&created_at)?,
-                updated_at: parse_datetime(&updated_at)?,
-            })
-        })?;
+        let rows = statement.query_map([], map_group)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("Could not read vault groups")
     }
 
     pub fn find_group(&self, id: Uuid) -> Result<Option<VaultGroup>> {
-        Ok(self.list_groups()?.into_iter().find(|group| group.id == id))
+        Ok(self
+            .connection
+            .query_row(
+                "
+                SELECT id, name, parent_id, created_at, updated_at
+                FROM vault_groups WHERE id = ?1
+                ",
+                [id.to_string()],
+                map_group,
+            )
+            .optional()?)
     }
 
     pub fn save_group(&self, group: &VaultGroup) -> Result<()> {
@@ -711,48 +721,24 @@ impl Database {
             ORDER BY updated_at DESC
             ",
         )?;
-        let rows = statement.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let panes_json: String = row.get(2)?;
-            let layout_json: Option<String> = row.get(3)?;
-            let active_pane_id: Option<String> = row.get(6)?;
-            let updated_at: String = row.get(7)?;
-            Ok(Workspace {
-                id: parse_uuid(&id)?,
-                name: row.get(1)?,
-                panes: serde_json::from_str(&panes_json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        panes_json.len(),
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                layout: layout_json
-                    .map(|json| {
-                        serde_json::from_str(&json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                json.len(),
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })
-                    })
-                    .transpose()?,
-                split: row.get(4)?,
-                broadcast: row.get(5)?,
-                active_pane_id: active_pane_id.as_deref().map(parse_uuid).transpose()?,
-                updated_at: parse_datetime(&updated_at)?,
-            })
-        })?;
+        let rows = statement.query_map([], map_workspace)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("Could not read workspaces")
     }
 
     pub fn find_workspace(&self, id: Uuid) -> Result<Option<Workspace>> {
         Ok(self
-            .list_workspaces()?
-            .into_iter()
-            .find(|workspace| workspace.id == id))
+            .connection
+            .query_row(
+                "
+                SELECT id, name, panes_json, layout_json, split, broadcast,
+                       active_pane_id, updated_at
+                FROM workspaces WHERE id = ?1
+                ",
+                [id.to_string()],
+                map_workspace,
+            )
+            .optional()?)
     }
 
     pub fn save_workspace(&self, workspace: &Workspace) -> Result<()> {
@@ -804,28 +790,23 @@ impl Database {
             ORDER BY label COLLATE NOCASE
             ",
         )?;
-        let rows = statement.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let kind: String = row.get(2)?;
-            Ok(Identity {
-                id: parse_uuid(&id)?,
-                label: row.get(1)?,
-                kind: parse_identity_kind(&kind),
-                username: row.get(3)?,
-                key_path: row.get(4)?,
-                secret_stored: row.get(5)?,
-                created_at: parse_datetime(&row.get::<_, String>(6)?)?,
-            })
-        })?;
+        let rows = statement.query_map([], map_identity)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("Could not read identities")
     }
 
     pub fn find_identity(&self, id: Uuid) -> Result<Option<Identity>> {
         Ok(self
-            .list_identities()?
-            .into_iter()
-            .find(|identity| identity.id == id))
+            .connection
+            .query_row(
+                "
+                SELECT id, label, kind, username, key_path, secret_stored, created_at
+                FROM identities WHERE id = ?1
+                ",
+                [id.to_string()],
+                map_identity,
+            )
+            .optional()?)
     }
 
     pub fn save_identity(&self, identity: &Identity) -> Result<()> {
@@ -932,32 +913,24 @@ impl Database {
             ORDER BY name COLLATE NOCASE
             ",
         )?;
-        let rows = statement.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let kind: String = row.get(2)?;
-            let host_id: String = row.get(7)?;
-            Ok(PortForward {
-                id: parse_uuid(&id)?,
-                name: row.get(1)?,
-                kind: parse_forward_kind(&kind),
-                bind_host: row.get(3)?,
-                bind_port: row.get(4)?,
-                destination_host: row.get(5)?,
-                destination_port: row.get(6)?,
-                host_id: parse_uuid(&host_id)?,
-                enabled: row.get(8)?,
-                created_at: parse_datetime(&row.get::<_, String>(9)?)?,
-            })
-        })?;
+        let rows = statement.query_map([], map_port_forward)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("Could not read port forwarding rules")
     }
 
     pub fn find_port_forward(&self, id: Uuid) -> Result<Option<PortForward>> {
         Ok(self
-            .list_port_forwards()?
-            .into_iter()
-            .find(|rule| rule.id == id))
+            .connection
+            .query_row(
+                "
+                SELECT id, name, kind, bind_host, bind_port, destination_host,
+                       destination_port, host_id, enabled, created_at
+                FROM port_forwards WHERE id = ?1
+                ",
+                [id.to_string()],
+                map_port_forward,
+            )
+            .optional()?)
     }
 
     pub fn save_port_forward(&self, rule: &PortForward) -> Result<()> {
@@ -1057,19 +1030,31 @@ impl Database {
                 Utc::now().to_rfc3339(),
             ],
         )?;
-        self.connection.execute(
-            "
-            DELETE FROM command_history
-            WHERE id NOT IN (
-                SELECT id
-                FROM command_history
-                ORDER BY executed_at DESC, id DESC
-                LIMIT 500
-            )
-            ",
-            [],
-        )?;
+        self.prune_command_history()?;
         Ok(true)
+    }
+
+    /// Trims the command history to its cap.
+    ///
+    /// `id` is the autoincrement primary key, so ordering by it uses the index
+    /// instead of sorting the whole table the way ordering by `executed_at` did
+    /// on every single recorded command.
+    fn prune_command_history(&self) -> Result<usize> {
+        let cutoff: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM command_history ORDER BY id DESC LIMIT 1 OFFSET ?1",
+                [COMMAND_HISTORY_LIMIT - 1],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(cutoff) = cutoff else {
+            return Ok(0);
+        };
+        let removed = self
+            .connection
+            .execute("DELETE FROM command_history WHERE id < ?1", [cutoff])?;
+        Ok(removed)
     }
 
     pub fn delete_command_history(&self, command: &str) -> Result<bool> {
@@ -1096,29 +1081,30 @@ impl Database {
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut statement = self.connection.prepare(
             "
-            SELECT session.id, session.host_id, session.title, session.started_at,
-                   session.ended_at, session.status
-            FROM session_records AS session
-            WHERE session.ended_at IS NULL
-               OR (
-                    session.ended_at IS NOT NULL
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM session_records AS active
-                        WHERE (active.host_id = session.host_id
-                               OR (active.host_id IS NULL AND session.host_id IS NULL))
-                          AND active.ended_at IS NULL
-                    )
-                    AND session.id = (
-                        SELECT candidate.id
-                        FROM session_records AS candidate
-                        WHERE candidate.host_id = session.host_id
-                           OR (candidate.host_id IS NULL AND session.host_id IS NULL)
-                        ORDER BY candidate.started_at DESC, candidate.rowid DESC
-                        LIMIT 1
-                    )
-               )
-            ORDER BY session.started_at DESC
+            -- Every still-running session, plus the newest finished one for each
+            -- host that has none running. The correlated form this replaces was
+            -- quadratic: at 20k rows it took ~19s, which froze the polling Logs
+            -- screen. Window functions do it in one pass.
+            -- `rowid` breaks ties instead of `started_at` alone: chrono renders
+            -- RFC 3339 with variable fractional precision, so sessions opened in
+            -- the same second (a restored multi-pane workspace) do not compare
+            -- lexically in insertion order.
+            WITH ranked AS (
+                SELECT id, host_id, title, started_at, ended_at, status, rowid AS row_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY host_id
+                           ORDER BY started_at DESC, rowid DESC
+                       ) AS row_rank,
+                       COUNT(CASE WHEN ended_at IS NULL THEN 1 END) OVER (
+                           PARTITION BY host_id
+                       ) AS active_count
+                FROM session_records
+            )
+            SELECT id, host_id, title, started_at, ended_at, status
+            FROM ranked
+            WHERE ended_at IS NULL
+               OR (active_count = 0 AND row_rank = 1)
+            ORDER BY started_at DESC, row_id DESC
             LIMIT ?1
             ",
         )?;
@@ -1201,7 +1187,8 @@ impl Database {
     }
 
     pub fn reconcile_active_sessions(&self) -> Result<usize> {
-        self.connection
+        let reconciled = self
+            .connection
             .execute(
                 "
                 UPDATE session_records
@@ -1211,7 +1198,37 @@ impl Database {
                 ",
                 [Utc::now().to_rfc3339()],
             )
-            .context("Could not reconcile interrupted terminal sessions")
+            .context("Could not reconcile interrupted terminal sessions")?;
+        self.prune_session_history()?;
+        Ok(reconciled)
+    }
+
+    /// Caps the session log so it cannot grow for the life of the install.
+    ///
+    /// One row is written per terminal opened and nothing ever removed them, so
+    /// the table grew without bound. Running sessions are always kept.
+    ///
+    /// Recency is taken from `rowid` rather than `started_at`: chrono renders
+    /// RFC 3339 with variable fractional precision, so two rows in the same
+    /// second do not compare lexically in insertion order.
+    fn prune_session_history(&self) -> Result<usize> {
+        let removed = self
+            .connection
+            .execute(
+                "
+                DELETE FROM session_records
+                WHERE ended_at IS NOT NULL
+                  AND rowid NOT IN (
+                      SELECT rowid
+                      FROM session_records
+                      ORDER BY rowid DESC
+                      LIMIT ?1
+                  )
+                ",
+                [SESSION_HISTORY_LIMIT],
+            )
+            .context("Could not prune the terminal session history")?;
+        Ok(removed)
     }
 
     pub fn seed_welcome_hosts(&self) -> Result<()> {
@@ -1410,6 +1427,94 @@ fn parse_proxy(value: Option<&str>) -> Option<HostProxy> {
         .filter(|proxy| proxy.validate().is_ok())
 }
 
+/// Best effort: a database that cannot be re-permissioned is still usable.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if path.exists() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path, _mode: u32) {}
+
+fn map_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<VaultGroup> {
+    let id: String = row.get(0)?;
+    let parent_id: Option<String> = row.get(2)?;
+    let created_at: String = row.get(3)?;
+    let updated_at: String = row.get(4)?;
+    Ok(VaultGroup {
+        id: parse_uuid(&id)?,
+        name: row.get(1)?,
+        parent_id: parent_id.as_deref().map(parse_uuid).transpose()?,
+        created_at: parse_datetime(&created_at)?,
+        updated_at: parse_datetime(&updated_at)?,
+    })
+}
+
+fn map_identity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Identity> {
+    let id: String = row.get(0)?;
+    let kind: String = row.get(2)?;
+    Ok(Identity {
+        id: parse_uuid(&id)?,
+        label: row.get(1)?,
+        kind: parse_identity_kind(&kind),
+        username: row.get(3)?,
+        key_path: row.get(4)?,
+        secret_stored: row.get(5)?,
+        created_at: parse_datetime(&row.get::<_, String>(6)?)?,
+    })
+}
+
+fn map_port_forward(row: &rusqlite::Row<'_>) -> rusqlite::Result<PortForward> {
+    let id: String = row.get(0)?;
+    let kind: String = row.get(2)?;
+    let host_id: String = row.get(7)?;
+    Ok(PortForward {
+        id: parse_uuid(&id)?,
+        name: row.get(1)?,
+        kind: parse_forward_kind(&kind),
+        bind_host: row.get(3)?,
+        bind_port: row.get(4)?,
+        destination_host: row.get(5)?,
+        destination_port: row.get(6)?,
+        host_id: parse_uuid(&host_id)?,
+        enabled: row.get(8)?,
+        created_at: parse_datetime(&row.get::<_, String>(9)?)?,
+    })
+}
+
+fn json_column_error(json: &str, error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        json.len(),
+        rusqlite::types::Type::Text,
+        Box::new(error),
+    )
+}
+
+fn map_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
+    let id: String = row.get(0)?;
+    let panes_json: String = row.get(2)?;
+    let layout_json: Option<String> = row.get(3)?;
+    let active_pane_id: Option<String> = row.get(6)?;
+    let updated_at: String = row.get(7)?;
+    Ok(Workspace {
+        id: parse_uuid(&id)?,
+        name: row.get(1)?,
+        panes: serde_json::from_str(&panes_json)
+            .map_err(|error| json_column_error(&panes_json, error))?,
+        layout: layout_json
+            .as_deref()
+            .map(|json| serde_json::from_str(json).map_err(|e| json_column_error(json, e)))
+            .transpose()?,
+        split: row.get(4)?,
+        broadcast: row.get(5)?,
+        active_pane_id: active_pane_id.as_deref().map(parse_uuid).transpose()?,
+        updated_at: parse_datetime(&updated_at)?,
+    })
+}
+
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -1435,6 +1540,19 @@ fn parse_datetime(value: &str) -> rusqlite::Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Database {
+        fn find_session_exists(&self, id: Uuid) -> bool {
+            self.connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_records WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        }
+    }
 
     #[test]
     fn welcome_host_matches_the_local_platform_and_account() {
@@ -1863,6 +1981,196 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, second);
         assert_eq!(loaded[0].title, "Server at 12:00");
+    }
+
+    #[test]
+    fn local_sessions_are_grouped_apart_from_hosts() {
+        let database = Database::in_memory().unwrap();
+        let host = Host::new("Server", "server.example.com", "root");
+        database.save_host(&host).unwrap();
+        let old_local = database.start_session(None, "Local at 09:00").unwrap();
+        database
+            .finish_session(old_local, SessionStatus::Disconnected)
+            .unwrap();
+        let recent_local = database.start_session(None, "Local at 10:00").unwrap();
+        database
+            .finish_session(recent_local, SessionStatus::Disconnected)
+            .unwrap();
+        let remote = database.start_session(Some(host.id), "Server").unwrap();
+
+        let loaded = database.list_sessions(10).unwrap();
+        let ids = loaded.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        // The null-host bucket keeps exactly its own newest finished row, and
+        // the running remote session is independent of it.
+        assert!(ids.contains(&recent_local), "{ids:?}");
+        assert!(ids.contains(&remote), "{ids:?}");
+        assert!(!ids.contains(&old_local), "{ids:?}");
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn session_history_is_capped_and_keeps_the_newest_rows() {
+        let database = Database::in_memory().unwrap();
+        let oldest = database.start_session(None, "Oldest").unwrap();
+        database
+            .finish_session(oldest, SessionStatus::Disconnected)
+            .unwrap();
+        let mut newest = oldest;
+        for index in 0..(SESSION_HISTORY_LIMIT + 25) {
+            newest = database
+                .start_session(None, format!("Session {index}"))
+                .unwrap();
+            database
+                .finish_session(newest, SessionStatus::Disconnected)
+                .unwrap();
+        }
+
+        database.reconcile_active_sessions().unwrap();
+
+        let total: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM session_records", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, SESSION_HISTORY_LIMIT);
+        assert!(
+            !database.find_session_exists(oldest),
+            "the oldest finished session should have been pruned"
+        );
+        assert!(
+            database.find_session_exists(newest),
+            "the newest row must survive pruning"
+        );
+    }
+
+    #[test]
+    fn pruning_never_removes_a_session_that_is_still_running() {
+        let database = Database::in_memory().unwrap();
+        let running = database.start_session(None, "Still open").unwrap();
+        for index in 0..(SESSION_HISTORY_LIMIT + 25) {
+            let id = database
+                .start_session(None, format!("Session {index}"))
+                .unwrap();
+            database
+                .finish_session(id, SessionStatus::Disconnected)
+                .unwrap();
+        }
+
+        database.prune_session_history().unwrap();
+
+        assert!(
+            database.find_session_exists(running),
+            "an open session must survive pruning even when it is the oldest row"
+        );
+    }
+
+    #[test]
+    fn command_history_is_capped_at_the_limit_keeping_the_newest() {
+        let database = Database::in_memory().unwrap();
+        for index in 0..(COMMAND_HISTORY_LIMIT + 100) {
+            database.record_command(None, &format!("command {index}")).unwrap();
+        }
+
+        let total: i64 = database
+            .connection
+            .query_row("SELECT COUNT(*) FROM command_history", [], |row| row.get(0))
+            .unwrap();
+        assert!(total <= COMMAND_HISTORY_LIMIT, "{total}");
+        let newest = database.list_all_command_history(1).unwrap();
+        assert_eq!(
+            newest,
+            vec![format!("command {}", COMMAND_HISTORY_LIMIT + 99)]
+        );
+    }
+
+    #[test]
+    fn deleting_a_host_unlinks_every_chain_that_referenced_it() {
+        let database = Database::in_memory().unwrap();
+        let gateway = Host::new("Gateway", "10.0.0.1", "bastion");
+        database.save_host(&gateway).unwrap();
+        let mut first = Host::new("First", "10.0.0.2", "deploy");
+        first.jump_host_ids = vec![gateway.id];
+        database.save_host(&first).unwrap();
+        let mut second = Host::new("Second", "10.0.0.3", "deploy");
+        second.jump_host_ids = vec![gateway.id];
+        database.save_host(&second).unwrap();
+
+        assert!(database.delete_host(gateway.id).unwrap());
+
+        assert!(database.find_host(gateway.id).unwrap().is_none());
+        for id in [first.id, second.id] {
+            assert!(
+                database.find_host(id).unwrap().unwrap().jump_host_ids.is_empty(),
+                "chain should no longer point at the deleted jump host"
+            );
+        }
+    }
+
+    #[test]
+    fn targeted_lookups_return_the_same_row_as_the_listing() {
+        let database = Database::in_memory().unwrap();
+        let group = VaultGroup::new("Production", None);
+        database.save_group(&group).unwrap();
+        let identity = Identity::new("Deploy key", IdentityKind::KeyFile);
+        let mut identity = identity;
+        identity.key_path = Some("/vault/keys/deploy".into());
+        database.save_identity(&identity).unwrap();
+        let host = Host::new("Server", "10.0.0.9", "deploy");
+        database.save_host(&host).unwrap();
+        let rule = PortForward {
+            id: Uuid::new_v4(),
+            name: "Web".into(),
+            kind: ForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 8080,
+            destination_host: Some("127.0.0.1".into()),
+            destination_port: Some(80),
+            host_id: host.id,
+            enabled: false,
+            created_at: Utc::now(),
+        };
+        database.save_port_forward(&rule).unwrap();
+        let mut workspace = Workspace::new("Cluster");
+        workspace.panes = vec![heminus_domain::WorkspacePane {
+            id: Uuid::new_v4(),
+            host_id: Some(host.id),
+            title: "Pane".into(),
+        }];
+        database.save_workspace(&workspace).unwrap();
+
+        assert_eq!(database.find_group(group.id).unwrap().unwrap().name, "Production");
+        assert_eq!(
+            database.find_identity(identity.id).unwrap().unwrap().label,
+            "Deploy key"
+        );
+        assert_eq!(
+            database.find_port_forward(rule.id).unwrap().unwrap().bind_port,
+            8080
+        );
+        assert_eq!(
+            database.find_workspace(workspace.id).unwrap().unwrap().panes.len(),
+            1
+        );
+        assert!(database.find_group(Uuid::new_v4()).unwrap().is_none());
+        assert!(database.find_identity(Uuid::new_v4()).unwrap().is_none());
+        assert!(database.find_port_forward(Uuid::new_v4()).unwrap().is_none());
+        assert!(database.find_workspace(Uuid::new_v4()).unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_database_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!("heminus-perms-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("heminus.db");
+        let database = Database::open(&path).unwrap();
+        drop(database);
+        restrict_to_owner(&path, 0o600);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the host inventory must not be world-readable");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

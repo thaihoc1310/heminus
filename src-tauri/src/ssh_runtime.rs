@@ -86,7 +86,11 @@ impl SshRuntime {
             known_hosts: root.join("known_hosts"),
             global_known_hosts: root.join("global_known_hosts"),
             keys: root.join("keys"),
-            connections: connections_root.join(uuid::Uuid::new_v4().to_string()),
+            connections: connections_root.join(format!(
+                "{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )),
             root,
         };
         fs::create_dir_all(&runtime.keys)
@@ -100,6 +104,7 @@ impl SshRuntime {
         secure_directory(&runtime.connections)?;
         ensure_private_file(&runtime.known_hosts, b"")?;
         ensure_private_file(&runtime.global_known_hosts, b"")?;
+        remove_abandoned_connection_directories(&connections_root, &runtime.connections);
         Ok(runtime)
     }
 
@@ -377,6 +382,18 @@ impl SshRuntime {
         &self.keys
     }
 
+    /// A private directory for short-lived files that hold key material.
+    ///
+    /// Validation used to stage decrypted keys in the shared system temp
+    /// directory; this keeps them inside the 0700 vault instead.
+    pub fn scratch_directory(&self) -> Result<PathBuf, String> {
+        let path = self.root.join("tmp");
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("Could not create the Heminus scratch directory: {error}"))?;
+        secure_directory(&path)?;
+        Ok(path)
+    }
+
     pub fn owns_key(&self, path: &Path) -> bool {
         match (path.canonicalize(), self.keys.canonicalize()) {
             (Ok(path), Ok(keys)) => path.starts_with(keys),
@@ -409,6 +426,32 @@ impl SshRuntime {
 impl Drop for SshRuntime {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.connections);
+    }
+}
+
+/// Clears connection directories left behind by runs that did not shut down.
+///
+/// `Drop` only removes the current run's directory, and it does not run when the
+/// process is killed or aborts, so these accumulated one per launch forever.
+/// The directory name carries the owning PID; anything whose process is gone is
+/// safe to delete, as is anything in the pre-PID naming scheme.
+fn remove_abandoned_connection_directories(connections_root: &Path, current: &Path) {
+    let Ok(entries) = fs::read_dir(connections_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current || !path.is_dir() {
+            continue;
+        }
+        let owner = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<u32>().ok());
+        if owner.is_none_or(|pid| !crate::platform::process_is_running(pid)) {
+            let _ = fs::remove_dir_all(&path);
+        }
     }
 }
 
@@ -621,6 +664,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(host_arguments.windows(2).any(|pair| pair == ["-F", "none"]));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_clears_connection_directories_from_runs_that_never_shut_down() {
+        let root = std::env::temp_dir().join(format!("heminus-runtime-test-{}", Uuid::new_v4()));
+        let connections_root = root.join("connections");
+        fs::create_dir_all(&connections_root).unwrap();
+        // A crashed run leaves its directory behind; the PID is long gone.
+        let abandoned = connections_root.join("999999-abcdef");
+        fs::create_dir_all(&abandoned).unwrap();
+        fs::write(abandoned.join("session.conf"), b"Host x").unwrap();
+        // Directories from before the PID naming scheme are also abandoned.
+        let legacy = connections_root.join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&legacy).unwrap();
+        // A directory owned by a live process must survive.
+        let live = connections_root.join(format!("{}-other", std::process::id()));
+        fs::create_dir_all(&live).unwrap();
+
+        let runtime = SshRuntime::initialize_at(root.clone()).unwrap();
+
+        assert!(!abandoned.exists(), "a dead run's config must be removed");
+        assert!(!legacy.exists(), "legacy directories must be removed");
+        assert!(live.exists(), "another live window's directory must survive");
+        assert!(runtime.connections.is_dir());
+
+        drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 

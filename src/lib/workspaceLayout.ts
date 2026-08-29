@@ -21,22 +21,43 @@ export function normalizeLayout(
   paneIds: string[]
 ): WorkspaceLayout | null {
   const allowed = new Set(paneIds);
-  let next = prune(layout, allowed);
+  const next = prune(layout, allowed);
   const present = new Set(next ? leafOrder(next) : []);
+  const missing: string[] = [];
   for (const paneId of paneIds) {
-    if (!present.has(paneId)) {
-      next = next
-        ? {
-          type: "split",
-          direction: "horizontal",
-          ratio: 0.5,
-          first: next,
-          second: { type: "pane", pane_id: paneId }
-          }
-        : { type: "pane", pane_id: paneId };
-    }
+    // Tracked as they are added: a duplicate id in `paneIds` would otherwise
+    // produce two leaves for the same pane.
+    if (present.has(paneId)) continue;
+    present.add(paneId);
+    missing.push(paneId);
   }
-  return next;
+  if (missing.length === 0) return next;
+
+  // Each missing pane used to be grafted on as `{existing, new}` at ratio 0.5,
+  // which halved everything already there once per pane — restoring four panes
+  // left the original layout at a sixteenth of the workspace. Giving the new
+  // panes a shrinking share keeps every pane's area proportional instead.
+  let grafted = next;
+  let total = next ? leafOrder(next).length : 0;
+  for (const paneId of missing) {
+    const leaf: WorkspaceLayout = { type: "pane", pane_id: paneId };
+    if (!grafted) {
+      grafted = leaf;
+      total = 1;
+      continue;
+    }
+    total += 1;
+    // The subtree already holds `total - 1` panes, so giving it that share of
+    // the split leaves every pane the same width.
+    grafted = {
+      type: "split",
+      direction: "horizontal",
+      ratio: (total - 1) / total,
+      first: grafted,
+      second: leaf
+    };
+  }
+  return grafted;
 }
 
 export function splitPane(
@@ -47,9 +68,12 @@ export function splitPane(
 ): WorkspaceLayout {
   const withoutPane = removePane(layout, paneId);
   const leaf: WorkspaceLayout = { type: "pane", pane_id: paneId };
-  if (!withoutPane || !targetId) return withoutPane
-    ? { type: "split", direction: "horizontal", first: withoutPane, second: leaf }
-    : leaf;
+  const appended = (base: WorkspaceLayout | null): WorkspaceLayout =>
+    base ? { type: "split", direction: "horizontal", first: base, second: leaf } : leaf;
+  if (!withoutPane || !targetId) return appended(withoutPane);
+  // A target that is not in the tree cannot be split against. Appending keeps
+  // the pane in the layout; returning the tree unchanged would have dropped it.
+  if (!leafOrder(withoutPane).includes(targetId)) return appended(withoutPane);
   const direction: SplitDirection =
     zone === "left" || zone === "right" ? "horizontal" : "vertical";
   const before = zone === "left" || zone === "top";
@@ -110,6 +134,9 @@ export function setSplitRatio(
     return { ...layout, ratio: clampRatio(ratio) };
   }
   const [branch, ...remaining] = path;
+  // Only 0 and 1 address a real branch; anything else is a malformed path and
+  // must not silently resize the second subtree.
+  if (branch !== 0 && branch !== 1) return layout;
   return branch === 0
     ? { ...layout, first: setSplitRatio(layout.first, remaining, ratio) ?? layout.first }
     : { ...layout, second: setSplitRatio(layout.second, remaining, ratio) ?? layout.second };

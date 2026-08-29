@@ -61,27 +61,9 @@ pub async fn read_key_material(
             .secret_stored
             .then(|| crate::credential::get(identity.id))
             .and_then(Result::ok);
-        let mut command = Command::new(crate::platform::ssh_keygen_executable()?);
-        crate::platform::configure_background_command(&mut command);
-        let output = command
-            .arg("-y")
-            .arg("-P")
-            .arg(
-                passphrase
-                    .as_ref()
-                    .map(|value| value.as_str())
-                    .unwrap_or(""),
-            )
-            .arg("-f")
-            .arg(&path)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("Could not derive the public key: {error}"))?;
-        if output.status.success() {
-            public_key = String::from_utf8(output.stdout)
-                .ok()
-                .map(|value| format!("{}\n", value.trim()));
-        }
+        // A key whose passphrase is not saved simply has no derivable public
+        // half here; the pane renders without it rather than failing.
+        public_key = derive_public_key(&path, passphrase.as_ref().map(|value| value.as_str())).ok();
     }
     let certificate = fs::read_to_string(certificate_path(&path)).ok();
     Ok(KeyMaterial {
@@ -205,9 +187,11 @@ pub async fn import_private_key(
     state: State<'_, AppState>,
     path: PathBuf,
 ) -> Result<PrivateKeyImport, String> {
-    let inspected = tauri::async_runtime::spawn_blocking(move || inspect_private_key(&path))
-        .await
-        .map_err(|error| error.to_string())??;
+    let scratch = state.ssh.scratch_directory()?;
+    let inspected =
+        tauri::async_runtime::spawn_blocking(move || inspect_private_key(&path, &scratch))
+            .await
+            .map_err(|error| error.to_string())??;
     let database = state
         .database
         .lock()
@@ -279,7 +263,7 @@ struct InspectedPrivateKey {
     encrypted: bool,
 }
 
-fn inspect_private_key(path: &Path) -> Result<InspectedPrivateKey, String> {
+fn inspect_private_key(path: &Path, scratch: &Path) -> Result<InspectedPrivateKey, String> {
     let path = path
         .canonicalize()
         .map_err(|error| format!("Could not open the dropped key file: {error}"))?;
@@ -328,7 +312,7 @@ fn inspect_private_key(path: &Path) -> Result<InspectedPrivateKey, String> {
     encrypted |= contents.contains("Proc-Type: 4,ENCRYPTED") || contents.contains("DEK-Info:");
 
     if !encrypted {
-        validate_unencrypted_private_key(&contents)?;
+        validate_unencrypted_private_key(&contents, scratch)?;
     }
     Ok(InspectedPrivateKey {
         path,
@@ -337,9 +321,8 @@ fn inspect_private_key(path: &Path) -> Result<InspectedPrivateKey, String> {
     })
 }
 
-fn validate_unencrypted_private_key(contents: &str) -> Result<(), String> {
-    let temporary_path =
-        std::env::temp_dir().join(format!("heminus-key-validation-{}", Uuid::new_v4()));
+fn validate_unencrypted_private_key(contents: &str, scratch: &Path) -> Result<(), String> {
+    let temporary_path = scratch.join(format!("heminus-key-validation-{}", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -483,28 +466,89 @@ fn command_error(context: &str, output: &Output) -> String {
     }
 }
 
+/// Checks a passphrase without ever putting it on a command line.
+///
+/// This used to shell out to `ssh-keygen -P <passphrase>`, which publishes the
+/// secret in `/proc/<pid>/cmdline` where every process on the machine can read
+/// it. `ssh_key` decrypts in-process instead.
 pub fn validate_private_key_passphrase(path: &Path, passphrase: &str) -> Result<(), String> {
-    let mut command = Command::new(crate::platform::ssh_keygen_executable()?);
-    crate::platform::configure_background_command(&mut command);
-    let output = command
-        .arg("-y")
-        .arg("-P")
-        .arg(passphrase)
-        .arg("-f")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("Could not validate the private key passphrase: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err("The private key passphrase is incorrect".into())
+    let key = PrivateKey::read_openssh_file(path)
+        .map_err(|error| format!("Could not read the private key: {error}"))?;
+    if !key.is_encrypted() {
+        return Ok(());
     }
+    key.decrypt(passphrase)
+        .map(|_| ())
+        .map_err(|_| "The private key passphrase is incorrect".to_string())
+}
+
+/// Derives the public key for a private key held in the Heminus vault.
+///
+/// Kept in-process for the same reason as the passphrase check above.
+fn derive_public_key(path: &Path, passphrase: Option<&str>) -> Result<String, String> {
+    let key = PrivateKey::read_openssh_file(path)
+        .map_err(|error| format!("Could not read the private key: {error}"))?;
+    let key = if key.is_encrypted() {
+        let passphrase =
+            passphrase.ok_or_else(|| "The private key passphrase is required".to_string())?;
+        key.decrypt(passphrase)
+            .map_err(|_| "The private key passphrase is incorrect".to_string())?
+    } else {
+        key
+    };
+    key.public_key()
+        .to_openssh()
+        .map(|value| format!("{}\n", value.trim()))
+        .map_err(|error| format!("Could not derive the public key: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The passphrase used to be passed as `ssh-keygen -P <secret>`, which puts
+    /// it in `/proc/<pid>/cmdline` for every process on the machine to read.
+    #[test]
+    fn passphrase_checks_and_public_keys_stay_in_process() {
+        let directory = std::env::temp_dir().join(format!("heminus-inproc-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("id_ed25519");
+        generate_ed25519_files(&path, "in-process", Some("correct horse")).unwrap();
+        // Remove the generated .pub so the public key has to be derived.
+        fs::remove_file(public_key_path(&path)).unwrap();
+
+        assert!(validate_private_key_passphrase(&path, "correct horse").is_ok());
+        assert!(validate_private_key_passphrase(&path, "wrong").is_err());
+
+        let public = derive_public_key(&path, Some("correct horse")).unwrap();
+        assert!(public.starts_with("ssh-ed25519 "));
+        assert!(public.ends_with('\n'));
+        assert!(
+            derive_public_key(&path, Some("wrong")).is_err(),
+            "a bad passphrase must not yield a public key"
+        );
+        assert!(
+            derive_public_key(&path, None).is_err(),
+            "an encrypted key needs its passphrase"
+        );
+
+        remove_key_files(&path);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unencrypted_keys_validate_without_a_passphrase() {
+        let directory = std::env::temp_dir().join(format!("heminus-plain-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("id_ed25519");
+        generate_ed25519_files(&path, "plain", None).unwrap();
+
+        assert!(validate_private_key_passphrase(&path, "").is_ok());
+        assert!(derive_public_key(&path, None).unwrap().starts_with("ssh-ed25519 "));
+
+        remove_key_files(&path);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn key_file_names_cannot_escape_ssh_directory() {
@@ -547,7 +591,7 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        let inspected = inspect_private_key(&path).unwrap();
+        let inspected = inspect_private_key(&path, &directory).unwrap();
         assert_eq!(inspected.format, "OpenSSH");
         assert!(!inspected.encrypted);
         #[cfg(unix)]
@@ -576,7 +620,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
 
-        let inspected = inspect_private_key(&path).unwrap();
+        let inspected = inspect_private_key(&path, &directory).unwrap();
         assert_eq!(inspected.format, "RSA PEM");
         assert!(!inspected.encrypted);
 
@@ -591,11 +635,11 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let public = directory.join("id.pub");
         fs::write(&public, "ssh-ed25519 AAAA test\n").unwrap();
-        assert!(inspect_private_key(&public).is_err());
+        assert!(inspect_private_key(&public, &directory).is_err());
 
         let incomplete = directory.join("broken.pem");
         fs::write(&incomplete, "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n").unwrap();
-        assert!(inspect_private_key(&incomplete).is_err());
+        assert!(inspect_private_key(&incomplete, &directory).is_err());
 
         fs::remove_file(public).unwrap();
         fs::remove_file(incomplete).unwrap();

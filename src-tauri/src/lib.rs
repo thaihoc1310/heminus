@@ -9,7 +9,10 @@ mod ssh_runtime;
 mod terminal;
 mod tunnel;
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use heminus_storage::Database;
 use sftp::SftpManager;
@@ -19,7 +22,7 @@ use terminal::TerminalManager;
 use tunnel::TunnelManager;
 
 pub struct AppState {
-    pub database: Mutex<Database>,
+    pub database: Arc<Mutex<Database>>,
     pub ssh: ssh_runtime::SshRuntime,
     pub detached_payloads: Mutex<HashMap<String, String>>,
 }
@@ -64,12 +67,13 @@ pub fn run() {
             database.migrate_welcome_host()?;
             database.reconcile_active_sessions()?;
             database.seed_welcome_hosts()?;
+            let database = Arc::new(Mutex::new(database));
             app.manage(AppState {
-                database: Mutex::new(database),
+                database: Arc::clone(&database),
                 ssh,
                 detached_payloads: Mutex::new(HashMap::new()),
             });
-            app.manage(TerminalManager::default());
+            app.manage(TerminalManager::new(database));
             app.manage(TunnelManager::default());
             app.manage(SftpManager::default());
             match desktop_integration::ensure_local_terminal_shortcut() {
@@ -92,6 +96,18 @@ pub fn run() {
                 main.show()?;
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // A detached window that closes before its webview collects the
+            // payload would otherwise strand up to a megabyte of tab state in
+            // the map for the rest of the run.
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && window.label().starts_with("detached-")
+                && let Some(state) = window.try_state::<AppState>()
+                && let Ok(mut payloads) = state.detached_payloads.lock()
+            {
+                payloads.remove(window.label());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -155,6 +171,7 @@ pub fn run() {
             sftp::sftp_cancel_transfer,
             terminal::terminal_open,
             terminal::terminal_attach,
+            terminal::terminal_detach,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,

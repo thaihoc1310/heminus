@@ -130,6 +130,22 @@
   let remoteFileListElement = $state<HTMLDivElement>();
   const localScrollPositions = new Map<string, number>();
   const remoteScrollPositions = new Map<string, number>();
+  /** Directories worth remembering a scroll offset for. */
+  const scrollMemoryLimit = 200;
+
+  function rememberScrollPosition(
+    positions: Map<string, number>,
+    path: string,
+    offset: number
+  ) {
+    positions.delete(path);
+    positions.set(path, offset);
+    while (positions.size > scrollMemoryLimit) {
+      const oldest = positions.keys().next();
+      if (oldest.done) break;
+      positions.delete(oldest.value);
+    }
+  }
   let componentDisposed = false;
   let localDirectoryRequestId = 0;
   let remoteDirectoryRequestId = 0;
@@ -236,19 +252,24 @@
     return result;
   }
 
+  /** How many directories back/forward navigation remembers. */
+  const historyLimit = 100;
+
   function rememberPath(
     history: string[],
     historyIndex: number,
     path: string
   ): { history: string[]; index: number } {
     if (history[historyIndex] === path) return { history, index: historyIndex };
-    const next = [...history.slice(0, historyIndex + 1), path];
+    let next = [...history.slice(0, historyIndex + 1), path];
+    // A long-lived pane would otherwise keep every directory it ever opened.
+    if (next.length > historyLimit) next = next.slice(next.length - historyLimit);
     return { history: next, index: next.length - 1 };
   }
 
   async function openLocalDirectory(path: string, remember = true) {
     if (currentPath && localFileListElement) {
-      localScrollPositions.set(currentPath, localFileListElement.scrollTop);
+      rememberScrollPosition(localScrollPositions, currentPath, localFileListElement.scrollTop);
     }
     const requestId = ++localDirectoryRequestId;
     const sourceSession = leftSession;
@@ -464,7 +485,7 @@
     const activeSession = session;
     if (!activeSession) return;
     if (remotePath && remoteFileListElement) {
-      remoteScrollPositions.set(remotePath, remoteFileListElement.scrollTop);
+      rememberScrollPosition(remoteScrollPositions, remotePath, remoteFileListElement.scrollTop);
     }
     const requestId = ++remoteDirectoryRequestId;
     remoteLoading = true;
@@ -508,7 +529,11 @@
 
   function parentPath(path: string): string {
     const normalized = path.replace(/\/+$/, "");
-    return normalized.slice(0, normalized.lastIndexOf("/")) || "/";
+    const separator = normalized.lastIndexOf("/");
+    // Without this guard a slash-less path sliced to -1 and lost its last
+    // character instead of resolving to the root.
+    if (separator < 0) return "/";
+    return normalized.slice(0, separator) || "/";
   }
 
   async function navigateLocalHistory(offset: number) {
@@ -814,16 +839,26 @@
   }
 
   async function uploadEntry(entry: BrowserEntry) {
-    if (!session) return;
+    // Captured before the dialog: awaiting it gives the session time to drop,
+    // and `session!` further down would then throw instead of reporting this.
+    const activeSession = session;
+    if (!activeSession) return;
     const destination = joinRemote(remotePath, entry.name);
     if (
       remoteEntries.some((candidate) => candidate.name === entry.name) &&
       !(await confirmDialog({
         title: "Replace remote item?",
-        message: `Merge or replace “${entry.name}” on the remote host?`,
-        confirmLabel: "Replace"
+        message: entry.isDirectory
+          ? `“${entry.name}” already exists on the remote host. It will be replaced: everything currently inside it is deleted.`
+          : `Replace “${entry.name}” on the remote host?`,
+        confirmLabel: "Replace",
+        danger: entry.isDirectory
       }))
     ) {
+      return;
+    }
+    if (!session) {
+      error = "The remote session closed before the transfer started.";
       return;
     }
     const sourceSession = leftSession;
@@ -835,8 +870,8 @@
       `Uploading ${entry.name}`,
       `${sourceLabel} → ${targetLabel}`,
       (channel, id) => sourceSession
-        ? transferRemoteFile(sourceSession.id, session!.id, id, entry.path, destination, channel)
-        : uploadFile(session!.id, id, entry.path, destination, channel),
+        ? transferRemoteFile(sourceSession.id, activeSession.id, id, entry.path, destination, channel)
+        : uploadFile(activeSession.id, id, entry.path, destination, channel),
       () => openRemoteDirectory(remotePath)
     );
   }
@@ -850,7 +885,8 @@
     entry: RemoteEntry,
     openAfter: string | null | undefined = undefined
   ) {
-    if (!session) return;
+    const activeSession = session;
+    if (!activeSession) return;
     const targetSession = leftSession;
     const destination = targetSession
       ? joinRemote(currentPath, entry.name)
@@ -859,10 +895,17 @@
       localEntries.some((candidate) => candidate.name === entry.name) &&
       !(await confirmDialog({
         title: "Replace local item?",
-        message: `Merge or replace “${entry.name}” in the ${targetSession ? "left remote" : "local"} folder?`,
-        confirmLabel: "Replace"
+        message: entry.isDirectory
+          ? `“${entry.name}” already exists in the ${targetSession ? "left remote" : "local"} folder. It will be replaced: everything currently inside it is deleted.`
+          : `Replace “${entry.name}” in the ${targetSession ? "left remote" : "local"} folder?`,
+        confirmLabel: "Replace",
+        danger: entry.isDirectory
       }))
     ) {
+      return;
+    }
+    if (!session) {
+      error = "The remote session closed before the transfer started.";
       return;
     }
     const sourceLabel = hosts.find((host) => host.id === selectedHostId)?.label ?? "Remote";
@@ -873,13 +916,19 @@
       `Downloading ${entry.name}`,
       `${sourceLabel} → ${targetLabel}`,
       (channel, id) => targetSession
-        ? transferRemoteFile(session!.id, targetSession.id, id, entry.path, destination, channel)
-        : downloadFile(session!.id, id, entry.path, destination, channel),
+        ? transferRemoteFile(activeSession.id, targetSession.id, id, entry.path, destination, channel)
+        : downloadFile(activeSession.id, id, entry.path, destination, channel),
       () => openLocalDirectory(currentPath),
       targetSession || openAfter === undefined || entry.isDirectory
         ? undefined
         : () => openLocalEntry(destination, openAfter)
     );
+  }
+
+  /** Arms the auto-dismiss, unless the pane is already gone. */
+  function scheduleTransferDismissal() {
+    if (componentDisposed) return;
+    transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
   }
 
   async function runTransfer(
@@ -919,16 +968,27 @@
       transferProgress = 1;
       transferTransferred = transferTotal || transferTransferred;
       transferStatus = "completed";
-      await refresh();
-      await afterSuccess?.();
-      transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
+      // The bytes are already across. Anything that fails from here — listing
+      // the folder again, or launching the file — is a separate problem and
+      // must not relabel a finished transfer as failed.
+      try {
+        await refresh();
+        await afterSuccess?.();
+      } catch (cause) {
+        error = errorMessage(cause);
+      }
+      scheduleTransferDismissal();
     } catch (cause) {
       const failure = errorMessage(cause);
       if (failure.toLocaleLowerCase().includes("transfer cancelled")) {
         transferStatus = "cancelled";
         transferFailure = "";
-        await refresh();
-        transferDismissTimer = window.setTimeout(() => dismissTransfer(), 4500);
+        try {
+          await refresh();
+        } catch (refreshCause) {
+          error = errorMessage(refreshCause);
+        }
+        scheduleTransferDismissal();
       } else {
         transferFailure = failure;
         transferStatus = "failed";

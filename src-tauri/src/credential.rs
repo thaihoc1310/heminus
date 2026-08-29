@@ -12,6 +12,22 @@ const ASKPASS_CANDIDATES_ENV: &str = "HEMINUS_ASKPASS_CANDIDATES";
 struct AskpassCandidate {
     id: Uuid,
     needles: Vec<String>,
+    /// Whether this secret is a server-facing password or a local key passphrase.
+    ///
+    /// A password is meant to be sent to the server, so answering an
+    /// unrecognised prompt with one is only as risky as the connection already
+    /// is. A key passphrase never leaves the machine, so it must only answer a
+    /// prompt that names its own key file.
+    #[serde(default)]
+    kind: AskpassSecret,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AskpassSecret {
+    #[default]
+    Password,
+    KeyPassphrase,
 }
 
 fn account(id: Uuid) -> String {
@@ -142,18 +158,25 @@ fn candidate(identity: &Identity, host: &Host) -> Option<AskpassCandidate> {
     if !identity.secret_stored {
         return None;
     }
-    let needles = match identity.kind {
-        IdentityKind::KeyFile => identity.key_path.iter().cloned().collect(),
+    let (needles, kind) = match identity.kind {
+        IdentityKind::KeyFile => (
+            identity.key_path.iter().cloned().collect(),
+            AskpassSecret::KeyPassphrase,
+        ),
         IdentityKind::Password => {
             let username = identity.username.as_deref().unwrap_or(&host.username);
             let address = crate::ssh_runtime::effective_address(host);
-            vec![format!("{username}@{address}"), address.to_string()]
+            (
+                vec![format!("{username}@{address}"), address.to_string()],
+                AskpassSecret::Password,
+            )
         }
-        IdentityKind::Agent => Vec::new(),
+        IdentityKind::Agent => (Vec::new(), AskpassSecret::Password),
     };
     (!needles.is_empty()).then_some(AskpassCandidate {
         id: identity.id,
         needles,
+        kind,
     })
 }
 
@@ -220,8 +243,17 @@ fn choose_candidate(prompt: &str, candidates: &[AskpassCandidate]) -> Result<Uui
     if matches.len() == 1 {
         return Ok(matches[0].id);
     }
-    if matches.is_empty() && candidates.len() == 1 {
-        return Ok(candidates[0].id);
+    // Falling back to the only saved credential is safe for a password, which
+    // is destined for the server anyway. It is not safe for a key passphrase:
+    // the server controls keyboard-interactive prompt text, so a hostile host
+    // could ask "Enter passphrase:" and be handed the private key's passphrase,
+    // which is never supposed to leave this machine. OpenSSH always names the
+    // key file when it asks locally, so a genuine prompt matches a needle.
+    if matches.is_empty()
+        && let [only] = candidates
+        && only.kind == AskpassSecret::Password
+    {
+        return Ok(only.id);
     }
     Err("Could not determine which saved SSH credential was requested".into())
 }
@@ -245,10 +277,12 @@ mod tests {
         let target = AskpassCandidate {
             id: Uuid::new_v4(),
             needles: vec!["deploy@10.0.0.20".into()],
+            kind: AskpassSecret::Password,
         };
         let jump = AskpassCandidate {
             id: Uuid::new_v4(),
             needles: vec!["/vault/keys/gateway".into()],
+            kind: AskpassSecret::KeyPassphrase,
         };
         let candidates = vec![target.clone(), jump.clone()];
         assert_eq!(
@@ -270,6 +304,7 @@ mod tests {
         let candidates = vec![AskpassCandidate {
             id: Uuid::new_v4(),
             needles: vec!["deploy@10.0.0.20".into(), "10.0.0.20".into()],
+            kind: AskpassSecret::Password,
         }];
         for prompt in [
             "The authenticity of host '10.0.0.20 (10.0.0.20)' can't be established.\n\
@@ -285,6 +320,71 @@ mod tests {
         }
         assert!(choose_candidate("deploy@10.0.0.20's password: ", &candidates).is_ok());
         assert!(choose_candidate("Password: ", &candidates).is_ok());
+    }
+
+    #[test]
+    fn a_lone_key_passphrase_is_never_given_to_an_unrecognised_prompt() {
+        let key = AskpassCandidate {
+            id: Uuid::new_v4(),
+            needles: vec!["/vault/keys/deploy".into()],
+            kind: AskpassSecret::KeyPassphrase,
+        };
+        let candidates = vec![key.clone()];
+
+        // The server picks the keyboard-interactive prompt text, so a hostile
+        // host could ask for a "passphrase" and collect the private key's.
+        for prompt in [
+            "Enter passphrase: ",
+            "Please enter your passphrase to continue: ",
+            "password: ",
+        ] {
+            assert!(
+                choose_candidate(prompt, &candidates).is_err(),
+                "a key passphrase must not answer a prompt that does not name its key: {prompt}"
+            );
+        }
+
+        // OpenSSH names the key file when it asks locally, so real prompts work.
+        assert_eq!(
+            choose_candidate("Enter passphrase for key '/vault/keys/deploy': ", &candidates)
+                .unwrap(),
+            key.id
+        );
+    }
+
+    #[test]
+    fn a_lone_password_still_answers_a_generic_server_prompt() {
+        let password = AskpassCandidate {
+            id: Uuid::new_v4(),
+            needles: vec!["deploy@10.0.0.20".into()],
+            kind: AskpassSecret::Password,
+        };
+        let candidates = vec![password.clone()];
+
+        // A password is sent to that server either way, so the fallback stays.
+        assert_eq!(
+            choose_candidate("Password: ", &candidates).unwrap(),
+            password.id
+        );
+    }
+
+    #[test]
+    fn candidate_kind_follows_the_identity() {
+        let host = Host::new("Server", "10.0.0.20", "deploy");
+        let mut password = Identity::new("Password", IdentityKind::Password);
+        password.secret_stored = true;
+        let mut key = Identity::new("Key", IdentityKind::KeyFile);
+        key.secret_stored = true;
+        key.key_path = Some("/vault/keys/deploy".into());
+
+        assert_eq!(
+            candidate(&password, &host).unwrap().kind,
+            AskpassSecret::Password
+        );
+        assert_eq!(
+            candidate(&key, &host).unwrap().kind,
+            AskpassSecret::KeyPassphrase
+        );
     }
 
     #[test]

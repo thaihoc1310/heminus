@@ -104,6 +104,12 @@
     type CollectionSort,
     type CollectionView
   } from "./lib/collection";
+  import {
+    buildGroupIndex,
+    buildGroupRows,
+    collectGroupSubtree,
+    countHostsPerGroup
+  } from "./lib/hostGroups";
 
   const appWindow = "__TAURI_INTERNALS__" in window ? getCurrentWindow() : null;
   const detachedMode = new URLSearchParams(window.location.search).has("detached");
@@ -1253,44 +1259,26 @@
     return "credential required";
   }
 
+  // Derived once per change instead of rebuilt by every caller: the vault view
+  // asks for group paths and host counts repeatedly while rendering, and the
+  // old scan-everything helpers made that quadratic in the number of groups.
+  const groupIndex = $derived(buildGroupIndex(groups));
+  const groupRowList = $derived(buildGroupRows(groups, groupIndex));
+  const groupPathsById = $derived(
+    new Map(groupRowList.map((row) => [row.group.id, row.path]))
+  );
+  const hostCountsByGroup = $derived(countHostsPerGroup(groups, hosts));
+
   function groupRows(): Array<{ group: VaultGroup; depth: number; path: string }> {
-    const rows: Array<{ group: VaultGroup; depth: number; path: string }> = [];
-    const visited = new Set<string>();
-    const append = (parentId: string | null, depth: number, prefix: string) => {
-      for (const group of groups
-        .filter((candidate) => candidate.parent_id === parentId)
-        .sort((left, right) => left.name.localeCompare(right.name))) {
-        if (visited.has(group.id)) continue;
-        visited.add(group.id);
-        const path = prefix ? `${prefix} / ${group.name}` : group.name;
-        rows.push({ group, depth, path });
-        append(group.id, depth + 1, path);
-      }
-    };
-    append(null, 0, "");
-    for (const group of groups) {
-      if (!visited.has(group.id)) rows.push({ group, depth: 0, path: group.name });
-    }
-    return rows;
+    return groupRowList;
   }
 
   function groupPath(id: string): string {
-    return groupRows().find((row) => row.group.id === id)?.path ?? "Unknown group";
+    return groupPathsById.get(id) ?? "Unknown group";
   }
 
   function groupAndDescendantIds(id: string): Set<string> {
-    const ids = new Set([id]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const group of groups) {
-        if (group.parent_id && ids.has(group.parent_id) && !ids.has(group.id)) {
-          ids.add(group.id);
-          changed = true;
-        }
-      }
-    }
-    return ids;
+    return collectGroupSubtree(id, groupIndex);
   }
 
   function movableGroupRows(groupId: string) {
@@ -1454,8 +1442,7 @@
   }
 
   function groupHostCount(id: string): number {
-    const ids = groupAndDescendantIds(id);
-    return hosts.filter((host) => host.group_id && ids.has(host.group_id)).length;
+    return hostCountsByGroup.get(id) ?? 0;
   }
 
   function groupBreadcrumb(): VaultGroup[] {
@@ -2365,15 +2352,30 @@
     terminalHistoryVersion += 1;
   }
 
-  function broadcastTerminalBytes(sourcePaneId: string, bytes: number[]) {
+  /**
+   * Keystrokes must reach each mirrored session in the order they were typed.
+   * Terminal writes run off the UI thread, so two unchained writes to the same
+   * session can land out of order; one promise chain per target session keeps
+   * them serialised the way each pane's own `writeChain` does.
+   */
+  const broadcastChains = new Map<string, Promise<void>>();
+
+  function broadcastTerminalBytes(sourcePaneId: string, bytes: Uint8Array) {
     const workspace = workspaceForPane(sourcePaneId);
     if (!workspace?.broadcastPaneIds.includes(sourcePaneId) || bytes.length === 0) return;
+    const payload = Array.from(bytes);
+    const live = new Set(Object.values(terminalSessionIds));
+    for (const sessionId of broadcastChains.keys()) {
+      if (!live.has(sessionId)) broadcastChains.delete(sessionId);
+    }
     for (const [paneId, sessionId] of Object.entries(terminalSessionIds)) {
-      if (paneId !== sourcePaneId && workspace.broadcastPaneIds.includes(paneId)) {
-        void writeTerminal(sessionId, bytes).catch((cause) => {
+      if (paneId === sourcePaneId || !workspace.broadcastPaneIds.includes(paneId)) continue;
+      const chain = (broadcastChains.get(sessionId) ?? Promise.resolve())
+        .then(() => writeTerminal(sessionId, payload))
+        .catch((cause) => {
           console.error("Broadcast write failed", cause);
         });
-      }
+      broadcastChains.set(sessionId, chain);
     }
   }
 

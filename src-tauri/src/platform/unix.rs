@@ -245,3 +245,7 @@ pub fn configure_background_command(_command: &mut Command) {}
 pub fn primary_pointer_pressed() -> bool {
     true
 }
+
+pub fn process_is_running(pid: u32) -> bool {
+    pid > 0 && is_alive(pid)
+}

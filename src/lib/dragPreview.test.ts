@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createNativeTabDragPreviewDataUrl,
   setElementDragPreview,
-  setNativeTabDragPreview
+  setNativeTabDragPreview,
+  truncatedTabLabel
 } from "./dragPreview";
 
 describe("drag preview", () => {
@@ -147,5 +148,15 @@ describe("drag preview", () => {
     document.dispatchEvent(new Event("drop", { bubbles: true }));
     expect(preview?.isConnected).toBe(false);
     expect(nativeImage.isConnected).toBe(false);
+  });
+
+  it("truncates long tab labels the same way in both renderers", () => {
+    const short = "deploy@10.0.0.1";
+    expect(truncatedTabLabel(short)).toBe(short);
+
+    const long = "production-database-primary-eu-west";
+    const truncated = truncatedTabLabel(long);
+    expect(truncated).toBe("production-database-pri…");
+    expect(truncated).toHaveLength(24);
   });
 });

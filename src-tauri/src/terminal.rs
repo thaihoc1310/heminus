@@ -7,15 +7,15 @@ use std::thread;
 use heminus_domain::{EnvironmentVariable, Host};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
-use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::AppState;
 
 struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// True for SSH sessions, whose local processes are all Heminus transport.
     remote: bool,
@@ -26,41 +26,15 @@ struct TerminalSession {
 }
 
 struct TerminalEventSink {
-    destination: Option<TerminalEventDestination>,
+    destination: Option<Channel<InvokeResponseBody>>,
     replay: VecDeque<u8>,
     generation: u64,
 }
 
-#[derive(Clone)]
-enum TerminalEventDestination {
-    Channel(Channel<TerminalEvent>),
-    Window {
-        app: AppHandle,
-        label: String,
-        event_name: String,
-    },
-}
-
-impl TerminalEventDestination {
-    fn send(&self, event: TerminalEvent) -> Result<(), ()> {
-        match self {
-            Self::Channel(channel) => channel.send(event).map_err(|_| ()),
-            Self::Window {
-                app,
-                label,
-                event_name,
-            } => app
-                .emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    event_name,
-                    event,
-                )
-                .map_err(|_| ()),
-        }
-    }
-}
-
 const TERMINAL_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Replay is delivered in pieces so re-attaching never builds one huge message.
+const TERMINAL_REPLAY_CHUNK: usize = 256 * 1024;
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
@@ -133,13 +107,27 @@ pub async fn terminal_clipboard_read(
 
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<Uuid, TerminalSession>>>,
+    /// Shared with `AppState`.
+    ///
+    /// Closing a terminal used to open a fresh SQLite connection, which reruns
+    /// the whole migration batch and contends with the live one for the write
+    /// lock, just to stamp one row as disconnected.
+    database: Arc<Mutex<heminus_storage::Database>>,
 }
 
-impl Default for TerminalManager {
-    fn default() -> Self {
+impl TerminalManager {
+    pub fn new(database: Arc<Mutex<heminus_storage::Database>>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            database,
         }
+    }
+}
+
+/// Marks a session finished, ignoring a poisoned lock or a closed database.
+fn finish_session_quietly(database: &Mutex<heminus_storage::Database>, history_id: Uuid) {
+    if let Ok(database) = database.lock() {
+        let _ = database.finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
     }
 }
 
@@ -148,26 +136,18 @@ impl Drop for TerminalManager {
         let Ok(mut sessions) = self.sessions.lock() else {
             return;
         };
-        let database = heminus_storage::Database::open_default().ok();
         for (_, mut session) in sessions.drain() {
             session.supervisor.terminate();
             let _ = session.killer.kill();
-            if let Some(database) = database.as_ref() {
-                let _ = database.finish_session(
-                    session.history_id,
-                    heminus_domain::SessionStatus::Disconnected,
-                );
-            }
+            finish_session_quietly(&self.database, session.history_id);
         }
     }
 }
 
+/// Everything except the output itself, which travels as raw bytes.
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalEvent {
-    Output {
-        bytes: Vec<u8>,
-    },
     Exit,
     Disconnect,
     Error {
@@ -322,7 +302,10 @@ fn spawn_connection_log_reader(
                                     stage,
                                     Some(ConnectionStage::Ready | ConnectionStage::Failed)
                                 ) {
-                                    interval = std::time::Duration::from_millis(500);
+                                    // Nothing is watching the handshake any
+                                    // more; this only has to catch a late
+                                    // disconnect message.
+                                    interval = std::time::Duration::from_secs(2);
                                 }
                                 publish_terminal_event(
                                     &event_sink,
@@ -356,6 +339,24 @@ fn spawn_connection_log_reader(
         });
 }
 
+/// Drops the destination unless a re-attach already replaced it.
+///
+/// The generation check keeps a failure from a send issued *before* a re-attach
+/// from tearing down the destination that replaced it.
+fn clear_failed_destination(event_sink: &Arc<Mutex<TerminalEventSink>>, generation: u64) {
+    if let Ok(mut sink) = event_sink.lock()
+        && sink.generation == generation
+    {
+        sink.destination = None;
+    }
+}
+
+/// Sends terminal output as raw bytes.
+///
+/// A `Vec<u8>` in a serialized event becomes a JSON array of decimal numbers —
+/// a 16 KiB read turns into ~75 KB of text that the webview then has to parse
+/// back into a boxed number array. `Raw` hands the same bytes to JavaScript as
+/// an `ArrayBuffer` instead.
 fn publish_terminal_output(event_sink: &Arc<Mutex<TerminalEventSink>>, bytes: &[u8]) {
     let (destination, generation) = {
         let Ok(mut sink) = event_sink.lock() else {
@@ -369,18 +370,24 @@ fn publish_terminal_output(event_sink: &Arc<Mutex<TerminalEventSink>>, bytes: &[
         (sink.destination.clone(), sink.generation)
     };
 
-    let event = TerminalEvent::Output {
-        bytes: bytes.to_vec(),
-    };
-    if destination.is_some_and(|destination| destination.send(event).is_err())
-        && let Ok(mut sink) = event_sink.lock()
-        && sink.generation == generation
-    {
-        sink.destination = None;
+    if destination.is_some_and(|destination| {
+        destination
+            .send(InvokeResponseBody::Raw(bytes.to_vec()))
+            .is_err()
+    }) {
+        clear_failed_destination(event_sink, generation);
     }
 }
 
+/// Sends a control event as JSON on the same channel as the output.
+///
+/// Sharing one channel is what keeps ordering intact: Tauri numbers every
+/// message and the JavaScript side dispatches them in that order, so `Exit`
+/// cannot overtake the output that preceded it.
 fn publish_terminal_event(event_sink: &Arc<Mutex<TerminalEventSink>>, event: TerminalEvent) {
+    let Ok(json) = serde_json::to_string(&event) else {
+        return;
+    };
     let (destination, generation) = {
         let Ok(sink) = event_sink.lock() else {
             return;
@@ -388,11 +395,10 @@ fn publish_terminal_event(event_sink: &Arc<Mutex<TerminalEventSink>>, event: Ter
         (sink.destination.clone(), sink.generation)
     };
 
-    if destination.is_some_and(|destination| destination.send(event).is_err())
-        && let Ok(mut sink) = event_sink.lock()
-        && sink.generation == generation
+    if destination
+        .is_some_and(|destination| destination.send(InvokeResponseBody::Json(json)).is_err())
     {
-        sink.destination = None;
+        clear_failed_destination(event_sink, generation);
     }
 }
 
@@ -460,7 +466,7 @@ fn local_shell_command(
 }
 
 #[allow(clippy::too_many_arguments)] // Tauri exposes command fields as individual IPC arguments.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_open(
     manager: State<'_, TerminalManager>,
     app_state: State<'_, AppState>,
@@ -469,7 +475,7 @@ pub fn terminal_open(
     host: Option<heminus_domain::Host>,
     session_title: Option<String>,
     cwd: Option<PathBuf>,
-    on_event: Channel<TerminalEvent>,
+    on_event: Channel<InvokeResponseBody>,
 ) -> Result<Uuid, String> {
     let history_host_id = host.as_ref().map(|value| value.id);
     let history_title = session_title
@@ -641,7 +647,7 @@ pub fn terminal_open(
     let id = Uuid::new_v4();
     let sessions = Arc::clone(&manager.sessions);
     let event_sink = Arc::new(Mutex::new(TerminalEventSink {
-        destination: Some(TerminalEventDestination::Channel(on_event)),
+        destination: Some(on_event),
         replay: VecDeque::new(),
         generation: 0,
     }));
@@ -666,7 +672,7 @@ pub fn terminal_open(
             id,
             TerminalSession {
                 master: pair.master,
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
                 killer: session_killer,
                 remote: remote_session,
                 history_id,
@@ -699,6 +705,7 @@ pub fn terminal_open(
         .spawn({
             let log_finished = Arc::clone(&log_finished);
             let sessions = Arc::clone(&sessions);
+            let reader_database = Arc::clone(&manager.database);
             move || {
                 let mut buffer = vec![0_u8; 16 * 1024];
                 loop {
@@ -726,10 +733,7 @@ pub fn terminal_open(
                 }
                 let _ = child.wait();
                 log_finished.store(true, std::sync::atomic::Ordering::Relaxed);
-                if let Ok(database) = heminus_storage::Database::open_default() {
-                    let _ = database
-                        .finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
-                }
+                finish_session_quietly(&reader_database, history_id);
                 if let Ok(mut sessions) = sessions.lock() {
                     sessions.remove(&id);
                 }
@@ -745,27 +749,19 @@ pub fn terminal_open(
         {
             let _ = session.killer.kill();
         }
-        if let Ok(database) = heminus_storage::Database::open_default() {
-            let _ =
-                database.finish_session(history_id, heminus_domain::SessionStatus::Disconnected);
-        }
+        finish_session_quietly(&manager.database, history_id);
         return Err(error.to_string());
     }
 
     Ok(id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_attach(
     manager: State<'_, TerminalManager>,
     id: Uuid,
-    window: WebviewWindow,
+    on_event: Channel<InvokeResponseBody>,
 ) -> Result<bool, String> {
-    let destination = TerminalEventDestination::Window {
-        app: window.app_handle().clone(),
-        label: window.label().to_string(),
-        event_name: format!("terminal-session-{id}"),
-    };
     let event_sink = {
         let sessions = manager
             .sessions
@@ -778,52 +774,93 @@ pub fn terminal_attach(
                 .event_sink,
         )
     };
-    let (replay, generation, previous_destination) = {
+    // The backlog is replayed while the sink lock is held. Releasing it first
+    // would let the reader thread push live output to the newly attached window
+    // ahead of the backlog, so the pane would show the newest bytes and then
+    // repeat them inside the replay.
+    let previous_destination = {
         let mut sink = event_sink
             .lock()
             .map_err(|_| "terminal event sink lock poisoned")?;
         sink.generation = sink.generation.wrapping_add(1);
-        let generation = sink.generation;
-        let previous_destination = sink.destination.replace(destination.clone());
+        let previous_destination = sink.destination.replace(on_event.clone());
+        // Sent in pieces: the buffer holds up to 2 MiB, and one message that
+        // size stalls the webview on arrival.
         let replay = sink.replay.iter().copied().collect::<Vec<_>>();
-        (replay, generation, previous_destination)
+        for chunk in replay.chunks(TERMINAL_REPLAY_CHUNK) {
+            if on_event
+                .send(InvokeResponseBody::Raw(chunk.to_vec()))
+                .is_err()
+            {
+                sink.destination = None;
+                return Err("Could not attach the detached terminal output".to_string());
+            }
+        }
+        previous_destination
     };
     drop(previous_destination);
-
-    if !replay.is_empty()
-        && destination
-            .send(TerminalEvent::Output { bytes: replay })
-            .is_err()
-    {
-        if let Ok(mut sink) = event_sink.lock()
-            && sink.generation == generation
-        {
-            sink.destination = None;
-        }
-        return Err("Could not attach the detached terminal output".to_string());
-    }
 
     Ok(true)
 }
 
+/// Stops streaming to the current listener without ending the session.
+///
+/// A pane torn down for a move keeps its session alive; without this the
+/// backend would keep pushing output at a webview that is no longer listening
+/// until a send finally failed.
+#[tauri::command(async)]
+pub fn terminal_detach(manager: State<'_, TerminalManager>, id: Uuid) -> Result<bool, String> {
+    let sessions = manager
+        .sessions
+        .lock()
+        .map_err(|_| "terminal lock poisoned")?;
+    let Some(session) = sessions.get(&id) else {
+        return Ok(false);
+    };
+    let mut sink = session
+        .event_sink
+        .lock()
+        .map_err(|_| "terminal event sink lock poisoned")?;
+    sink.generation = sink.generation.wrapping_add(1);
+    sink.destination = None;
+    Ok(true)
+}
+
+/// Writes input to a session's PTY.
+///
+/// The write has to happen off both the UI thread and the session map's lock: a
+/// child that has stopped reading (Ctrl+S, or a stalled program) fills the
+/// kernel buffer and blocks the write indefinitely. Holding the map lock there
+/// froze every other terminal along with the whole window.
 #[tauri::command]
-pub fn terminal_write(
+pub async fn terminal_write(
     manager: State<'_, TerminalManager>,
     id: Uuid,
     bytes: Vec<u8>,
 ) -> Result<(), String> {
-    let mut sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "terminal lock poisoned")?;
-    let session = sessions
-        .get_mut(&id)
-        .ok_or_else(|| "terminal session not found".to_string())?;
-    session
-        .writer
-        .write_all(&bytes)
-        .and_then(|_| session.writer.flush())
-        .map_err(|error| error.to_string())
+    let writer = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "terminal lock poisoned")?;
+        Arc::clone(
+            &sessions
+                .get(&id)
+                .ok_or_else(|| "terminal session not found".to_string())?
+                .writer,
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut writer = writer
+            .lock()
+            .map_err(|_| "terminal writer lock poisoned".to_string())?;
+        writer
+            .write_all(&bytes)
+            .and_then(|_| writer.flush())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -856,7 +893,7 @@ pub fn terminal_resize(
 /// SSH tabs report nothing: every local process under them is Heminus's own
 /// transport — the client, its jump-host hops, the proxy connector — and the
 /// work the person actually started lives on the server, out of reach.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_processes(
     manager: State<'_, TerminalManager>,
     id: Uuid,
@@ -872,7 +909,7 @@ pub fn terminal_processes(
 }
 
 /// Stops the chosen processes without closing the terminal itself.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_kill_processes(
     manager: State<'_, TerminalManager>,
     id: Uuid,
@@ -893,7 +930,7 @@ pub fn terminal_kill_processes(
     Ok(supervisor_result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_close(
     manager: State<'_, TerminalManager>,
     app_state: State<'_, AppState>,
@@ -926,7 +963,7 @@ pub fn terminal_close(
     Ok(true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_disconnect_history(
     manager: State<'_, TerminalManager>,
     app_state: State<'_, AppState>,
@@ -945,6 +982,9 @@ pub fn terminal_disconnect_history(
     let Some(mut session) = removed else {
         return Ok(false);
     };
+    // Same teardown as closing the tab: killing only the leader left whatever
+    // the session had started running with nothing supervising it.
+    session.supervisor.terminate();
     let _ = session.killer.kill();
     app_state
         .database
@@ -956,7 +996,7 @@ pub fn terminal_disconnect_history(
     Ok(true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_rename(
     manager: State<'_, TerminalManager>,
     app_state: State<'_, AppState>,
@@ -990,6 +1030,138 @@ pub fn terminal_rename(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sink wired to a channel that records everything it is handed.
+    fn recording_sink() -> (
+        Arc<Mutex<TerminalEventSink>>,
+        Arc<Mutex<Vec<InvokeResponseBody>>>,
+    ) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&sent);
+        let channel = Channel::new(move |body| {
+            captured.lock().unwrap().push(body);
+            Ok(())
+        });
+        let sink = Arc::new(Mutex::new(TerminalEventSink {
+            destination: Some(channel),
+            replay: VecDeque::new(),
+            generation: 0,
+        }));
+        (sink, sent)
+    }
+
+    fn raw_bodies(sent: &Arc<Mutex<Vec<InvokeResponseBody>>>) -> Vec<Vec<u8>> {
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|body| match body {
+                InvokeResponseBody::Raw(bytes) => Some(bytes.clone()),
+                InvokeResponseBody::Json(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn output_is_sent_as_raw_bytes_and_kept_for_replay() {
+        let (sink, sent) = recording_sink();
+
+        publish_terminal_output(&sink, b"first ");
+        publish_terminal_output(&sink, b"second");
+
+        // Raw keeps a 16 KiB read at 16 KiB instead of ~75 KB of JSON digits.
+        assert_eq!(raw_bodies(&sent), vec![b"first ".to_vec(), b"second".to_vec()]);
+        let replay = sink.lock().unwrap().replay.iter().copied().collect::<Vec<_>>();
+        assert_eq!(replay, b"first second");
+    }
+
+    #[test]
+    fn control_events_are_sent_as_json_on_the_same_channel() {
+        let (sink, sent) = recording_sink();
+
+        publish_terminal_output(&sink, b"bye");
+        publish_terminal_event(&sink, TerminalEvent::Exit);
+
+        let bodies = sent.lock().unwrap();
+        assert!(matches!(bodies[0], InvokeResponseBody::Raw(_)));
+        // Ordering matters: Exit must not overtake the output before it.
+        match &bodies[1] {
+            InvokeResponseBody::Json(json) => assert!(json.contains("\"kind\":\"exit\""), "{json}"),
+            other => panic!("expected JSON control event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_replay_buffer_keeps_only_the_newest_bytes() {
+        let (sink, _sent) = recording_sink();
+
+        publish_terminal_output(&sink, &vec![b'o'; TERMINAL_REPLAY_LIMIT]);
+        publish_terminal_output(&sink, b"tail");
+
+        let replay = sink.lock().unwrap().replay.iter().copied().collect::<Vec<_>>();
+        assert_eq!(replay.len(), TERMINAL_REPLAY_LIMIT);
+        assert!(replay.ends_with(b"tail"));
+    }
+
+    #[test]
+    fn live_output_cannot_overtake_the_backlog_while_a_pane_re_attaches() {
+        let (sink, _first) = recording_sink();
+        publish_terminal_output(&sink, b"old output ");
+
+        // A second window attaches while the PTY keeps producing. The reader
+        // thread blocks on the sink lock until the backlog has gone out, so the
+        // new bytes must land after it rather than in front of it.
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&sent);
+        let reattached = Channel::new(move |body| {
+            captured.lock().unwrap().push(body);
+            Ok(())
+        });
+        {
+            let mut guard = sink.lock().unwrap();
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.destination = Some(reattached.clone());
+            let replay = guard.replay.iter().copied().collect::<Vec<_>>();
+            for chunk in replay.chunks(TERMINAL_REPLAY_CHUNK) {
+                reattached
+                    .send(InvokeResponseBody::Raw(chunk.to_vec()))
+                    .unwrap();
+            }
+        }
+        publish_terminal_output(&sink, b"new output");
+
+        let bodies = raw_bodies(&sent);
+        assert_eq!(bodies, vec![b"old output ".to_vec(), b"new output".to_vec()]);
+    }
+
+    #[test]
+    fn a_failed_send_detaches_only_the_destination_that_failed() {
+        let failing = Channel::new(|_body| Err(tauri::Error::WebviewNotFound));
+        let sink = Arc::new(Mutex::new(TerminalEventSink {
+            destination: Some(failing),
+            replay: VecDeque::new(),
+            generation: 0,
+        }));
+
+        publish_terminal_output(&sink, b"gone");
+        assert!(sink.lock().unwrap().destination.is_none());
+
+        // A stale failure must not tear down a destination installed since.
+        let (replacement, sent) = recording_sink();
+        let replacement = replacement.lock().unwrap().destination.clone();
+        {
+            let mut guard = sink.lock().unwrap();
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.destination = replacement;
+        }
+        clear_failed_destination(&sink, 0);
+        assert!(
+            sink.lock().unwrap().destination.is_some(),
+            "a send that failed before the re-attach must not detach the new listener"
+        );
+
+        publish_terminal_output(&sink, b"still here");
+        assert_eq!(raw_bodies(&sent), vec![b"still here".to_vec()]);
+    }
 
     #[test]
     fn loopback_hosts_use_a_local_shell_with_their_profile_environment() {

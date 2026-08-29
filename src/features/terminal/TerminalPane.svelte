@@ -11,6 +11,7 @@
   import {
     attachTerminal,
     closeTerminal,
+    detachTerminal,
     listCommandHistory,
     listSnippets,
     openTerminal,
@@ -27,8 +28,10 @@
     Snippet,
     TerminalAppearance,
     TerminalCommandRequest,
-    TerminalEvent
+    TerminalChannelMessage,
+    TerminalControlEvent
   } from "../../lib/types";
+  import { decodeTerminalMessage } from "../../lib/terminalChannel";
   import { terminalTheme } from "../../lib/terminalThemes";
   import {
     matchesTerminalShortcut,
@@ -41,6 +44,7 @@
   } from "../../lib/hostOperatingSystem";
   import { consumeShellCompletionMarkers } from "../../lib/terminalShellIntegration";
   import {
+    drainTerminalInput,
     normalizeLinuxTerminalInput,
     resetLinuxTerminalComposition
   } from "../../lib/terminalInput";
@@ -75,7 +79,7 @@
     onHeaderDragEnd = (_event: DragEvent) => {},
     onSessionReady = (_paneId: string, _sessionId: string) => {},
     onSessionClosed = (_paneId: string) => {},
-    onUserInput = (_paneId: string, _bytes: number[]) => {},
+    onUserInput = (_paneId: string, _bytes: Uint8Array) => {},
     onActivate = (_paneId: string) => {},
     onCommandRecorded = () => {},
     shouldPreserveSession = () => false
@@ -102,7 +106,7 @@
     onHeaderDragEnd?: (event: DragEvent) => void;
     onSessionReady?: (paneId: string, sessionId: string) => void;
     onSessionClosed?: (paneId: string) => void;
-    onUserInput?: (paneId: string, bytes: number[]) => void;
+    onUserInput?: (paneId: string, bytes: Uint8Array) => void;
     onActivate?: (paneId: string) => void;
     onCommandRecorded?: () => void;
     shouldPreserveSession?: () => boolean;
@@ -456,12 +460,11 @@
     let disposed = false;
     let sessionId: string | null = null;
     let resizeObserver: ResizeObserver | null = null;
-    let attachedEventUnlisten: (() => void) | null = null;
     let resizeFrame: number | null = null;
     let primarySelectionFrame: number | null = null;
     let primarySelectionWrite = Promise.resolve();
     let flushTimer: number | null = null;
-    let queuedInput: number[] = [];
+    let queuedInput: Uint8Array[] = [];
     let writeChain = Promise.resolve();
     let terminal: Terminal | null = null;
     let fitAddon: FitAddon | null = null;
@@ -594,16 +597,16 @@
         container.addEventListener("auxclick", handleTerminalAuxClick, true);
       }
       fitAddon.fit();
-      const channel = new Channel<TerminalEvent>();
-      const handleTerminalEvent = (event: TerminalEvent) => {
+      const channel = new Channel<TerminalChannelMessage>();
+      const handleTerminalOutput = (bytes: Uint8Array) => {
         if (!terminal) return;
-        if (event.kind === "output") {
+        {
           // Every hop logs to its own file, so anything on the PTY is the
           // real shell — a safe fallback if a log line is ever missed.
-          if (connectionState === "connecting" && event.bytes.length > 0) markConnected();
-          terminal.write(new Uint8Array(event.bytes));
+          if (connectionState === "connecting" && bytes.length > 0) markConnected();
+          terminal.write(bytes);
           const text = outputDecoder
-            .decode(new Uint8Array(event.bytes), { stream: true })
+            .decode(bytes, { stream: true })
             .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
           if (host && !operatingSystemDetected) {
             operatingSystemDetectionBuffer = `${operatingSystemDetectionBuffer}${text}`.slice(-16_384);
@@ -640,6 +643,9 @@
             suggestions = [];
           }
         }
+      };
+      const handleTerminalEvent = (event: TerminalControlEvent) => {
+        if (!terminal) return;
         if (event.kind === "hops") setHops(event.labels);
         if (event.kind === "log") {
           recordConnectionLog({
@@ -678,17 +684,17 @@
           onClose();
         }
       };
-      channel.onmessage = handleTerminalEvent;
+      channel.onmessage = (message) => {
+        const decoded = decodeTerminalMessage(message);
+        if (decoded.kind === "output") handleTerminalOutput(decoded.data);
+        else handleTerminalEvent(decoded);
+      };
 
       if (resumeSessionId) {
         try {
-          attachedEventUnlisten = await attachTerminal(
-            resumeSessionId,
-            handleTerminalEvent
-          );
+          await attachTerminal(resumeSessionId, channel);
           if (disposed) {
-            attachedEventUnlisten();
-            attachedEventUnlisten = null;
+            void detachTerminal(resumeSessionId);
             return;
           }
           sessionId = resumeSessionId;
@@ -737,7 +743,7 @@
       const flush = () => {
         flushTimer = null;
         if (!sessionId || queuedInput.length === 0) return;
-        const bytes = queuedInput;
+        const bytes = drainTerminalInput(queuedInput);
         queuedInput = [];
         const id = sessionId;
         writeChain = writeChain
@@ -747,9 +753,9 @@
           });
       };
       const queueData = (data: string) => {
-        const bytes = [...encoder.encode(data)];
-        queuedInput.push(...bytes);
-        onUserInput(paneId, bytes);
+        const chunk = encoder.encode(data);
+        queuedInput.push(chunk);
+        onUserInput(paneId, chunk);
         if (flushTimer === null) flushTimer = window.setTimeout(flush, 4);
       };
       externalCommandHandler = (command: string, run: boolean) => {
@@ -946,8 +952,9 @@
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
       if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
       resizeObserver?.disconnect();
-      attachedEventUnlisten?.();
-      attachedEventUnlisten = null;
+      // A pane torn down for a move keeps its session; tell the backend to stop
+      // streaming so it is not writing into a webview that has gone away.
+      if (preserveSession && sessionId) void detachTerminal(sessionId);
       container?.removeEventListener("focusin", activate);
       if (handleTerminalMiddlePointerDown) {
         container?.removeEventListener(

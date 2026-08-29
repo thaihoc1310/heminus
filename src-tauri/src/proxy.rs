@@ -110,6 +110,16 @@ fn connect_through(
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream, String> {
+    connect_through_with_timeout(spec, password, target_host, target_port, CONNECT_TIMEOUT)
+}
+
+fn connect_through_with_timeout(
+    spec: &ProxySpec,
+    password: Option<&str>,
+    target_host: &str,
+    target_port: u16,
+    handshake_timeout: Duration,
+) -> Result<TcpStream, String> {
     let endpoint = format!("{}:{}", spec.hostname, spec.port);
     let address = endpoint
         .to_socket_addrs()
@@ -121,6 +131,14 @@ fn connect_through(
     stream
         .set_nodelay(true)
         .map_err(|error| format!("Could not configure the proxy socket: {error}"))?;
+    // `connect_timeout` only bounds the TCP handshake. Without these, a proxy
+    // that accepts the connection and then says nothing leaves the read below
+    // blocked forever, and the terminal sits on "connecting" with no way out.
+    let deadline = Some(handshake_timeout);
+    stream
+        .set_read_timeout(deadline)
+        .and_then(|()| stream.set_write_timeout(deadline))
+        .map_err(|error| format!("Could not configure the proxy timeouts: {error}"))?;
     match spec.kind {
         ProxyKind::Http => http_connect(
             &mut stream,
@@ -137,6 +155,12 @@ fn connect_through(
             target_port,
         )?,
     }
+    // The tunnel itself is long-lived and mostly idle, so it must not inherit
+    // the handshake deadline.
+    stream
+        .set_read_timeout(None)
+        .and_then(|()| stream.set_write_timeout(None))
+        .map_err(|error| format!("Could not restore the proxy socket: {error}"))?;
     Ok(stream)
 }
 
@@ -559,6 +583,38 @@ mod tests {
             vec![b"SSH-2.0-OpenSSH_9.6\r\n".to_vec(), vec![0x00, 0x01, 0x02]],
             "each chunk must reach SSH before the next read blocks"
         );
+    }
+
+    #[test]
+    fn a_silent_proxy_fails_the_handshake_instead_of_hanging() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept the connection, then never reply — the failure mode that used
+        // to wedge the ProxyCommand, and with it the terminal, indefinitely.
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            drop(connection);
+        });
+
+        let mut spec = spec(ProxyKind::Http, None);
+        spec.port = port;
+        let started = std::time::Instant::now();
+        let error = connect_through_with_timeout(
+            &spec,
+            None,
+            "10.0.0.5",
+            22,
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(5), "handshake blocked");
+        assert!(
+            error.contains("Could not read the proxy response"),
+            "{error}"
+        );
+        server.join().unwrap();
     }
 
     #[test]

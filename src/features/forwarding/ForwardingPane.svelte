@@ -59,6 +59,8 @@
     localShell: null
   });
   const activePortConflictDialogs = new Set<string>();
+  /** Rules with a start/stop in flight, from either the user or the poll. */
+  const rulesInFlight = new Set<string>();
   let statesRefreshPromise: Promise<void> | null = null;
   const editorDirty = $derived(Boolean(selected) && draftChanged(editorBaseline, selected));
   const visibleRules = $derived.by(() =>
@@ -116,8 +118,19 @@
     }
   }
 
-  function refreshStates(): Promise<void> {
-    if (statesRefreshPromise) return statesRefreshPromise;
+  /**
+   * Reads tunnel state, coalescing concurrent polls.
+   *
+   * `fresh` callers need state observed *after* their own start/stop landed, so
+   * they wait for any in-flight read to finish and then issue a new one; being
+   * handed a poll that began earlier made a tunnel that had just started look
+   * as though SSH had closed it.
+   */
+  function refreshStates(fresh = false): Promise<void> {
+    if (statesRefreshPromise) {
+      if (!fresh) return statesRefreshPromise;
+      return statesRefreshPromise.then(() => refreshStates(true));
+    }
     const refreshPromise = (async () => {
       try {
       const states = await tunnelStates();
@@ -129,12 +142,14 @@
       ) {
         runningIds = nextRunningIds;
       }
-      const failed = states.find(
-        (state) =>
-          !state.running &&
-          state.exitCode !== 0 &&
-          (previouslyRunning.has(state.id) || state.id === focusedRuleId || state.id === selected?.id)
-      );
+      // The backend reports an exited tunnel exactly once and then forgets it,
+      // so anything not surfaced here is lost for good.
+      const failures = states.filter((state) => !state.running && state.exitCode !== 0);
+      const failed = failures[0];
+      if (failures.length > 1) {
+        console.warn("Multiple tunnels stopped", failures);
+      }
+      void previouslyRunning;
       if (failed) {
         const failureMessage =
           failed.message ||
@@ -195,12 +210,13 @@
       if (!accepted) return;
 
       busy = true;
+      rulesInFlight.add(rule.id);
       await stopTunnelPortProcesses(rule.bind_port, processes.map((process) => process.pid));
       const host = hosts.find((candidate) => candidate.id === rule.host_id);
       if (!host) throw new Error("The SSH host for this tunnel no longer exists.");
       await startTunnel(rule, host);
       await new Promise((resolve) => window.setTimeout(resolve, 180));
-      await refreshStates();
+      await refreshStates(true);
       if (runningIds.has(rule.id)) {
         message = `Stopped the process using port ${rule.bind_port} and started the tunnel.`;
         isError = false;
@@ -216,6 +232,7 @@
         confirmLabel: "Close"
       });
     } finally {
+      rulesInFlight.delete(rule.id);
       busy = false;
       activePortConflictDialogs.delete(rule.id);
     }
@@ -381,8 +398,11 @@
   }
 
   async function toggleRule(rule: PortForward) {
-    if (busy) return;
+    // `busy` alone was not enough: resolveLocalPortConflict runs unawaited from
+    // the poll with busy still false, so the same tunnel could be started twice.
+    if (busy || rulesInFlight.has(rule.id)) return;
     busy = true;
+    rulesInFlight.add(rule.id);
     try {
       const draft = selected?.id === rule.id ? selected : rule;
       const saved = await savePortForward(draft);
@@ -403,7 +423,7 @@
       }
       isError = false;
       await new Promise((resolve) => window.setTimeout(resolve, 180));
-      await refreshStates();
+      await refreshStates(true);
       if (!runningIds.has(saved.id) && message === "Tunnel started" && !isError) {
         throw new Error("SSH closed the tunnel. Connect to the host once and verify your key or agent.");
       }

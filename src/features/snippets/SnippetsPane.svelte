@@ -179,7 +179,9 @@
   }
 
   async function duplicateSnippet(snippet: Snippet) {
+    if (saving) return;
     if (selected?.id !== snippet.id && !(await confirmDiscardChanges(editorDirty))) return;
+    if (saving) return;
     saving = true;
     try {
       const duplicate = await saveSnippet({
@@ -211,10 +213,11 @@
     try {
       await deleteSnippet(snippet.id);
       if (selected?.id === snippet.id) selected = null;
-      await refresh();
       message = "";
     } catch (cause) {
       showError(cause);
+    } finally {
+      await refresh();
     }
   }
 
@@ -254,9 +257,11 @@
       await Promise.all(targets.map((snippet) => deleteSnippet(snippet.id)));
       if (selected && selectedSnippetIds.includes(selected.id)) selected = null;
       selectedSnippetIds = [];
-      await refresh();
     } catch (cause) {
       showError(cause);
+    } finally {
+      // Promise.all can fail with some deletes already applied.
+      await refresh();
     }
   }
 

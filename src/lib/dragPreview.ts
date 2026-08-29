@@ -13,6 +13,17 @@ export interface NativeTabDragPreview {
   border: string;
 }
 
+/**
+ * Shortens a tab label to fit the drag pill.
+ *
+ * Both renderers draw the same pill, so they have to agree: they used to cut at
+ * different lengths with different ellipses, and a long label looked different
+ * in the drag image than in the floating preview.
+ */
+export function truncatedTabLabel(label: string): string {
+  return label.length > 24 ? `${label.slice(0, 23)}…` : label;
+}
+
 function roundedRect(
   context: CanvasRenderingContext2D,
   x: number,
@@ -97,9 +108,7 @@ function renderNativeTabDragPreview(
   drawTabIcon(context, options.icon, 12, 9);
   context.font = "600 12px system-ui, sans-serif";
   context.textBaseline = "middle";
-  const label = options.label.length > 24
-    ? `${options.label.slice(0, 21)}...`
-    : options.label;
+  const label = truncatedTabLabel(options.label);
   context.fillText(label, 36, height / 2, width - 48);
   return canvas;
 }
@@ -164,9 +173,7 @@ export function setNativeTabDragPreview(
   drawTabIcon(context, options.icon, 12, 9);
   context.font = "600 12px system-ui, sans-serif";
   context.textBaseline = "middle";
-  const label = options.label.length > 24
-    ? `${options.label.slice(0, 23)}…`
-    : options.label;
+  const label = truncatedTabLabel(options.label);
   context.fillText(label, 36, height / 2, width - 48);
 
   document.body.append(canvas);
@@ -256,13 +263,24 @@ export function setElementDragPreview(event: DragEvent, itemCount = 1): void {
     preview.style.setProperty("left", `${moveEvent.clientX - offsetX}px`, "important");
     preview.style.setProperty("top", `${moveEvent.clientY - offsetY}px`, "important");
   };
+  // WebKitGTK does not always deliver dragend or drop when the pointer leaves
+  // the window, and without a fallback the floating pill stays on top of the
+  // whole app until the next drag happens to clean it up.
+  let safetyTimer: number | null = window.setTimeout(() => cleanup(), 30_000);
   const cleanup = () => {
+    if (safetyTimer !== null) {
+      window.clearTimeout(safetyTimer);
+      safetyTimer = null;
+    }
     preview.remove();
     nativeImage.remove();
     document.removeEventListener("drag", move, true);
     document.removeEventListener("dragover", move, true);
     document.removeEventListener("dragend", cleanup, true);
     document.removeEventListener("drop", cleanup, true);
+    document.removeEventListener("pointerup", cleanup, true);
+    document.removeEventListener("mouseup", cleanup, true);
+    window.removeEventListener("blur", cleanup);
     if (clearActivePreview === cleanup) clearActivePreview = null;
   };
 
@@ -271,4 +289,7 @@ export function setElementDragPreview(event: DragEvent, itemCount = 1): void {
   document.addEventListener("dragover", move, true);
   document.addEventListener("dragend", cleanup, true);
   document.addEventListener("drop", cleanup, true);
+  document.addEventListener("pointerup", cleanup, true);
+  document.addEventListener("mouseup", cleanup, true);
+  window.addEventListener("blur", cleanup);
 }

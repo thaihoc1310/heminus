@@ -20,7 +20,7 @@ import type {
   TerminalTabTransfer,
   TerminalTabPointerState,
   TerminalTabTransferResult,
-  TerminalEvent,
+  TerminalChannelMessage,
   TransferEvent,
   TunnelPortProcess,
   TunnelState,
@@ -457,9 +457,17 @@ export async function listKnownHosts(): Promise<KnownHostEntry[]> {
   return invoke<KnownHostEntry[]>("list_known_hosts");
 }
 
-export async function deleteKnownHostEntries(lineNumbers: number[]): Promise<number> {
-  if (!isTauri) return lineNumbers.length;
-  return invoke<number>("delete_known_host_entries", { lineNumbers });
+/**
+ * Forgets known-host entries.
+ *
+ * The fingerprint travels with each line so the backend can confirm the entry
+ * is still the one that was selected before removing it.
+ */
+export async function deleteKnownHostEntries(
+  entries: Array<{ lineNumber: number; fingerprint: string }>
+): Promise<number> {
+  if (!isTauri) return entries.length;
+  return invoke<number>("delete_known_host_entries", { entries });
 }
 
 export async function listSessions(limit = 200): Promise<SessionRecord[]> {
@@ -475,7 +483,7 @@ export async function disconnectSession(historyId: string): Promise<boolean> {
 export async function openTerminal(
   rows: number,
   cols: number,
-  channel: Channel<TerminalEvent>,
+  channel: Channel<TerminalChannelMessage>,
   host: Host | null = null,
   sessionTitle?: string,
   cwd: string | null = null
@@ -496,19 +504,14 @@ export async function renameTerminalSession(id: string, title: string): Promise<
 
 export async function attachTerminal(
   id: string,
-  onEvent: (event: TerminalEvent) => void
-): Promise<UnlistenFn> {
-  const eventName = `terminal-session-${id}`;
-  const unlisten = await listen<TerminalEvent>(eventName, (event) => {
-    onEvent(event.payload);
-  });
-  try {
-    await invoke<boolean>("terminal_attach", { id });
-    return unlisten;
-  } catch (cause) {
-    unlisten();
-    throw cause;
-  }
+  channel: Channel<TerminalChannelMessage>
+): Promise<void> {
+  await invoke<boolean>("terminal_attach", { id, onEvent: channel });
+}
+
+/** Stops streaming to this window without ending the session. */
+export async function detachTerminal(id: string): Promise<void> {
+  await invoke("terminal_detach", { id });
 }
 
 export async function writeTerminal(id: string, bytes: number[]): Promise<void> {

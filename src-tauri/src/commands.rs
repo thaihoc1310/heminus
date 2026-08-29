@@ -1,6 +1,4 @@
-#[cfg(unix)]
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
@@ -12,7 +10,7 @@ use heminus_domain::{
     Host, Identity, IdentityKind, PortForward, SessionRecord, Snippet, VaultGroup, Workspace,
 };
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
@@ -66,6 +64,14 @@ pub struct KnownHostEntry {
     line_number: usize,
     hashed: bool,
     resolved: bool,
+}
+
+/// One entry the person chose to forget, with the key it had when chosen.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostSelection {
+    line_number: usize,
+    fingerprint: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -227,7 +233,19 @@ pub async fn transfer_terminal_tab(
     let source_scale = window.scale_factor().unwrap_or(1.0);
     let physical_x = screen_x * source_scale;
     let physical_y = screen_y * source_scale;
-    for (label, target) in app.webview_windows() {
+    // `webview_windows` is a HashMap, so iterating it directly picked an
+    // arbitrary window whenever two overlapped under the cursor. Tauri exposes
+    // no z-order, so prefer the focused window and otherwise settle on a stable
+    // order rather than a different answer each drop.
+    let mut candidates = app.webview_windows().into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|(left_label, left), (right_label, right)| {
+        right
+            .is_focused()
+            .unwrap_or(false)
+            .cmp(&left.is_focused().unwrap_or(false))
+            .then_with(|| left_label.cmp(right_label))
+    });
+    for (label, target) in candidates {
         if label == window.label()
             || (label != "main" && !label.starts_with("detached-"))
             || !target.is_visible().unwrap_or(true)
@@ -337,7 +355,7 @@ pub fn home_directory() -> Result<PathBuf, String> {
     crate::platform::canonical_home_dir()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_path_info(path: Option<PathBuf>) -> Result<LocalPathInfo, String> {
     let home = crate::platform::canonical_home_dir()?;
     let path = match path {
@@ -380,7 +398,7 @@ pub fn join_local_path(parent: PathBuf, name: String) -> Result<PathBuf, String>
     crate::platform::join_local_path(&parent, &name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_hosts(state: State<'_, AppState>, query: Option<String>) -> Result<Vec<Host>, String> {
     let database = state
         .database
@@ -391,7 +409,7 @@ pub fn list_hosts(state: State<'_, AppState>, query: Option<String>) -> Result<V
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_host(state: State<'_, AppState>, host: Host) -> Result<Host, String> {
     host.validate().map_err(|error| error.to_string())?;
     let database = state
@@ -404,7 +422,7 @@ pub fn save_host(state: State<'_, AppState>, host: Host) -> Result<Host, String>
     Ok(host)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_host(state: State<'_, AppState>, id: Uuid) -> Result<bool, String> {
     let database = state
         .database
@@ -455,7 +473,7 @@ pub async fn delete_host_proxy_secret(id: Uuid) -> Result<bool, String> {
     Ok(true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<VaultGroup>, String> {
     state
         .database
@@ -465,7 +483,7 @@ pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<VaultGroup>, String
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_group(state: State<'_, AppState>, group: VaultGroup) -> Result<VaultGroup, String> {
     group.validate().map_err(|error| error.to_string())?;
     state
@@ -477,7 +495,7 @@ pub fn save_group(state: State<'_, AppState>, group: VaultGroup) -> Result<Vault
     Ok(group)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_group(state: State<'_, AppState>, id: Uuid) -> Result<bool, String> {
     state
         .database
@@ -487,7 +505,7 @@ pub fn delete_group(state: State<'_, AppState>, id: Uuid) -> Result<bool, String
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
     state
         .database
@@ -497,7 +515,7 @@ pub fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, Str
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_workspace(
     state: State<'_, AppState>,
     workspace: Workspace,
@@ -512,7 +530,7 @@ pub fn save_workspace(
     Ok(workspace)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_workspace(state: State<'_, AppState>, id: Uuid) -> Result<bool, String> {
     state
         .database
@@ -522,7 +540,7 @@ pub fn delete_workspace(state: State<'_, AppState>, id: Uuid) -> Result<bool, St
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_identities(state: State<'_, AppState>) -> Result<Vec<Identity>, String> {
     let database = state
         .database
@@ -533,7 +551,7 @@ pub fn list_identities(state: State<'_, AppState>) -> Result<Vec<Identity>, Stri
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_identity(state: State<'_, AppState>, identity: Identity) -> Result<Identity, String> {
     identity.validate().map_err(|error| error.to_string())?;
     if identity.kind == IdentityKind::Agent {
@@ -665,7 +683,7 @@ pub async fn delete_identity_secret(state: State<'_, AppState>, id: Uuid) -> Res
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>, String> {
     let database = state
         .database
@@ -674,7 +692,7 @@ pub fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>, String>
     database.list_snippets().map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_snippet(state: State<'_, AppState>, snippet: Snippet) -> Result<Snippet, String> {
     snippet.validate().map_err(|error| error.to_string())?;
     let database = state
@@ -687,7 +705,7 @@ pub fn save_snippet(state: State<'_, AppState>, snippet: Snippet) -> Result<Snip
     Ok(snippet)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_snippet(state: State<'_, AppState>, id: Uuid) -> Result<bool, String> {
     let database = state
         .database
@@ -698,7 +716,7 @@ pub fn delete_snippet(state: State<'_, AppState>, id: Uuid) -> Result<bool, Stri
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_command_history(
     state: State<'_, AppState>,
     host_id: Option<Uuid>,
@@ -712,7 +730,7 @@ pub fn list_command_history(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_all_command_history(
     state: State<'_, AppState>,
     limit: usize,
@@ -725,7 +743,7 @@ pub fn list_all_command_history(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_command_history(
     state: State<'_, AppState>,
     host_id: Option<Uuid>,
@@ -739,7 +757,7 @@ pub fn record_command_history(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_command_history(state: State<'_, AppState>, command: String) -> Result<bool, String> {
     state
         .database
@@ -749,7 +767,7 @@ pub fn delete_command_history(state: State<'_, AppState>, command: String) -> Re
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_command_history(state: State<'_, AppState>) -> Result<usize, String> {
     state
         .database
@@ -759,7 +777,7 @@ pub fn clear_command_history(state: State<'_, AppState>) -> Result<usize, String
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_port_forwards(state: State<'_, AppState>) -> Result<Vec<PortForward>, String> {
     let database = state
         .database
@@ -770,7 +788,7 @@ pub fn list_port_forwards(state: State<'_, AppState>) -> Result<Vec<PortForward>
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_port_forward(
     state: State<'_, AppState>,
     rule: PortForward,
@@ -786,7 +804,7 @@ pub fn save_port_forward(
     Ok(rule)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_port_forward(state: State<'_, AppState>, id: Uuid) -> Result<bool, String> {
     let database = state
         .database
@@ -797,7 +815,7 @@ pub fn delete_port_forward(state: State<'_, AppState>, id: Uuid) -> Result<bool,
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sessions(
     state: State<'_, AppState>,
     limit: Option<usize>,
@@ -811,14 +829,14 @@ pub fn list_sessions(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_local_entries(path: Option<PathBuf>) -> Result<Vec<LocalEntry>, String> {
     let requested = path.unwrap_or(crate::platform::home_dir()?);
     let resolved = crate::platform::canonical_existing_local_path(&requested)?;
     #[cfg(unix)]
-    let user_names = unix_id_names("/etc/passwd");
+    let user_names = cached_user_names();
     #[cfg(unix)]
-    let group_names = unix_id_names("/etc/group");
+    let group_names = cached_group_names();
 
     let mut entries = fs::read_dir(&resolved)
         .map_err(|error| error.to_string())?
@@ -871,20 +889,20 @@ pub fn list_local_entries(path: Option<PathBuf>) -> Result<Vec<LocalEntry>, Stri
     Ok(entries)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_local_directory(path: PathBuf) -> Result<(), String> {
     let target = crate::platform::safe_local_destination(&path)?;
     fs::create_dir(&target).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_local_entry(old_path: PathBuf, new_path: PathBuf) -> Result<(), String> {
     let source = crate::platform::safe_existing_local_entry(&old_path)?;
     let target = crate::platform::safe_local_destination(&new_path)?;
     fs::rename(source, target).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_local_entry(path: PathBuf, _is_directory: bool) -> Result<(), String> {
     let home = crate::platform::canonical_home_dir()?;
     remove_local_entry_at(&path, &home)
@@ -903,7 +921,7 @@ fn remove_local_entry_at(path: &Path, protected_home: &Path) -> Result<(), Strin
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_local_permissions(path: PathBuf, mode: u32) -> Result<(), String> {
     if mode > 0o7777 {
         return Err("Permissions must be an octal mode between 0000 and 7777".into());
@@ -928,13 +946,13 @@ pub fn set_local_permissions(path: PathBuf, mode: u32) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_local_entry(path: PathBuf, application: Option<String>) -> Result<(), String> {
     let target = crate::platform::canonical_existing_local_path(&path)?;
     crate::platform::open_path(&target, application.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_known_hosts(state: State<'_, AppState>) -> Result<Vec<KnownHostEntry>, String> {
     let Ok(contents) = fs::read_to_string(state.ssh.known_hosts_path()) else {
         return Ok(Vec::new());
@@ -959,17 +977,12 @@ pub fn list_known_hosts(state: State<'_, AppState>) -> Result<Vec<KnownHostEntry
             let offset = usize::from(fields[0].starts_with('@'));
             let raw_hosts = fields.get(offset)?;
             let key_type = fields.get(offset + 1)?;
-            let encoded_key = fields.get(offset + 2)?;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded_key)
-                .ok()?;
-            let digest = Sha256::digest(decoded);
-            let fingerprint = base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest);
+            let fingerprint = known_host_line_fingerprint(line)?;
             let (display_hosts, hashed, resolved) = display_known_hosts(&saved_hosts, raw_hosts);
             Some(KnownHostEntry {
                 hosts: display_hosts,
                 key_type: (*key_type).to_string(),
-                fingerprint: format!("SHA256:{fingerprint}"),
+                fingerprint,
                 line_number: line_number + 1,
                 hashed,
                 resolved,
@@ -978,22 +991,23 @@ pub fn list_known_hosts(state: State<'_, AppState>) -> Result<Vec<KnownHostEntry
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_known_host_entries(
     state: State<'_, AppState>,
-    line_numbers: Vec<usize>,
+    entries: Vec<KnownHostSelection>,
 ) -> Result<usize, String> {
-    let requested = line_numbers
+    let requested = entries
         .into_iter()
-        .filter(|line| *line > 0)
-        .collect::<HashSet<_>>();
+        .filter(|entry| entry.line_number > 0)
+        .map(|entry| (entry.line_number, entry.fingerprint))
+        .collect::<HashMap<_, _>>();
     if requested.is_empty() {
         return Ok(0);
     }
     let path = state.ssh.known_hosts_path();
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read the Heminus known-host vault: {error}"))?;
-    let (updated, removed) = remove_known_host_lines(&contents, &requested);
+    let (updated, removed) = remove_known_host_lines(&contents, &requested)?;
     if removed == 0 {
         return Ok(0);
     }
@@ -1020,25 +1034,52 @@ pub fn delete_known_host_entries(
     Ok(removed)
 }
 
-fn remove_known_host_lines(contents: &str, requested: &HashSet<usize>) -> (String, usize) {
+/// Removes the requested lines, but only where the key still matches.
+///
+/// Selections are made against a listing the caller fetched earlier. Deleting
+/// purely by position would remove whatever had since moved into those lines,
+/// so each one has to still carry the fingerprint the caller chose.
+fn remove_known_host_lines(
+    contents: &str,
+    requested: &HashMap<usize, String>,
+) -> Result<(String, usize), String> {
     let mut removed = 0;
-    let mut retained = contents
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            if requested.contains(&(index + 1)) {
-                removed += 1;
-                None
-            } else {
-                Some(line)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut retained = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        let Some(expected) = requested.get(&(index + 1)) else {
+            retained.push(line);
+            continue;
+        };
+        if known_host_line_fingerprint(line).as_deref() != Some(expected.as_str()) {
+            return Err(
+                "The known-host list changed since it was loaded. Refresh and try again.".into(),
+            );
+        }
+        removed += 1;
+    }
+    let mut retained = retained.join("\n");
     if !retained.is_empty() && contents.ends_with('\n') {
         retained.push('\n');
     }
-    (retained, removed)
+    Ok((retained, removed))
+}
+
+/// The SHA-256 fingerprint of one `known_hosts` line, as the list displays it.
+fn known_host_line_fingerprint(line: &str) -> Option<String> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.is_empty() || fields[0].starts_with('#') {
+        return None;
+    }
+    let offset = usize::from(fields[0].starts_with('@'));
+    let encoded_key = fields.get(offset + 2)?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded_key)
+        .ok()?;
+    let digest = Sha256::digest(decoded);
+    Some(format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
+    ))
 }
 
 fn display_known_hosts(saved_hosts: &[Host], raw_hosts: &str) -> (String, bool, bool) {
@@ -1098,6 +1139,20 @@ fn hashed_known_host_matches(encoded_host: &str, candidate: &str) -> bool {
     hmac.verify_slice(&expected).is_ok()
 }
 
+/// Account names change far more rarely than directories are listed, so the
+/// passwd and group files are parsed once instead of on every listing.
+#[cfg(unix)]
+fn cached_user_names() -> &'static HashMap<u32, String> {
+    static USERS: std::sync::OnceLock<HashMap<u32, String>> = std::sync::OnceLock::new();
+    USERS.get_or_init(|| unix_id_names("/etc/passwd"))
+}
+
+#[cfg(unix)]
+fn cached_group_names() -> &'static HashMap<u32, String> {
+    static GROUPS: std::sync::OnceLock<HashMap<u32, String>> = std::sync::OnceLock::new();
+    GROUPS.get_or_init(|| unix_id_names("/etc/group"))
+}
+
 #[cfg(unix)]
 fn unix_id_names(path: &str) -> HashMap<u32, String> {
     fs::read_to_string(path)
@@ -1139,15 +1194,41 @@ mod tests {
         );
     }
 
+    /// Builds a `known_hosts` line and the fingerprint the list would show.
+    fn known_host_line(host: &str, key: &[u8]) -> (String, String) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+        let line = format!("{host} ssh-ed25519 {encoded}");
+        let fingerprint = known_host_line_fingerprint(&line).expect("fingerprint");
+        (line, fingerprint)
+    }
+
     #[test]
-    fn removes_only_selected_known_host_lines() {
-        let requested = HashSet::from([2, 4]);
-        let (updated, removed) = remove_known_host_lines(
-            "host-a key-a\nhost-b key-b\n# comment\nhost-c key-c\n",
-            &requested,
-        );
+    fn removes_only_the_selected_known_host_lines() {
+        let (first, first_print) = known_host_line("host-a", b"key-a");
+        let (second, second_print) = known_host_line("host-b", b"key-b");
+        let (third, third_print) = known_host_line("host-c", b"key-c");
+        let contents = format!("{first}\n{second}\n# comment\n{third}\n");
+        let requested = HashMap::from([(2, second_print), (4, third_print)]);
+
+        let (updated, removed) = remove_known_host_lines(&contents, &requested).unwrap();
+
         assert_eq!(removed, 2);
-        assert_eq!(updated, "host-a key-a\n# comment\n");
+        assert_eq!(updated, format!("{first}\n# comment\n"));
+        assert!(!first_print.is_empty());
+    }
+
+    #[test]
+    fn refuses_to_delete_when_the_list_moved_under_the_selection() {
+        let (first, _) = known_host_line("host-a", b"key-a");
+        let (second, second_print) = known_host_line("host-b", b"key-b");
+        // The person selected line 2, but a new key was pinned before theirs, so
+        // line 2 now holds a different host entirely.
+        let contents = format!("{second}\n{first}\n");
+        let requested = HashMap::from([(2, second_print)]);
+
+        let error = remove_known_host_lines(&contents, &requested).unwrap_err();
+
+        assert!(error.contains("changed since it was loaded"), "{error}");
     }
 
     #[test]

@@ -1040,6 +1040,15 @@ async fn transfer_remote_single_file(
     .await
 }
 
+/// One SFTP request's worth of payload, under the usual 256 KiB packet limit.
+const TRANSFER_CHUNK: usize = 128 * 1024;
+
+/// Streams `reader` into `writer`, reporting progress and honouring cancellation.
+///
+/// Each chunk's write overlaps the next chunk's read. Strictly alternating the
+/// two made every chunk cost a full round trip in each direction, which capped
+/// throughput at roughly one chunk per RTT no matter how much bandwidth was
+/// available.
 async fn copy_with_progress<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -1052,17 +1061,24 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut current = vec![0_u8; TRANSFER_CHUNK];
+    let mut next = vec![0_u8; TRANSFER_CHUNK];
     let mut last_report = *transferred;
-    loop {
-        ensure_transfer_active(cancelled)?;
-        let read = await_transfer_operation(cancelled, reader.read(&mut buffer)).await?;
-        if read == 0 {
-            break;
-        }
-        await_transfer_operation(cancelled, writer.write_all(&buffer[..read])).await?;
-        ensure_transfer_active(cancelled)?;
-        *transferred += read as u64;
+
+    ensure_transfer_active(cancelled)?;
+    let mut pending = await_transfer_operation(cancelled, reader.read(&mut current)).await?;
+    while pending > 0 {
+        // Send what is already in hand while the next chunk is on its way back.
+        let read = await_transfer_operation(cancelled, async {
+            let (written, read) = tokio::join!(
+                writer.write_all(&current[..pending]),
+                reader.read(&mut next)
+            );
+            written.and(read)
+        })
+        .await?;
+
+        *transferred += pending as u64;
         if transferred.saturating_sub(last_report) >= 1024 * 1024 || *transferred == total {
             on_progress
                 .send(TransferEvent {
@@ -1072,7 +1088,11 @@ where
                 .map_err(|error| error.to_string())?;
             last_report = *transferred;
         }
+
+        std::mem::swap(&mut current, &mut next);
+        pending = read;
     }
+
     if *transferred != last_report {
         let _ = on_progress.send(TransferEvent {
             transferred: *transferred,
@@ -1412,6 +1432,89 @@ mod tests {
     #[cfg(windows)]
     fn windows_sftp_writes_are_serialized() {
         assert_eq!(sftp_client_config().max_concurrent_writes, 1);
+    }
+
+    #[tokio::test]
+    async fn copying_streams_every_byte_and_reports_progress() {
+        let payload = (0..(TRANSFER_CHUNK * 3 + 517))
+            .map(|index| index as u8)
+            .collect::<Vec<u8>>();
+        let mut reader = payload.as_slice();
+        let mut written = Vec::new();
+        let cancelled = TransferCancellation::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let channel = Channel::new(move |body| {
+            captured.lock().unwrap().push(body);
+            Ok(())
+        });
+        let mut transferred = 0;
+
+        copy_with_progress(
+            &mut reader,
+            &mut written,
+            payload.len() as u64,
+            &mut transferred,
+            &channel,
+            &cancelled,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(written, payload, "every byte must arrive, in order");
+        assert_eq!(transferred, payload.len() as u64);
+        assert!(
+            !events.lock().unwrap().is_empty(),
+            "the transfer should report progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn copying_stops_promptly_when_the_transfer_is_cancelled() {
+        /// Delivers one chunk, then stalls the way a live connection does.
+        struct StallsAfterFirstChunk {
+            delivered: bool,
+        }
+        impl AsyncRead for StallsAfterFirstChunk {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _context: &mut Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.delivered {
+                    return Poll::Pending;
+                }
+                self.delivered = true;
+                let free = buffer.remaining();
+                buffer.put_slice(&vec![b'x'; free]);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let cancelled = Arc::new(TransferCancellation::default());
+        let flag = Arc::clone(&cancelled);
+        let channel = Channel::new(|_body| Ok(()));
+        let copy = tokio::spawn(async move {
+            let mut transferred = 0;
+            let mut sink = tokio::io::sink();
+            copy_with_progress(
+                &mut StallsAfterFirstChunk { delivered: false },
+                &mut sink,
+                u64::MAX,
+                &mut transferred,
+                &channel,
+                &flag,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        cancelled.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), copy)
+            .await
+            .expect("a cancelled copy must not run forever")
+            .expect("copy task");
+        assert_eq!(result, Err(TRANSFER_CANCELLED.to_string()));
     }
 
     #[test]

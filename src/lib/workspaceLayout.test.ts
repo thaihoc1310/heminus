@@ -66,4 +66,37 @@ describe("workspace layout", () => {
     layout = setSplitRatio(layout, [], -1)!;
     expect(layoutRects(layout).a.width).toBe(10);
   });
+
+  it("keeps restored panes proportional instead of halving the layout each time", () => {
+    // Four panes restored into a layout that only knows about "a" used to leave
+    // "a" at a sixteenth of the workspace.
+    const layout = normalizeLayout({ type: "pane", pane_id: "a" }, [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e"
+    ]);
+    const rects = layoutRects(layout);
+
+    expect(leafOrder(layout!).sort()).toEqual(["a", "b", "c", "d", "e"]);
+    for (const [paneId, rect] of Object.entries(rects)) {
+      expect(rect.width * rect.height, `${paneId} is too small`).toBeGreaterThan(100 * 100 / 10);
+    }
+  });
+
+  it("does not create two leaves for a duplicated pane id", () => {
+    const layout = normalizeLayout(null, ["a", "b", "a"]);
+    expect(leafOrder(layout!)).toEqual(["a", "b"]);
+  });
+
+  it("keeps a pane in the layout when its drop target is unknown", () => {
+    const layout = splitPane({ type: "pane", pane_id: "a" }, "b", "missing", "right");
+    expect(leafOrder(layout).sort()).toEqual(["a", "b"]);
+  });
+
+  it("ignores a malformed divider path instead of resizing the wrong split", () => {
+    const layout = splitPane(splitPane(null, "a", null, "right"), "b", "a", "right");
+    expect(setSplitRatio(layout, [7], 0.9)).toEqual(layout);
+  });
 });

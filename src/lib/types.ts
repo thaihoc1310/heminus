@@ -310,13 +310,21 @@ export interface ConnectionLogEntry {
   stage: ConnectionStage | null;
 }
 
-export type TerminalEvent =
-  | { kind: "output"; bytes: number[] }
+/**
+ * Everything a terminal session reports except the output itself.
+ *
+ * Output arrives on the same channel as a raw `ArrayBuffer`; see
+ * {@link TerminalChannelMessage}.
+ */
+export type TerminalControlEvent =
   | { kind: "exit" }
   | { kind: "disconnect" }
   | { kind: "error"; message: string }
   | { kind: "hops"; labels: string[] }
   | ({ kind: "log" } & ConnectionLogEntry);
+
+/** What the terminal channel delivers: raw output bytes, or a control event. */
+export type TerminalChannelMessage = ArrayBuffer | TerminalControlEvent;
 
 /** A process a terminal session started and would leave behind when closed. */
 export interface SessionProcess {

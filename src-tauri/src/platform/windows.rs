@@ -11,11 +11,15 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE, TerminateProcess,
+    CREATE_NO_WINDOW, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SET_QUOTA, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 
 use super::{LocalShell, SessionProcess, executable_from_path};
+
+/// `GetExitCodeProcess` reports this while the process is still running.
+const STILL_ACTIVE_STATUS: u32 = 259;
 
 /// Room for the job's process list; a terminal session never grows this large.
 const MAX_TRACKED_PROCESSES: usize = 1024;
@@ -232,6 +236,22 @@ pub fn configure_background_command(command: &mut Command) {
 
 pub fn primary_pointer_pressed() -> bool {
     unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
+}
+
+pub fn process_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut code = 0_u32;
+        let queried = GetExitCodeProcess(process, &mut code);
+        CloseHandle(process);
+        queried != 0 && code == STILL_ACTIVE_STATUS
+    }
 }
 
 fn secure_with_icacls(path: &Path, rights: &str) -> Result<(), String> {

@@ -95,9 +95,14 @@
     }
     removingId = group.id;
     contextMenu = null;
+    error = "";
+    message = "";
     try {
       const removed = await deleteKnownHostEntries(
-        group.entries.map((entry) => entry.lineNumber)
+        group.entries.map((entry) => ({
+          lineNumber: entry.lineNumber,
+          fingerprint: entry.fingerprint
+        }))
       );
       await refresh();
       message = `${removed} fingerprint${removed === 1 ? "" : "s"} removed from the Heminus vault`;

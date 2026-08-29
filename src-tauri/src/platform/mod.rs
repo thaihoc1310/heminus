@@ -183,6 +183,11 @@ pub fn primary_pointer_pressed() -> bool {
     implementation::primary_pointer_pressed()
 }
 
+/// Whether a process id still belongs to a live process.
+pub fn process_is_running(pid: u32) -> bool {
+    implementation::process_is_running(pid)
+}
+
 pub fn open_path(path: &Path, application: Option<&str>) -> Result<(), String> {
     let result = match application.map(str::trim).filter(|value| !value.is_empty()) {
         Some(application) if cfg!(windows) => {

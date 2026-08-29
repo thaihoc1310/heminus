@@ -5,8 +5,7 @@ use std::io::Read;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
-#[cfg(target_family = "unix")]
+use std::sync::{Arc, Mutex};
 use std::thread;
 #[cfg(target_family = "unix")]
 use std::time::Duration;
@@ -21,7 +20,47 @@ use crate::AppState;
 struct ActiveTunnel {
     child: Child,
     supervisor: crate::platform::ProcessSupervisor,
+    diagnostics: Arc<Mutex<Vec<u8>>>,
     _artifacts: crate::ssh_runtime::ConnectionArtifacts,
+}
+
+/// How much of a tunnel's stderr is kept for the inspector.
+const TUNNEL_DIAGNOSTICS_LIMIT: usize = 8 * 1024;
+
+/// Appends to a rolling buffer, keeping the newest bytes.
+fn append_capped(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) {
+    buffer.extend_from_slice(bytes);
+    if buffer.len() > limit {
+        let excess = buffer.len() - limit;
+        buffer.drain(..excess);
+    }
+}
+
+/// Drains a tunnel's stderr for as long as it runs.
+///
+/// The pipe used to be read only once the child had already exited, so a
+/// long-lived tunnel that logged more than the 64 KiB pipe buffer — one line per
+/// refused connection on a busy SOCKS forward — blocked forever inside OpenSSH's
+/// own write and stopped forwarding.
+fn spawn_tunnel_diagnostics(
+    mut stderr: std::process::ChildStderr,
+    diagnostics: Arc<Mutex<Vec<u8>>>,
+) {
+    let _ = thread::Builder::new()
+        .name("heminus-tunnel-stderr".into())
+        .spawn(move || {
+            let mut chunk = [0_u8; 4 * 1024];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => {
+                        if let Ok(mut buffer) = diagnostics.lock() {
+                            append_capped(&mut buffer, &chunk[..read], TUNNEL_DIAGNOSTICS_LIMIT);
+                        }
+                    }
+                }
+            }
+        });
 }
 
 #[derive(Default)]
@@ -58,11 +97,11 @@ impl TunnelManager {
         for (id, tunnel) in active.iter_mut() {
             match tunnel.child.try_wait().map_err(|error| error.to_string())? {
                 Some(status) => {
-                    let message = tunnel.child.stderr.take().and_then(|stderr| {
-                        let mut bytes = Vec::new();
-                        stderr.take(8 * 1024).read_to_end(&mut bytes).ok()?;
-                        normalize_ssh_error(&bytes)
-                    });
+                    let message = tunnel
+                        .diagnostics
+                        .lock()
+                        .ok()
+                        .and_then(|bytes| normalize_ssh_error(bytes.as_slice()));
                     states.push(TunnelState {
                         id: *id,
                         running: false,
@@ -98,7 +137,7 @@ impl Drop for TunnelManager {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_start(
     manager: State<'_, TunnelManager>,
     app_state: State<'_, AppState>,
@@ -269,18 +308,23 @@ pub fn tunnel_start(
             return Err(error);
         }
     };
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    if let Some(stderr) = child.stderr.take() {
+        spawn_tunnel_diagnostics(stderr, Arc::clone(&diagnostics));
+    }
     active.insert(
         rule.id,
         ActiveTunnel {
             child,
             supervisor,
+            diagnostics,
             _artifacts: connection_artifacts,
         },
     );
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_stop(manager: State<'_, TunnelManager>, id: Uuid) -> Result<bool, String> {
     let mut active = manager
         .active
@@ -295,22 +339,25 @@ pub fn tunnel_stop(manager: State<'_, TunnelManager>, id: Uuid) -> Result<bool, 
     Ok(true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_states(manager: State<'_, TunnelManager>) -> Result<Vec<TunnelState>, String> {
     manager.reap()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tunnel_port_processes(port: u16) -> Result<Vec<TunnelPortProcess>, String> {
     let own_pid = std::process::id();
     let own_uid = process_uid(own_pid);
+    // Snapshotting the process table once matters on Windows, where each
+    // lookup used to build a whole `sysinfo::System` of its own.
+    let table = ProcessTable::snapshot();
     Ok(listener_pids(port)?
         .into_iter()
         .filter(|pid| *pid != own_pid)
         .map(|pid| TunnelPortProcess {
             pid,
-            name: process_name(pid),
-            command: process_command(pid),
+            name: table.name(pid),
+            command: table.command(pid),
             requires_elevation: process_uid(pid)
                 .zip(own_uid)
                 .is_none_or(|(uid, own)| uid != own),
@@ -318,9 +365,22 @@ pub fn tunnel_port_processes(port: u16) -> Result<Vec<TunnelPortProcess>, String
         .collect())
 }
 
+/// Stops whatever else is holding the port, prompting for elevation if needed.
+///
+/// This waits on `pkexec`, which shows a system password dialog and can sit
+/// there for as long as the person takes, and then polls for up to two seconds.
+/// It has to run on a blocking thread or the whole window freezes behind the
+/// prompt.
 #[tauri::command]
 #[cfg(target_family = "unix")]
-pub fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
+pub async fn tunnel_stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_port_processes(port, pids))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_family = "unix")]
+fn stop_port_processes(port: u16, pids: Vec<u32>) -> Result<(), String> {
     let own_pid = std::process::id();
     let mut current = listener_pids(port)?;
     current.retain(|pid| *pid != own_pid);
@@ -455,60 +515,79 @@ fn parse_fuser_pids(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// One look at the running processes, reused for every port holder.
 #[cfg(target_family = "unix")]
-fn process_name(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|name| name.trim().to_string())
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Process {pid}"))
+struct ProcessTable;
+
+#[cfg(target_family = "unix")]
+impl ProcessTable {
+    fn snapshot() -> Self {
+        Self
+    }
+
+    fn name(&self, pid: u32) -> String {
+        fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|name| name.trim().to_string())
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("Process {pid}"))
+    }
+
+    fn command(&self, pid: u32) -> String {
+        fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .replace('\0', " ")
+                    .trim()
+                    .chars()
+                    .take(240)
+                    .collect::<String>()
+            })
+            .filter(|command| !command.is_empty())
+            .unwrap_or_else(|| self.name(pid))
+    }
 }
 
 #[cfg(windows)]
-fn process_name(pid: u32) -> String {
-    let system = sysinfo::System::new_all();
-    system
-        .process(sysinfo::Pid::from_u32(pid))
-        .map(|process| process.name().to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Process {pid}"))
-}
-
-#[cfg(target_family = "unix")]
-fn process_command(pid: u32) -> String {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .ok()
-        .map(|bytes| {
-            String::from_utf8_lossy(&bytes)
-                .replace('\0', " ")
-                .trim()
-                .chars()
-                .take(240)
-                .collect::<String>()
-        })
-        .filter(|command| !command.is_empty())
-        .unwrap_or_else(|| process_name(pid))
+struct ProcessTable {
+    system: sysinfo::System,
 }
 
 #[cfg(windows)]
-fn process_command(pid: u32) -> String {
-    let system = sysinfo::System::new_all();
-    let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) else {
-        return process_name(pid);
-    };
-    let command = process
-        .cmd()
-        .iter()
-        .map(|part| part.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if command.is_empty() {
-        process
-            .exe()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| process_name(pid))
-    } else {
-        command.chars().take(240).collect()
+impl ProcessTable {
+    fn snapshot() -> Self {
+        Self {
+            system: sysinfo::System::new_all(),
+        }
+    }
+
+    fn name(&self, pid: u32) -> String {
+        self.system
+            .process(sysinfo::Pid::from_u32(pid))
+            .map(|process| process.name().to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("Process {pid}"))
+    }
+
+    fn command(&self, pid: u32) -> String {
+        let Some(process) = self.system.process(sysinfo::Pid::from_u32(pid)) else {
+            return self.name(pid);
+        };
+        let command = process
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if command.is_empty() {
+            process
+                .exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| self.name(pid))
+        } else {
+            command.chars().take(240).collect()
+        }
     }
 }
 
@@ -547,6 +626,46 @@ mod tests {
     #[test]
     fn empty_ssh_errors_are_omitted() {
         assert_eq!(normalize_ssh_error(b" \n\r "), None);
+    }
+
+    #[test]
+    fn diagnostics_keep_the_newest_output_within_the_cap() {
+        let mut buffer = Vec::new();
+        append_capped(&mut buffer, b"first ", 10);
+        assert_eq!(buffer, b"first ");
+        append_capped(&mut buffer, b"second", 10);
+        // The tail matters: the last thing SSH said before it died is the
+        // message worth showing.
+        assert_eq!(buffer, b"rst second");
+        assert!(buffer.len() <= 10);
+    }
+
+    #[test]
+    fn diagnostics_survive_a_chunk_larger_than_the_cap() {
+        let mut buffer = Vec::new();
+        append_capped(&mut buffer, &[b'x'; 40], 8);
+        assert_eq!(buffer, vec![b'x'; 8]);
+    }
+
+    #[test]
+    fn a_tunnel_that_floods_stderr_is_drained_instead_of_blocking() {
+        // A pipe buffer is ~64 KiB; before this was drained continuously, a
+        // child writing past it blocked forever inside its own write().
+        let mut child = Command::new("sh")
+            .args(["-c", "yes 'channel 3: open failed' | head -c 300000 >&2"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stderr flooder");
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        spawn_tunnel_diagnostics(child.stderr.take().unwrap(), Arc::clone(&diagnostics));
+
+        let status = child.wait().expect("the child must not block on stderr");
+        assert!(status.success());
+        let captured = diagnostics.lock().unwrap();
+        assert_eq!(captured.len(), TUNNEL_DIAGNOSTICS_LIMIT);
+        assert!(normalize_ssh_error(captured.as_slice()).is_some());
     }
 
     #[cfg(target_family = "unix")]

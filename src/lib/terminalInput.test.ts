@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  drainTerminalInput,
   normalizeLinuxTerminalInput,
   resetLinuxTerminalComposition
 } from "./terminalInput";
@@ -22,5 +23,27 @@ describe("normalizeLinuxTerminalInput", () => {
     const textarea = { value: "ls -ls " };
     resetLinuxTerminalComposition(textarea);
     expect(textarea.value).toBe("");
+  });
+});
+
+describe("drainTerminalInput", () => {
+  it("joins queued chunks in order", () => {
+    const encoder = new TextEncoder();
+    const chunks = [encoder.encode("echo "), encoder.encode("hi"), encoder.encode("\r")];
+    expect(drainTerminalInput(chunks)).toEqual([...encoder.encode("echo hi\r")]);
+  });
+
+  it("returns an empty payload for an empty queue", () => {
+    expect(drainTerminalInput([])).toEqual([]);
+  });
+
+  it("handles a paste far larger than the call-argument limit", () => {
+    // `queue.push(...bytes)` used to throw RangeError past ~128k arguments,
+    // which lost the whole paste from inside xterm's onData handler.
+    const paste = new TextEncoder().encode("x".repeat(1_000_000));
+    const bytes = drainTerminalInput([paste]);
+    expect(bytes).toHaveLength(1_000_000);
+    expect(bytes[0]).toBe(paste[0]);
+    expect(bytes[bytes.length - 1]).toBe(paste[paste.length - 1]);
   });
 });

@@ -52,6 +52,8 @@
   let importError = $state(false);
   let keyMaterial = $state<KeyMaterial | null>(null);
   let materialLoading = $state(false);
+  /** Guards against an out-of-order key-material response. */
+  let materialRequestId = 0;
   let materialError = $state("");
   let inspectorMenuOpen = $state(false);
   let collectionView = $state<CollectionView>("grid");
@@ -246,10 +248,19 @@
       if (importLabel.trim() && importLabel.trim() !== identity.label) {
         identity = await saveIdentity({ ...identity, label: importLabel.trim() });
       }
+      if (imported.encrypted && !importPassphrase) {
+        // The key is already copied into the vault by this point, so saying it
+        // was not imported would be wrong; only the passphrase is missing, and
+        // the list has to show the new entry either way.
+        importOpen = false;
+        await refresh(identity.id);
+        message =
+          "Encrypted key copied into the vault. Enter its passphrase in the inspector to use it.";
+        isError = false;
+        importStatus = "";
+        return;
+      }
       if (imported.encrypted) {
-        if (!importPassphrase) {
-          throw new Error("This private key is encrypted. Enter its passphrase to import it.");
-        }
         await setIdentitySecret(identity.id, importPassphrase);
       }
       importPassphrase = "";
@@ -296,6 +307,16 @@
     if (importing || paths.length === 0) return;
     if (!(await confirmDiscardChanges(editorDirty))) return;
     importing = true;
+    try {
+      await importDroppedKeyPaths(paths);
+    } finally {
+      // Without this the Import button stayed disabled for good after a throw,
+      // and every later drop was ignored.
+      importing = false;
+    }
+  }
+
+  async function importDroppedKeyPaths(paths: string[]) {
     importStatus = "Inspecting private key…";
     importError = false;
     const imported = [];
@@ -329,7 +350,6 @@
       message = "Encrypted key copied into the vault. Open New key and import it again to save its passphrase.";
       isError = false;
     }
-    importing = false;
   }
 
   async function persist() {
@@ -400,7 +420,15 @@
     void loadMaterial(selected);
   }
 
+  /**
+   * Loads the key material for the selected identity.
+   *
+   * The request id matters: selecting one key and then another quickly could
+   * land the first response last and show one identity's private key under the
+   * other's label.
+   */
   async function loadMaterial(identity: Identity | null) {
+    const requestId = ++materialRequestId;
     keyMaterial = null;
     materialError = "";
     if (
@@ -410,11 +438,14 @@
     ) return;
     materialLoading = true;
     try {
-      keyMaterial = await readKeyMaterial(identity.id);
+      const material = await readKeyMaterial(identity.id);
+      if (requestId !== materialRequestId) return;
+      keyMaterial = material;
     } catch (cause) {
+      if (requestId !== materialRequestId) return;
       materialError = errorMessage(cause);
     } finally {
-      materialLoading = false;
+      if (requestId === materialRequestId) materialLoading = false;
     }
   }
 
