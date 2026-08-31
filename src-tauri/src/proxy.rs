@@ -600,16 +600,14 @@ mod tests {
         let mut spec = spec(ProxyKind::Http, None);
         spec.port = port;
         let started = std::time::Instant::now();
-        let error = connect_through_with_timeout(
-            &spec,
-            None,
-            "10.0.0.5",
-            22,
-            Duration::from_millis(150),
-        )
-        .unwrap_err();
+        let error =
+            connect_through_with_timeout(&spec, None, "10.0.0.5", 22, Duration::from_millis(150))
+                .unwrap_err();
 
-        assert!(started.elapsed() < Duration::from_secs(5), "handshake blocked");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "handshake blocked"
+        );
         assert!(
             error.contains("Could not read the proxy response"),
             "{error}"

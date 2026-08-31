@@ -1069,8 +1069,17 @@ mod tests {
         publish_terminal_output(&sink, b"second");
 
         // Raw keeps a 16 KiB read at 16 KiB instead of ~75 KB of JSON digits.
-        assert_eq!(raw_bodies(&sent), vec![b"first ".to_vec(), b"second".to_vec()]);
-        let replay = sink.lock().unwrap().replay.iter().copied().collect::<Vec<_>>();
+        assert_eq!(
+            raw_bodies(&sent),
+            vec![b"first ".to_vec(), b"second".to_vec()]
+        );
+        let replay = sink
+            .lock()
+            .unwrap()
+            .replay
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         assert_eq!(replay, b"first second");
     }
 
@@ -1097,7 +1106,13 @@ mod tests {
         publish_terminal_output(&sink, &vec![b'o'; TERMINAL_REPLAY_LIMIT]);
         publish_terminal_output(&sink, b"tail");
 
-        let replay = sink.lock().unwrap().replay.iter().copied().collect::<Vec<_>>();
+        let replay = sink
+            .lock()
+            .unwrap()
+            .replay
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         assert_eq!(replay.len(), TERMINAL_REPLAY_LIMIT);
         assert!(replay.ends_with(b"tail"));
     }
@@ -1130,7 +1145,10 @@ mod tests {
         publish_terminal_output(&sink, b"new output");
 
         let bodies = raw_bodies(&sent);
-        assert_eq!(bodies, vec![b"old output ".to_vec(), b"new output".to_vec()]);
+        assert_eq!(
+            bodies,
+            vec![b"old output ".to_vec(), b"new output".to_vec()]
+        );
     }
 
     #[test]

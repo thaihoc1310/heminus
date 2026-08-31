@@ -687,7 +687,10 @@ mod tests {
 
         assert!(!abandoned.exists(), "a dead run's config must be removed");
         assert!(!legacy.exists(), "legacy directories must be removed");
-        assert!(live.exists(), "another live window's directory must survive");
+        assert!(
+            live.exists(),
+            "another live window's directory must survive"
+        );
         assert!(runtime.connections.is_dir());
 
         drop(runtime);

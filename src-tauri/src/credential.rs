@@ -346,8 +346,11 @@ mod tests {
 
         // OpenSSH names the key file when it asks locally, so real prompts work.
         assert_eq!(
-            choose_candidate("Enter passphrase for key '/vault/keys/deploy': ", &candidates)
-                .unwrap(),
+            choose_candidate(
+                "Enter passphrase for key '/vault/keys/deploy': ",
+                &candidates
+            )
+            .unwrap(),
             key.id
         );
     }

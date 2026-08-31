@@ -544,7 +544,11 @@ mod tests {
         generate_ed25519_files(&path, "plain", None).unwrap();
 
         assert!(validate_private_key_passphrase(&path, "").is_ok());
-        assert!(derive_public_key(&path, None).unwrap().starts_with("ssh-ed25519 "));
+        assert!(
+            derive_public_key(&path, None)
+                .unwrap()
+                .starts_with("ssh-ed25519 ")
+        );
 
         remove_key_files(&path);
         fs::remove_dir_all(directory).unwrap();

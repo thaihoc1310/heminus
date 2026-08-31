@@ -2067,7 +2067,9 @@ mod tests {
     fn command_history_is_capped_at_the_limit_keeping_the_newest() {
         let database = Database::in_memory().unwrap();
         for index in 0..(COMMAND_HISTORY_LIMIT + 100) {
-            database.record_command(None, &format!("command {index}")).unwrap();
+            database
+                .record_command(None, &format!("command {index}"))
+                .unwrap();
         }
 
         let total: i64 = database
@@ -2099,7 +2101,12 @@ mod tests {
         assert!(database.find_host(gateway.id).unwrap().is_none());
         for id in [first.id, second.id] {
             assert!(
-                database.find_host(id).unwrap().unwrap().jump_host_ids.is_empty(),
+                database
+                    .find_host(id)
+                    .unwrap()
+                    .unwrap()
+                    .jump_host_ids
+                    .is_empty(),
                 "chain should no longer point at the deleted jump host"
             );
         }
@@ -2137,22 +2144,39 @@ mod tests {
         }];
         database.save_workspace(&workspace).unwrap();
 
-        assert_eq!(database.find_group(group.id).unwrap().unwrap().name, "Production");
+        assert_eq!(
+            database.find_group(group.id).unwrap().unwrap().name,
+            "Production"
+        );
         assert_eq!(
             database.find_identity(identity.id).unwrap().unwrap().label,
             "Deploy key"
         );
         assert_eq!(
-            database.find_port_forward(rule.id).unwrap().unwrap().bind_port,
+            database
+                .find_port_forward(rule.id)
+                .unwrap()
+                .unwrap()
+                .bind_port,
             8080
         );
         assert_eq!(
-            database.find_workspace(workspace.id).unwrap().unwrap().panes.len(),
+            database
+                .find_workspace(workspace.id)
+                .unwrap()
+                .unwrap()
+                .panes
+                .len(),
             1
         );
         assert!(database.find_group(Uuid::new_v4()).unwrap().is_none());
         assert!(database.find_identity(Uuid::new_v4()).unwrap().is_none());
-        assert!(database.find_port_forward(Uuid::new_v4()).unwrap().is_none());
+        assert!(
+            database
+                .find_port_forward(Uuid::new_v4())
+                .unwrap()
+                .is_none()
+        );
         assert!(database.find_workspace(Uuid::new_v4()).unwrap().is_none());
     }
 
