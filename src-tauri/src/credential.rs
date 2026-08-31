@@ -466,6 +466,7 @@ mod tests {
         let candidates = serde_json::to_string(&vec![AskpassCandidate {
             id,
             needles: vec!["deploy@example.invalid".into()],
+            kind: AskpassSecret::Password,
         }])
         .unwrap();
         set(id, "temporary-release-askpass-secret".into()).unwrap();
