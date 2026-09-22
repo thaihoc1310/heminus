@@ -2,7 +2,10 @@
   import { Channel } from "@tauri-apps/api/core";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
+  import { SerializeAddon } from "@xterm/addon-serialize";
+  import { Unicode11Addon } from "@xterm/addon-unicode11";
   import { WebLinksAddon } from "@xterm/addon-web-links";
+  import { WebglAddon } from "@xterm/addon-webgl";
   import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
   import { onMount, tick, untrack } from "svelte";
@@ -10,6 +13,8 @@
   import HostIcon from "../../components/HostIcon.svelte";
   import {
     attachTerminal,
+    acknowledgeTerminal,
+    pauseTerminal,
     closeTerminal,
     detachTerminal,
     listCommandHistory,
@@ -29,7 +34,8 @@
     TerminalAppearance,
     TerminalCommandRequest,
     TerminalChannelMessage,
-    TerminalControlEvent
+    TerminalControlEvent,
+    TerminalSnapshot
   } from "../../lib/types";
   import { decodeTerminalMessage } from "../../lib/terminalChannel";
   import { terminalTheme } from "../../lib/terminalThemes";
@@ -42,12 +48,25 @@
     detectHostOperatingSystem,
     rememberHostOperatingSystem
   } from "../../lib/hostOperatingSystem";
-  import { consumeShellCompletionMarkers } from "../../lib/terminalShellIntegration";
+  import {
+    isMousePress,
+    isMouseReport,
+    isSecretPrompt,
+    ShellPromptState,
+    startsMultiplexer
+  } from "../../lib/terminalShellIntegration";
+  import { pendingDetaches, terminalTransfers } from "../../lib/terminalTransfer";
   import {
     drainTerminalInput,
     normalizeLinuxTerminalInput,
     resetLinuxTerminalComposition
   } from "../../lib/terminalInput";
+  import {
+    nextTerminalFontSize,
+    terminalZoomActionFromKeyboard,
+    terminalZoomActionFromWheel,
+    type TerminalZoomAction
+  } from "../../lib/terminalZoom";
   import {
     buildTerminalSuggestions,
     highlightedCommand,
@@ -64,6 +83,7 @@
     snippetVersion = 0,
     historyVersion = 0,
     resumeSessionId = null,
+    snapshot = undefined,
     initialCwd = null,
     commandRequest = null,
     workspace = false,
@@ -78,11 +98,13 @@
     onHeaderDrag = (_event: DragEvent) => {},
     onHeaderDragEnd = (_event: DragEvent) => {},
     onSessionReady = (_paneId: string, _sessionId: string) => {},
-    onSessionClosed = (_paneId: string) => {},
+    onSessionClosed = (_paneId: string, _sessionId: string | null) => {},
     onUserInput = (_paneId: string, _bytes: Uint8Array) => {},
     onActivate = (_paneId: string) => {},
+    onAttention = (_paneId: string) => {},
     onCommandRecorded = () => {},
-    shouldPreserveSession = () => false
+    shouldPreserveSession = () => false,
+    onappearancechange = (_patch: Partial<TerminalAppearance>) => {}
   }: {
     paneId: string;
     title: string;
@@ -91,6 +113,7 @@
     snippetVersion?: number;
     historyVersion?: number;
     resumeSessionId?: string | null;
+    snapshot?: TerminalSnapshot;
     initialCwd?: string | null;
     commandRequest?: TerminalCommandRequest | null;
     workspace?: boolean;
@@ -105,11 +128,13 @@
     onHeaderDrag?: (event: DragEvent) => void;
     onHeaderDragEnd?: (event: DragEvent) => void;
     onSessionReady?: (paneId: string, sessionId: string) => void;
-    onSessionClosed?: (paneId: string) => void;
+    onSessionClosed?: (paneId: string, sessionId: string | null) => void;
     onUserInput?: (paneId: string, bytes: Uint8Array) => void;
     onActivate?: (paneId: string) => void;
+    onAttention?: (paneId: string) => void;
     onCommandRecorded?: () => void;
     shouldPreserveSession?: () => boolean;
+    onappearancechange?: (patch: Partial<TerminalAppearance>) => void;
   } = $props();
 
   let container: HTMLDivElement;
@@ -275,6 +300,25 @@
   let lastCommandRequestId = "";
   let operatingSystemDetectionBuffer = "";
   let operatingSystemDetected = false;
+  let zoomHint = $state<number | null>(null);
+  let zoomHintTimer: number | null = null;
+  let lastWheelZoomAt = 0;
+
+  function showZoomHint(size: number) {
+    zoomHint = size;
+    if (zoomHintTimer !== null) window.clearTimeout(zoomHintTimer);
+    zoomHintTimer = window.setTimeout(() => {
+      zoomHint = null;
+      zoomHintTimer = null;
+    }, 900);
+  }
+
+  function applyTerminalZoom(action: TerminalZoomAction) {
+    const fontSize = nextTerminalFontSize(appearance.fontSize, action);
+    if (fontSize !== appearance.fontSize) onappearancechange({ fontSize });
+    showZoomHint(fontSize);
+    onActivate(paneId);
+  }
   let activeTheme = $derived(terminalTheme(appearance.theme));
   let terminalStyle = $derived(
     [
@@ -470,10 +514,14 @@
     let fitAddon: FitAddon | null = null;
     let webLinksAddon: WebLinksAddon | null = null;
     let searchAddon: SearchAddon | null = null;
-    let pendingCommands: string[] = [];
-    let shellIntegrationRemainder = "";
-    let outputTail = "";
-    let sensitiveInput = false;
+    const shell = new ShellPromptState();
+    // Herdr/tmux run their panes' shells inside one alternate screen, so the
+    // prompt markers never reach us; remember that one was started instead.
+    let insideMultiplexer = false;
+    let streamId: string | null = null;
+    let acknowledgedBytes = 0;
+    let ackTimer: number | null = null;
+    let checkpoint: ((snapshot: TerminalSnapshot) => void) | null = null;
     let commandStartPosition: { row: number; column: number } | null = null;
     let handleTerminalMiddleMouseEvent: ((event: MouseEvent) => void) | null = null;
     let handleTerminalMiddlePointerDown: ((event: PointerEvent) => void) | null = null;
@@ -482,6 +530,17 @@
     let handleTerminalCompositionStart: (() => void) | null = null;
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
+    const preventContextMenu = (event: MouseEvent) => event.preventDefault();
+    const handleZoomWheel = (event: WheelEvent) => {
+      const zoom = terminalZoomActionFromWheel(event);
+      if (!zoom) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const now = performance.now();
+      if (now - lastWheelZoomAt < 70) return;
+      lastWheelZoomAt = now;
+      applyTerminalZoom(zoom);
+    };
     const supportsPrimarySelection = navigator.userAgent.includes("Linux");
 
     async function start() {
@@ -506,9 +565,67 @@
       fitAddon = new FitAddon();
       webLinksAddon = new WebLinksAddon();
       searchAddon = new SearchAddon({ highlightLimit: 2_000 });
+      const serializeAddon = new SerializeAddon();
+      // SerializeAddon omits mouse encoding and cursor visibility. Herdr uses
+      // SGR mouse coordinates; restoring tracking alone would corrupt clicks.
+      const extraModes = new Map<number, boolean>([[25, true]]);
+      for (const final of ["h", "l"]) {
+        terminal.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+          for (const mode of params) {
+            if (typeof mode === "number" && [25, 1005, 1006, 1015, 1016].includes(mode)) {
+              extraModes.set(mode, final === "h");
+            }
+          }
+          return false;
+        });
+      }
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.loadAddon(searchAddon);
+      terminal.loadAddon(serializeAddon);
+      // Agent TUIs (Claude Code, Codex) lay out emoji and symbols with modern
+      // wcwidth; Unicode 6 widths shift everything after them by a cell.
+      terminal.loadAddon(new Unicode11Addon());
+      terminal.unicode.activeVersion = "11";
+      for (const osc of [133, 633]) {
+        terminal.parser.registerOscHandler(osc, (data) => {
+          if (terminal?.buffer.active.type !== "normal") return false;
+          const command = shell.marker(data);
+          if (command) {
+            commandHistory = [command, ...commandHistory.filter((item) => item !== command)].slice(0, 200);
+            void recordCommandHistory(host?.id ?? null, command).then((recorded) => {
+              if (recorded) onCommandRecorded();
+            });
+          }
+          return true;
+        });
+      }
+      // OSC 52: Herdr and tmux copy mode set the system clipboard this way.
+      // Clipboard reads ("?") are refused so a remote host cannot snoop.
+      terminal.parser.registerOscHandler(52, (data) => {
+        const [targets, payload] = data.split(";", 2);
+        if (payload === undefined || payload === "?") return true;
+        try {
+          const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0));
+          const text = new TextDecoder().decode(bytes);
+          const primary = supportsPrimarySelection && !targets.includes("c") && targets.includes("p");
+          void writeTerminalClipboard(text, primary).catch(() => {});
+        } catch {
+          // Malformed base64: ignore, like other terminals.
+        }
+        return true;
+      });
+      // Agents (Claude Code, Codex) and Herdr's toasts ask for attention with
+      // the bell, OSC 9 (iTerm2; 9;4 is ConEmu progress) or OSC 777 notify.
+      terminal.onBell(() => onAttention(paneId));
+      terminal.parser.registerOscHandler(9, (data) => {
+        if (!data.startsWith("4;")) onAttention(paneId);
+        return true;
+      });
+      terminal.parser.registerOscHandler(777, (data) => {
+        if (data.startsWith("notify;")) onAttention(paneId);
+        return true;
+      });
       searchAddonApi = searchAddon;
       searchAddon.onDidChangeResults((result) => {
         if (disposed) return;
@@ -516,6 +633,15 @@
         searchResultCount = result.resultCount;
       });
       terminal.open(container);
+      try {
+        // GPU rendering keeps full-screen redraws (Herdr, htop) smooth; xterm 6
+        // otherwise falls back to the much slower DOM renderer.
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        terminal.loadAddon(webgl);
+      } catch {
+        // No WebGL2 in this WebView: the DOM renderer still works.
+      }
       const imeTextarea = terminal.textarea;
       if (supportsPrimarySelection && imeTextarea) {
         imeTextarea.style.whiteSpace = "pre";
@@ -529,14 +655,14 @@
         );
       }
       container.addEventListener("focusin", activate);
+      // Keep the WebView menu from covering menus drawn by terminal applications.
+      container.addEventListener("contextmenu", preventContextMenu, true);
+      container.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
       const clearTerminalSelection = () => {
         terminal?.clearSelection();
       };
       const finishTerminalPaste = () => {
         clearTerminalSelection();
-        if (terminal?.modes.bracketedPasteMode) {
-          terminal.input("\x1b[D\x1b[C", true);
-        }
       };
       if (supportsPrimarySelection) {
         const suppressMiddleClick = (event: MouseEvent | PointerEvent) => {
@@ -597,6 +723,22 @@
         container.addEventListener("auxclick", handleTerminalAuxClick, true);
       }
       fitAddon.fit();
+      if (snapshot && resumeSessionId) {
+        terminal.resize(snapshot.cols, snapshot.rows);
+        await new Promise<void>((resolve) => terminal!.write(snapshot.data, resolve));
+        shell.atPrompt = snapshot.shellAtPrompt ?? false;
+        insideMultiplexer = snapshot.multiplexer ?? false;
+      }
+      const flushAcknowledgements = () => {
+        if (ackTimer !== null) window.clearTimeout(ackTimer);
+        ackTimer = null;
+        if (!streamId || !acknowledgedBytes) return;
+        const bytes = acknowledgedBytes;
+        acknowledgedBytes = 0;
+        void acknowledgeTerminal(streamId, bytes).catch((cause) => {
+          if (!disposed) error = String(cause);
+        });
+      };
       const channel = new Channel<TerminalChannelMessage>();
       const handleTerminalOutput = (bytes: Uint8Array) => {
         if (!terminal) return;
@@ -604,48 +746,36 @@
           // Every hop logs to its own file, so anything on the PTY is the
           // real shell — a safe fallback if a log line is ever missed.
           if (connectionState === "connecting" && bytes.length > 0) markConnected();
-          terminal.write(bytes);
-          const text = outputDecoder
-            .decode(bytes, { stream: true })
-            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+          terminal.write(bytes, () => {
+            acknowledgedBytes += bytes.length;
+            if (acknowledgedBytes >= 64 * 1024) flushAcknowledgements();
+            else if (ackTimer === null) ackTimer = window.setTimeout(flushAcknowledgements, 16);
+          });
           if (host && !operatingSystemDetected) {
-            operatingSystemDetectionBuffer = `${operatingSystemDetectionBuffer}${text}`.slice(-16_384);
+            const text = outputDecoder.decode(bytes, { stream: true });
+            const stripped = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+            operatingSystemDetectionBuffer = `${operatingSystemDetectionBuffer}${stripped}`.slice(-16_384);
             const detected = detectHostOperatingSystem(operatingSystemDetectionBuffer);
             if (detected) {
               rememberHostOperatingSystem(host.id, detected);
               operatingSystemDetected = true;
             }
           }
-          const completionScan = consumeShellCompletionMarkers(
-            shellIntegrationRemainder,
-            text
-          );
-          shellIntegrationRemainder = completionScan.remainder;
-          for (const exitCode of completionScan.exitCodes) {
-            const command = pendingCommands.shift();
-            if (!command || exitCode !== 0) continue;
-            commandHistory = [
-              command,
-              ...commandHistory.filter((item) => item !== command)
-            ].slice(0, 200);
-            void recordCommandHistory(host?.id ?? null, command).then((recorded) => {
-              if (recorded) onCommandRecorded();
-            });
-          }
-          outputTail = `${outputTail}${text}`.slice(-320);
-          if (
-            /(?:password|passphrase|verification code|one-time code|otp|token)[^:\n]{0,40}:\s*$/i.test(
-              outputTail
-            )
-          ) {
-            sensitiveInput = true;
-            commandInput = "";
-            suggestions = [];
-          }
         }
       };
       const handleTerminalEvent = (event: TerminalControlEvent) => {
         if (!terminal) return;
+        if (event.kind === "stream") streamId = event.id;
+        if (event.kind === "checkpoint") {
+          terminal.write("", () => {
+            if (!terminal || disposed) return;
+            flushAcknowledgements();
+            const modes = [...extraModes].map(([mode, enabled]) => `\x1b[?${mode}${enabled ? "h" : "l"}`).join("");
+            checkpoint?.({ data: serializeAddon.serialize() + modes, rows: terminal.rows, cols: terminal.cols,
+              shellAtPrompt: shell.atPrompt, multiplexer: insideMultiplexer });
+            checkpoint = null;
+          });
+        }
         if (event.kind === "hops") setHops(event.labels);
         if (event.kind === "log") {
           recordConnectionLog({
@@ -672,13 +802,13 @@
             showConnectionLog = true;
           }
           if (sessionId) {
-            onSessionClosed(paneId);
+            onSessionClosed(paneId, sessionId);
             sessionId = null;
           }
         }
         if (event.kind === "disconnect") {
           if (sessionId) {
-            onSessionClosed(paneId);
+            onSessionClosed(paneId, sessionId);
             sessionId = null;
           }
           onClose();
@@ -692,6 +822,7 @@
 
       if (resumeSessionId) {
         try {
+          await pendingDetaches.get(resumeSessionId);
           await attachTerminal(resumeSessionId, channel);
           if (disposed) {
             void detachTerminal(resumeSessionId);
@@ -715,9 +846,29 @@
         }
         sessionId = openedSessionId;
       }
-      let lastPtyRows = terminal.rows;
-      let lastPtyCols = terminal.cols;
+      // A resumed PTY still has the source window's geometry.
+      let lastPtyRows = resumeSessionId ? -1 : terminal.rows;
+      let lastPtyCols = resumeSessionId ? -1 : terminal.cols;
       onSessionReady(paneId, sessionId);
+      terminalTransfers.set(paneId, {
+        prepare: async () => {
+          if (!sessionId) throw new Error("Terminal session has ended");
+          flush();
+          await writeChain;
+          const drained = new Promise<TerminalSnapshot>((resolve) => { checkpoint = resolve; });
+          await pauseTerminal(sessionId, true);
+          let timer: number | undefined;
+          try {
+            return await Promise.race([drained, new Promise<never>((_, reject) => {
+              timer = window.setTimeout(() => reject(new Error("Terminal snapshot timed out")), 5000);
+            })]);
+          } finally {
+            window.clearTimeout(timer);
+            checkpoint = null;
+          }
+        },
+        resume: async () => { if (sessionId) await pauseTerminal(sessionId, false); }
+      });
       const encoder = new TextEncoder();
       const cursorPosition = () => terminal
         ? {
@@ -725,6 +876,23 @@
             column: terminal.buffer.active.cursorX
           }
         : null;
+      // Full-screen and mouse-reporting programs such as Herdr own their input.
+      const atShellPrompt = () =>
+        shell.editable &&
+        terminal?.buffer.active.type === "normal" &&
+        terminal.modes.mouseTrackingMode === "none";
+      // Password prompts don't echo; keep what is typed there out of the panel.
+      const atSecretPrompt = () => {
+        const buffer = terminal?.buffer.active;
+        const line = buffer?.getLine(buffer.baseY + buffer.cursorY);
+        return Boolean(line && isSecretPrompt(line.translateToString(true, 0, buffer!.cursorX)));
+      };
+      const suggestionsAllowed = () =>
+        (atShellPrompt() || (insideMultiplexer && terminal?.buffer.active.type === "alternate")) &&
+        !atSecretPrompt();
+      terminal.buffer.onBufferChange((buffer) => {
+        if (buffer.type === "normal") insideMultiplexer = false;
+      });
       const renderedCommand = (): string | null => {
         if (!terminal || !commandStartPosition) return null;
         const buffer = terminal.buffer.active;
@@ -759,12 +927,16 @@
         if (flushTimer === null) flushTimer = window.setTimeout(flush, 4);
       };
       externalCommandHandler = (command: string, run: boolean) => {
+        if (!suggestionsAllowed()) {
+          error = "Wait for a shell prompt before inserting a command.";
+          return;
+        }
         commandStartPosition ??= cursorPosition();
         const data = `${command}${run ? "\r" : ""}`;
         queueData(data);
         const update = updateCommandInput(commandInput, data);
         commandInput = update.input;
-        pendingCommands.push(...update.submitted);
+        if (update.submitted.length) shell.submit(update.submitted.join("\n"));
         if (update.submitted.length > 0) commandStartPosition = null;
         suggestions = [];
         suggestionIndex = -1;
@@ -787,6 +959,11 @@
         suggestionStyle = `left:${left}px;top:${Math.max(container.offsetTop + 8, top)}px;width:${width}px`;
       };
       const refreshSuggestions = () => {
+        if (!suggestionsAllowed()) {
+          suggestions = [];
+          suggestionIndex = -1;
+          return;
+        }
         suggestions = buildTerminalSuggestions(
           commandInput,
           snippetCatalog,
@@ -807,24 +984,41 @@
       };
       terminal.onData((data) => {
         if (supportsPrimarySelection) data = normalizeLinuxTerminalInput(data);
-        if (sensitiveInput) {
+        if (isMouseReport(data)) {
           queueData(data);
-          if (data.includes("\r") || data.includes("\n") || data.includes("\x03")) {
-            sensitiveInput = false;
+          if (isMousePress(data)) {
             commandInput = "";
+            commandStartPosition = null;
             suggestions = [];
+            suggestionIndex = -1;
           }
           return;
         }
+        if (!suggestionsAllowed()) {
+          queueData(data);
+          commandInput = "";
+          commandStartPosition = null;
+          suggestions = [];
+          return;
+        }
+        if (data.startsWith("\x1b[200~")) {
+          queueData(data);
+          commandInput += data.slice(6, -6).replaceAll("\r", "\n");
+          suggestions = [];
+          return;
+        }
         const submitting = data.includes("\r") || data.includes("\n");
+        const atPrompt = atShellPrompt();
         if (!submitting) commandStartPosition ??= cursorPosition();
-        if (submitting) {
+        // Inside a multiplexer the rows also hold other panes, so trust typing.
+        if (submitting && atPrompt) {
           const rendered = renderedCommand();
           commandInput = reconcileRenderedCommandInput(commandInput, rendered);
         }
         if (suggestions.length > 0) {
-          if (data === "\x1b[A" || data === "\x1b[B") {
-            const direction = data === "\x1b[A" ? -1 : 1;
+          // Application cursor mode (zsh on Debian/Ubuntu) sends ESC O A/B.
+          if (/^\x1b[[O][AB]$/.test(data)) {
+            const direction = data.endsWith("A") ? -1 : 1;
             const start = suggestionIndex < 0 ? (direction > 0 ? -1 : 0) : suggestionIndex;
             suggestionIndex = (start + direction + suggestions.length) % suggestions.length;
             return;
@@ -842,13 +1036,17 @@
         queueData(data);
         const update = updateCommandInput(commandInput, data);
         commandInput = update.input;
-        for (const command of update.submitted) {
-          pendingCommands.push(command);
-        }
+        if (submitting && atPrompt) insideMultiplexer = update.submitted.some(startsMultiplexer);
+        if (submitting) shell.submit(update.submitted.join("\n"));
         if (update.submitted.length > 0 || data.includes("\x03") || data.includes("\x15")) {
           commandStartPosition = null;
         }
         refreshSuggestions();
+      });
+      terminal.onBinary((data) => {
+        const chunk = Uint8Array.from(data, (character) => character.charCodeAt(0) & 255);
+        queuedInput.push(chunk);
+        if (flushTimer === null) flushTimer = window.setTimeout(flush, 4);
       });
       terminal.onSelectionChange(() => {
         if (!supportsPrimarySelection || primarySelectionFrame !== null) return;
@@ -903,9 +1101,19 @@
           refreshSuggestions();
           return false;
         }
+        if (event.type === "keydown") {
+          const zoom = terminalZoomActionFromKeyboard(event);
+          if (zoom) {
+            event.preventDefault();
+            event.stopPropagation();
+            applyTerminalZoom(zoom);
+            return false;
+          }
+        }
         if (
           event.type === "keydown" &&
           (event.ctrlKey || event.metaKey) &&
+          event.shiftKey &&
           event.key.toLowerCase() === "f"
         ) {
           event.preventDefault();
@@ -921,6 +1129,14 @@
           resizeFrame = null;
           if (!terminal || !fitAddon) return;
           fitAddon.fit();
+          // WebKitGTK shows a WebGL canvas that returns from display:none one
+          // draw behind, so output that arrived while the tab was hidden stays
+          // invisible until the next write. A second draw two frames later
+          // brings the screen up to date.
+          terminal.refresh(0, terminal.rows - 1);
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            terminal?.refresh(0, terminal.rows - 1);
+          }));
           positionSuggestions();
           if (
             !sessionId ||
@@ -938,6 +1154,7 @@
       resizeObserver = new ResizeObserver(syncTerminalSize);
       resizeObserver.observe(container);
       refitTerminal = syncTerminalSize;
+      syncTerminalSize();
       terminal.focus();
     }
 
@@ -948,14 +1165,27 @@
     return () => {
       const preserveSession = shouldPreserveSession();
       disposed = true;
+      terminalTransfers.delete(paneId);
+      if (ackTimer !== null) window.clearTimeout(ackTimer);
       if (flushTimer !== null) window.clearTimeout(flushTimer);
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
       if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
+      if (zoomHintTimer !== null) window.clearTimeout(zoomHintTimer);
       resizeObserver?.disconnect();
       // A pane torn down for a move keeps its session; tell the backend to stop
       // streaming so it is not writing into a webview that has gone away.
-      if (preserveSession && sessionId) void detachTerminal(sessionId);
+      if (preserveSession && sessionId) {
+        const id = sessionId;
+        const detach: Promise<unknown> = detachTerminal(id)
+          .catch(() => {})
+          .finally(() => {
+            if (pendingDetaches.get(id) === detach) pendingDetaches.delete(id);
+          });
+        pendingDetaches.set(id, detach);
+      }
       container?.removeEventListener("focusin", activate);
+      container?.removeEventListener("contextmenu", preventContextMenu, true);
+      container?.removeEventListener("wheel", handleZoomWheel, true);
       if (handleTerminalMiddlePointerDown) {
         container?.removeEventListener(
           "pointerdown",
@@ -1002,7 +1232,7 @@
       commandHandlerVersion += 1;
       applySuggestion = null;
       suggestions = [];
-      onSessionClosed(paneId);
+      onSessionClosed(paneId, sessionId);
       if (sessionId && !preserveSession) void closeTerminal(sessionId);
     };
   });
@@ -1045,6 +1275,9 @@
     </header>
   {/if}
   {#if error}<div class="terminal-error">{error}</div>{/if}
+  {#if zoomHint !== null}
+    <div class="terminal-zoom-hint" aria-live="polite">{zoomHint} px</div>
+  {/if}
   {#if searchOpen}
     <div
       class="terminal-search"

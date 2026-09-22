@@ -1,35 +1,46 @@
-import { describe, expect, it } from "vitest";
-import { consumeShellCompletionMarkers } from "./terminalShellIntegration";
+import { expect, it } from "vitest";
+import { ShellPromptState } from "./terminalShellIntegration";
 
-describe("terminal shell integration", () => {
-  it("reads successful and failed command completion markers", () => {
-    expect(
-      consumeShellCompletionMarkers(
-        "",
-        "output\u001b]633;D;0\u0007more\u001b]133;D;127\u001b\\"
-      )
-    ).toEqual({
-      remainder: "",
-      exitCodes: [0, 127]
-    });
-  });
+it("tracks only commands entered at a confirmed shell prompt, not TUI input", () => {
+  const state = new ShellPromptState();
+  expect(state.atPrompt).toBe(false);
+  state.marker("D;0");
+  state.submit("herdr");
+  expect(state.atPrompt).toBe(false);
+  expect(state.editable).toBe(false);
+  for (let i = 0; i < 10000; i++) state.submit("private agent prompt");
+  expect(state.marker("D;0")).toBe("herdr");
+  expect(state.marker("D;0")).toBeNull();
+  state.submit("false");
+  expect(state.marker("D;1")).toBeNull();
+});
 
-  it("keeps a split marker until its terminator arrives", () => {
-    const first = consumeShellCompletionMarkers("", "output\u001b]633;D");
-    expect(first).toEqual({
-      remainder: "\u001b]633;D",
-      exitCodes: []
-    });
-    expect(consumeShellCompletionMarkers(first.remainder, ";0\u0007prompt")).toEqual({
-      remainder: "",
-      exitCodes: [0]
-    });
-  });
+it("stays editable for shells that never report prompt markers", () => {
+  const state = new ShellPromptState();
+  expect(state.editable).toBe(true);
+  state.submit("ls");
+  expect(state.editable).toBe(true);
+  state.marker("C");
+  expect(state.editable).toBe(false);
+});
 
-  it("reports completion without a trustworthy exit code as unknown", () => {
-    expect(consumeShellCompletionMarkers("", "\u001b]133;D\u0007")).toEqual({
-      remainder: "",
-      exitCodes: [null]
-    });
-  });
+it("recognises multiplexers and mouse reports", async () => {
+  const { startsMultiplexer, isMouseReport, isMousePress } = await import("./terminalShellIntegration");
+  expect(startsMultiplexer("herdr")).toBe(true);
+  expect(startsMultiplexer(" /usr/bin/tmux attach")).toBe(true);
+  expect(startsMultiplexer("herdrx")).toBe(false);
+  expect(isMouseReport("\x1b[<35;10;4M\x1b[<35;11;4M")).toBe(true);
+  expect(isMouseReport("pi")).toBe(false);
+  expect(isMousePress("\x1b[<0;10;4M")).toBe(true);
+  expect(isMousePress("\x1b[<35;10;4M")).toBe(false);
+  expect(isMousePress("\x1b[<64;10;4M")).toBe(false);
+  expect(isMousePress("\x1b[<0;10;4m")).toBe(false);
+});
+
+it("recognises password and one-time code prompts", async () => {
+  const { isSecretPrompt } = await import("./terminalShellIntegration");
+  expect(isSecretPrompt("[sudo] password for thaihoc: ")).toBe(true);
+  expect(isSecretPrompt("Enter passphrase for key '/home/u/.ssh/id_ed25519':")).toBe(true);
+  expect(isSecretPrompt("Verification code:")).toBe(true);
+  expect(isSecretPrompt("thaihoc@ubuntu:~$ echo password")).toBe(false);
 });

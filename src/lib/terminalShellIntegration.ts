@@ -1,67 +1,53 @@
-export interface ShellCompletionScan {
-  remainder: string;
-  exitCodes: Array<number | null>;
-}
+/** Track one shell command, never the input of programs launched by it. */
+export class ShellPromptState {
+  atPrompt = false;
+  /** Set by the first marker. SSH hosts and non-bash shells never send one. */
+  private integrated = false;
+  private pending: string | null = null;
 
-const markerStartPattern = /(?:\u001b\]|\u009d)(?:133|633);D/g;
-const markerPrefixes = ["\u001b]133;D", "\u001b]633;D", "\u009d133;D", "\u009d633;D"];
-
-function trailingMarkerPrefix(value: string): string {
-  const maximum = Math.min(
-    value.length,
-    Math.max(...markerPrefixes.map((prefix) => prefix.length)) - 1
-  );
-  for (let length = maximum; length > 0; length -= 1) {
-    const suffix = value.slice(-length);
-    if (markerPrefixes.some((prefix) => prefix.startsWith(suffix))) return suffix;
-  }
-  return "";
-}
-
-function markerTerminator(value: string, from: number): { index: number; length: number } | null {
-  for (let index = from; index < value.length; index += 1) {
-    if (value[index] === "\u0007" || value[index] === "\u009c") {
-      return { index, length: 1 };
-    }
-    if (value[index] === "\u001b" && value[index + 1] === "\\") {
-      return { index, length: 2 };
-    }
-  }
-  return null;
-}
-
-export function consumeShellCompletionMarkers(
-  remainder: string,
-  chunk: string
-): ShellCompletionScan {
-  const value = `${remainder}${chunk}`;
-  const exitCodes: Array<number | null> = [];
-  let cursor = 0;
-
-  while (cursor < value.length) {
-    markerStartPattern.lastIndex = cursor;
-    const start = markerStartPattern.exec(value);
-    if (!start) {
-      return {
-        remainder: trailingMarkerPrefix(value.slice(cursor)),
-        exitCodes
-      };
-    }
-
-    const bodyStart = start.index + start[0].length;
-    const terminator = markerTerminator(value, bodyStart);
-    if (!terminator) {
-      return {
-        remainder: value.slice(start.index),
-        exitCodes
-      };
-    }
-
-    const body = value.slice(bodyStart, terminator.index);
-    const status = body.match(/^;(-?\d+)$/);
-    exitCodes.push(status ? Number(status[1]) : null);
-    cursor = terminator.index + terminator.length;
+  /** Whether typed input is plausibly a shell command line. */
+  get editable(): boolean {
+    return this.atPrompt || !this.integrated;
   }
 
-  return { remainder: "", exitCodes };
+  marker(data: string): string | null {
+    this.integrated = true;
+    const [kind, status] = data.split(";");
+    if (kind === "C") this.atPrompt = false;
+    if (kind === "A" || kind === "D") this.atPrompt = true;
+    if (kind !== "D") return null;
+    const command = status === "0" ? this.pending : null;
+    this.pending = null;
+    return command;
+  }
+
+  submit(command: string) {
+    if (!this.atPrompt) return;
+    this.pending = command.trim() || null;
+    this.atPrompt = false;
+  }
+}
+
+const multiplexers = new Set(["herdr", "tmux", "zellij", "screen", "byobu"]);
+
+/** Whether a command typed at the shell prompt starts a terminal multiplexer. */
+export function startsMultiplexer(command: string): boolean {
+  const program = command.trim().split(/\s+/)[0]?.split("/").pop() ?? "";
+  return multiplexers.has(program);
+}
+
+/** A mouse report from xterm: SGR (`ESC[<b;x;yM`) or X10 (`ESC[M` + 3 bytes). */
+export function isMouseReport(data: string): boolean {
+  return /^(?:\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3})+$/.test(data);
+}
+
+/** A button press, which in a multiplexer may move focus to another pane. */
+export function isMousePress(data: string): boolean {
+  const match = /^\x1b\[<(\d+);\d+;\d+M$/.exec(data);
+  return match !== null && (Number(match[1]) & (32 | 64)) === 0;
+}
+
+/** The text before the cursor asks for a secret that the terminal will not echo. */
+export function isSecretPrompt(line: string): boolean {
+  return /(?:password|passphrase|verification code|one-time code|otp|token)[^:\n]{0,40}:\s*$/i.test(line);
 }

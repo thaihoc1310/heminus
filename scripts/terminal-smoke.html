@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Heminus terminal regression harness</title>
+<div id="terminal" style="width:900px;height:600px"></div>
+<script type="module">
+  // Run with pnpm dev, then open /scripts/terminal-smoke.html. This exercises
+  // the real component and xterm renderer with an instrumented IPC transport.
+  import { mount, unmount } from 'svelte';
+  import '/src/styles/global.css';
+  const channels = new Map();
+  const pending = new Map();
+  const writes = [];
+  const resizes = [];
+  const attention = [];
+  let serial = 0;
+  window.__TAURI_INTERNALS__ = {
+    transformCallback: () => ++serial,
+    unregisterCallback: () => {},
+    invoke: async (command, args) => {
+      if (command === 'terminal_open' || command === 'terminal_attach') {
+        const id = args.id ?? `session-${++serial}`;
+        channels.set(id, args.onEvent);
+        pending.set(id, 0);
+        args.onEvent.onmessage({ kind: 'stream', id });
+        return id;
+      }
+      if (command === 'terminal_ack') pending.set(args.id, Math.max(0, pending.get(args.id) - args.bytes));
+      if (command === 'terminal_write') writes.push({ bytes: args.bytes, time: performance.now() });
+      if (command === 'terminal_resize') resizes.push(args);
+      if (command === 'terminal_pause' && args.paused) channels.get(args.id).onmessage({ kind: 'checkpoint' });
+      if (command === 'terminal_clipboard_read') return 'paste test';
+      if (command === 'list_command_history') return ['ping localhost'];
+      if (command === 'list_snippets') return [];
+      return null;
+    }
+  };
+  const { default: TerminalPane } = await import('/src/features/terminal/TerminalPane.svelte');
+  const { terminalTransfers } = await import('/src/lib/terminalTransfer.ts');
+  let session;
+  let component;
+  const delay = (ms = 20) => new Promise(resolve => setTimeout(resolve, ms));
+  const encoder = new TextEncoder();
+  function emit(text) {
+    const bytes = typeof text === 'string' ? encoder.encode(text) : text;
+    pending.set(session, pending.get(session) + bytes.length);
+    channels.get(session).onmessage(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  }
+  async function render(snapshot) {
+    component = mount(TerminalPane, { target: document.querySelector('#terminal'), props: {
+      paneId: 'pane', title: 'Smoke', appearance: { theme: 'heminus_dark', fontSize: 14 },
+      snapshot, resumeSessionId: snapshot ? session : null,
+      onSessionReady: (_, id) => { session = id; },
+      onAttention: (id) => attention.push(id)
+    }});
+    while (!terminalTransfers.has('pane')) await delay();
+    await delay();
+  }
+  await render();
+  window.smoke = {
+    writes, resizes, emit, attention,
+    text: () => new TextDecoder().decode(Uint8Array.from(writes.flatMap(write => write.bytes))),
+    async snapshot() { return terminalTransfers.get('pane').prepare(); },
+    async restore(snapshot) {
+      await unmount(component);
+      await render(snapshot);
+      return terminalTransfers.get('pane').prepare();
+    },
+    async benchmark(megabytes = 20) {
+      let frames = [], running = true, previous = performance.now(), peak = 0;
+      const frame = now => { frames.push(now - previous); previous = now; if (running) requestAnimationFrame(frame); };
+      requestAnimationFrame(frame);
+      const chunk = encoder.encode(('0123456789abcdef '.repeat(6) + '\r\n').repeat(160));
+      const start = performance.now();
+      let total = 0;
+      while (total < megabytes * 1024 * 1024) {
+        if (pending.get(session) >= 2 * 1024 * 1024) { await delay(1); continue; }
+        emit(chunk); total += chunk.length; peak = Math.max(peak, pending.get(session));
+      }
+      while (pending.get(session)) await delay(1);
+      running = false;
+      frames = frames.slice(1).sort((a, b) => a - b);
+      return { bytes: total, milliseconds: performance.now() - start, peakPending: peak,
+        frameP95: frames[Math.floor(frames.length * .95)], maxFrame: frames.at(-1) };
+    }
+  };
+</script>

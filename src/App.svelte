@@ -1,6 +1,11 @@
 <script lang="ts">
   import { startDrag } from "@crabnebula/tauri-plugin-drag";
-  import { getCurrentWindow, type DragDropEvent } from "@tauri-apps/api/window";
+  import {
+    getCurrentWindow,
+    UserAttentionType,
+    type DragDropEvent
+  } from "@tauri-apps/api/window";
+  import { SvelteSet } from "svelte/reactivity";
   import { onMount, tick } from "svelte";
   import AppDialog from "./components/AppDialog.svelte";
   import CollectionControls from "./components/CollectionControls.svelte";
@@ -9,7 +14,7 @@
   import HostIcon from "./components/HostIcon.svelte";
   import TerminalCloseDialog from "./features/terminal/TerminalCloseDialog.svelte";
   import TerminalToolsSidebar from "./features/terminal/TerminalToolsSidebar.svelte";
-  import { confirmDialog, promptDialog } from "./lib/dialog";
+  import { alertDialog, confirmDialog, promptDialog } from "./lib/dialog";
   import {
     createNativeTabDragPreviewDataUrl,
     setElementDragPreview,
@@ -23,6 +28,7 @@
     type RuntimeWorkspace
   } from "./lib/runtimeWorkspace";
   import { hasPassedTopTabDragThreshold } from "./lib/tabDrag";
+  import { terminalTransfers } from "./lib/terminalTransfer";
   import {
     announceNativeTerminalTabDrag,
     announceNativeTerminalTabDragEnd,
@@ -39,13 +45,15 @@
     listenForNativeTerminalTabDrags,
     listenForSnippetChanges,
     listenForTerminalTabTransfers,
-    killTerminalProcesses,
     saveHost,
     saveGroup,
     saveIdentity,
     setHostProxySecret,
     setIdentitySecret,
     takeDetachedTerminalPayload,
+    takeTerminalTabDrop,
+    recordTerminalTabLanding,
+    transferTerminalTabTo,
     terminalProcesses,
     terminalTabPointerState,
     transferTerminalTab,
@@ -53,6 +61,7 @@
     writeTerminal,
     type NativeTerminalTabDragSession
   } from "./lib/ipc";
+  import type { TerminalTabDrop } from "./lib/ipc";
   import type {
     DetachedWindowPayload,
     Host,
@@ -63,6 +72,7 @@
     SessionProcess,
     TerminalAppearance,
     TerminalCommandRequest,
+    TerminalSnapshot,
     VaultGroup,
     WorkspaceLayout
   } from "./lib/types";
@@ -84,6 +94,13 @@
     terminalPreferences,
     toggleHistorySuggestions
   } from "./lib/terminalPreferences";
+  import {
+    DEFAULT_TERMINAL_FONT_SIZE,
+    clampTerminalFontSize,
+    nextTerminalFontSize,
+    terminalZoomActionFromKeyboard,
+    terminalZoomActionFromWheel
+  } from "./lib/terminalZoom";
   import { parseQuickConnectInput } from "./lib/quickConnect";
   import { beginMarqueeSelection } from "./lib/marqueeSelection";
   import {
@@ -137,6 +154,7 @@
     host: Host | null;
     appearance: TerminalAppearance;
     resumeSessionId: string | null;
+    snapshot?: TerminalSnapshot;
     initialCwd?: string | null;
   }
   type HostSubeditor = "environment" | "chain" | "proxy" | "theme";
@@ -165,6 +183,9 @@
   }
 
   let page = $state<MainPage>(detachedMode ? "new-tab" : "hosts");
+  /** Panes whose program rang the bell or sent a notification while out of view. */
+  const attentionPaneIds = new SvelteSet<string>();
+  let windowFocused = $state(document.hasFocus());
   let hosts = $state<Host[]>([]);
   let identities = $state<Identity[]>([]);
   let groups = $state<VaultGroup[]>([]);
@@ -234,19 +255,27 @@
   let terminalCommandRequests = $state<Record<string, TerminalCommandRequest>>({});
   /** Bumped per pane by "Start over" so the pane remounts with a fresh session. */
   let terminalRetryTokens = $state<Record<string, number>>({});
-  let terminalCloseRequest = $state<{
+  interface BusyTerminal {
     paneId: string;
     sessionId: string;
     title: string;
     processes: SessionProcess[];
+  }
+  let terminalCloseRequest = $state<{
+    heading: string;
+    message: string;
+    groups: BusyTerminal[];
     busy: boolean;
     error: string;
     settle: (closed: boolean) => void;
   } | null>(null);
+  let closingWindow = false;
+  let allowWindowClose = false;
+  let removeCloseRequestedListener: (() => void) | null = null;
   let topTabOrder = $state<string[]>(detachedMode ? [] : ["vault", "sftp"]);
   let activeTerminalId = $state<string | null>(null);
   let terminalSessionIds = $state<Record<string, string>>({});
-  let detachingPaneIds = $state<string[]>([]);
+  const detachingPaneIds = new Set<string>();
   let workspaces = $state<RuntimeWorkspace[]>([]);
   let activeWorkspaceId = $state<string | null>(null);
   let draggedTabId = $state<string | null>(null);
@@ -400,6 +429,15 @@
       void appWindow.scaleFactor().then((scaleFactor) => {
         nativeDragScaleFactor = scaleFactor;
       }).catch((cause) => showMessage(cause, true));
+      void appWindow.onCloseRequested((event) => {
+        // Dock quit and the chrome X both land here via close().
+        if (allowWindowClose) return;
+        event.preventDefault();
+        void requestCloseWindow();
+      }).then((unlisten) => {
+        if (transferListenerDisposed) unlisten();
+        else removeCloseRequestedListener = unlisten;
+      }).catch((cause) => showMessage(cause, true));
       void appWindow.onDragDropEvent(({ payload }) => {
         handleNativeTerminalTabDragDropEvent(payload);
       }).then((unlisten) => {
@@ -407,7 +445,18 @@
         else removeNativeDropListener = unlisten;
       }).catch((cause) => showMessage(cause, true));
     }
+    let lastWindowWheelZoomAt = 0;
     const onKeydown = (event: KeyboardEvent) => {
+      const insidePane = Boolean((event.target as HTMLElement | null)?.closest(".terminal-pane"));
+      const zoom = terminalZoomActionFromKeyboard(event);
+      if (zoom) {
+        // Stop WebView zoom even on vault pages; apply font zoom only in a terminal.
+        event.preventDefault();
+        if (page === "terminal" && !insidePane) {
+          const current = activeTerminalAppearance().fontSize;
+          updateTerminalAppearance({ fontSize: nextTerminalFontSize(current, zoom) });
+        }
+      }
       if (
         page === "terminal" &&
         matchesTerminalShortcut(event, $terminalPreferences.historySuggestionsShortcut)
@@ -415,7 +464,7 @@
         event.preventDefault();
         toggleHistorySuggestions();
       }
-      if (event.ctrlKey && event.key.toLowerCase() === "k") {
+      if (event.ctrlKey && event.key.toLowerCase() === "k" && !insidePane) {
         event.preventDefault();
         void switchPage("new-tab");
       }
@@ -451,8 +500,26 @@
         windowedChrome = true;
       }
     };
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      if (page !== "terminal") return;
+      if ((event.target as HTMLElement | null)?.closest(".terminal-pane")) return;
+      const zoom = terminalZoomActionFromWheel(event);
+      if (!zoom) return;
+      const now = performance.now();
+      if (now - lastWindowWheelZoomAt < 70) return;
+      lastWindowWheelZoomAt = now;
+      const current = activeTerminalAppearance().fontSize;
+      updateTerminalAppearance({ fontSize: nextTerminalFontSize(current, zoom) });
+    };
     window.addEventListener("keydown", onKeydown);
+    window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("resize", syncWindowedChrome);
+    const onWindowFocus = () => (windowFocused = true);
+    const onWindowBlur = () => (windowFocused = false);
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("blur", onWindowBlur);
     void syncWindowedChrome();
     return () => {
       transferListenerDisposed = true;
@@ -462,8 +529,12 @@
       removeSnippetListener?.();
       removeCommandHistoryListener?.();
       removeIdentityListener?.();
+      removeCloseRequestedListener?.();
       window.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", syncWindowedChrome);
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("blur", onWindowBlur);
       if (terminalToolsCloseTimer !== null) {
         window.clearTimeout(terminalToolsCloseTimer);
       }
@@ -490,7 +561,8 @@
           title: spec.title,
           host: host ? cloneHost(host) : null,
           appearance: { ...spec.appearance },
-          resumeSessionId: spec.sessionId
+          resumeSessionId: spec.sessionId,
+          snapshot: spec.snapshot
         };
       });
       await loadTerminalComponent();
@@ -570,7 +642,8 @@
         title: spec.title,
         host: host ? cloneHost(host) : null,
         appearance: { ...spec.appearance },
-        resumeSessionId: spec.sessionId
+        resumeSessionId: spec.sessionId,
+        snapshot: spec.snapshot
       };
     });
     terminalTabs = [...terminalTabs, ...incomingTabs];
@@ -1737,14 +1810,14 @@
   function defaultTerminalAppearance(): TerminalAppearance {
     return {
       theme: "heminus_dark",
-      fontSize: 14
+      fontSize: DEFAULT_TERMINAL_FONT_SIZE
     };
   }
 
   function hostTerminalAppearance(host: Host): TerminalAppearance {
     return {
       theme: host.terminal_theme,
-      fontSize: host.terminal_font_size || 14
+      fontSize: clampTerminalFontSize(host.terminal_font_size || DEFAULT_TERMINAL_FONT_SIZE)
     };
   }
 
@@ -1756,7 +1829,7 @@
       const fallback = defaultTerminalAppearance();
       return {
         theme: saved?.theme ?? fallback.theme,
-        fontSize: Math.max(9, Math.min(32, saved?.fontSize ?? fallback.fontSize))
+        fontSize: clampTerminalFontSize(saved?.fontSize ?? fallback.fontSize)
       };
     } catch {
       return defaultTerminalAppearance();
@@ -1816,6 +1889,27 @@
       : workspace.paneIds[0] ?? null;
     page = "terminal";
   }
+
+  function terminalPaneVisible(id: string): boolean {
+    if (page !== "terminal") return false;
+    const workspace = activeWorkspace();
+    return workspace ? workspace.paneIds.includes(id) : activeTerminalId === id;
+  }
+
+  function terminalPaneWantsAttention(id: string) {
+    if (windowFocused && terminalPaneVisible(id)) return;
+    attentionPaneIds.add(id);
+    if (!windowFocused) {
+      void appWindow?.requestUserAttention(UserAttentionType.Informational).catch(() => {});
+    }
+  }
+
+  $effect(() => {
+    if (!windowFocused) return;
+    for (const id of attentionPaneIds) {
+      if (terminalPaneVisible(id)) attentionPaneIds.delete(id);
+    }
+  });
 
   function activateTerminalPane(id: string) {
     activeTerminalId = id;
@@ -1877,56 +1971,56 @@
       id: tab.id,
       title: tab.title,
       hostId: tab.host?.id ?? null,
-      sessionId: terminalSessionIds[tab.id] ?? null,
+      sessionId: terminalSessionIds[tab.id] ?? tab.resumeSessionId,
       appearance: { ...tab.appearance }
     };
   }
 
-  async function detachTerminalTab(tab: TerminalTab) {
-    const payload: DetachedWindowPayload = {
-      title: tab.title || "Terminal",
-      tabs: [detachedTabSpec(tab)],
-      workspace: null
-    };
+  async function detachTopTab(sourceId: string) {
+    const transfer = transferableTopTab(sourceId);
+    if (!transfer) return;
+    const { payload, paneIds } = transfer;
     try {
-      await createDetachedTerminalWindow(payload);
-      detachingPaneIds = [...new Set([...detachingPaneIds, tab.id])];
-      closeTerminalTab(tab.id);
+      await withTerminalSnapshots(payload, async () => {
+        await createDetachedTerminalWindow(payload);
+        return true;
+      });
+      for (const id of paneIds) detachingPaneIds.add(id);
+      const workspaceId = workspaceIdFromTabId(sourceId);
+      if (workspaceId) closeWorkspace(workspaceId);
+      else closeTerminalTab(sourceId);
+      if (detachedMode && terminalTabs.length === 0) {
+        window.setTimeout(() => void appWindow?.close(), 0);
+      }
       window.setTimeout(() => {
-        detachingPaneIds = detachingPaneIds.filter((id) => id !== tab.id);
+        for (const id of paneIds) detachingPaneIds.delete(id);
       }, 2_000);
     } catch (cause) {
-      showMessage(cause, true);
+      void alertDialog({
+        title: "Could not detach tab",
+        message: cause instanceof Error ? cause.message : String(cause)
+      });
     }
   }
 
-  async function detachWorkspace(workspaceId = activeWorkspaceId) {
-    const workspace = workspaceById(workspaceId);
-    if (!workspace) return;
-    const tabs = workspace.paneIds
-      .map((id) => terminalTabs.find((tab) => tab.id === id))
-      .filter((tab): tab is TerminalTab => Boolean(tab));
-    if (tabs.length < 2) return;
-    const payload: DetachedWindowPayload = {
-      title: workspace.name || "Workspace",
-      tabs: tabs.map(detachedTabSpec),
-      workspace: {
-        name: workspace.name || "Workspace",
-        paneIds: tabs.map((tab) => tab.id),
-        layout: normalizeLayout(workspace.layout, tabs.map((tab) => tab.id)),
-        activePaneId: workspace.activePaneId
-      }
-    };
+  async function withTerminalSnapshots<T extends boolean>(
+    payload: DetachedWindowPayload,
+    action: () => Promise<T>
+  ): Promise<T> {
+    const prepared: Array<{ resume: () => Promise<void> }> = [];
+    let transferred = false;
     try {
-      await createDetachedTerminalWindow(payload);
-      const ids = tabs.map((tab) => tab.id);
-      detachingPaneIds = [...new Set([...detachingPaneIds, ...ids])];
-      closeWorkspace(workspace.id);
-      window.setTimeout(() => {
-        detachingPaneIds = detachingPaneIds.filter((id) => !ids.includes(id));
-      }, 2_000);
-    } catch (cause) {
-      showMessage(cause, true);
+      for (const tab of payload.tabs) {
+        const pane = terminalTransfers.get(tab.id);
+        if (!pane) continue;
+        prepared.push(pane);
+        tab.snapshot = await pane.prepare();
+      }
+      const result = await action();
+      transferred = result;
+      return result;
+    } finally {
+      if (!transferred) await Promise.allSettled(prepared.map((pane) => pane.resume()));
     }
   }
 
@@ -1971,16 +2065,21 @@
   async function transferDraggedTopTab(
     sourceId: string,
     screenX: number,
-    screenY: number
+    screenY: number,
+    landing: Extract<TerminalTabDrop, { kind: "landed" }> | null = null
   ) {
     const transfer = transferableTopTab(sourceId);
     if (!transfer) return;
     const { payload, paneIds } = transfer;
-    detachingPaneIds = [...new Set([...detachingPaneIds, ...paneIds])];
+    for (const id of paneIds) detachingPaneIds.add(id);
     try {
-      const result = await transferTerminalTab(payload, screenX, screenY);
-      if (!result.transferred) {
-        detachingPaneIds = detachingPaneIds.filter((id) => !paneIds.includes(id));
+      const transferred = await withTerminalSnapshots(payload, async () => {
+        if (!landing) return (await transferTerminalTab(payload, screenX, screenY)).transferred;
+        await transferTerminalTabTo(landing.targetLabel, payload, landing.clientX, landing.clientY);
+        return true;
+      });
+      if (!transferred) {
+        for (const id of paneIds) detachingPaneIds.delete(id);
         return;
       }
       const workspaceId = workspaceIdFromTabId(sourceId);
@@ -1990,10 +2089,10 @@
         window.setTimeout(() => void appWindow?.close(), 0);
       }
       window.setTimeout(() => {
-        detachingPaneIds = detachingPaneIds.filter((id) => !paneIds.includes(id));
+        for (const id of paneIds) detachingPaneIds.delete(id);
       }, 2_000);
     } catch (cause) {
-      detachingPaneIds = detachingPaneIds.filter((id) => !paneIds.includes(id));
+      for (const id of paneIds) detachingPaneIds.delete(id);
       showMessage(cause, true);
     }
   }
@@ -2004,12 +2103,107 @@
     for (const id of [...workspace.paneIds]) closeTerminalTab(id);
   }
 
-  /** Closes every pane of a workspace, asking about each one that is busy. */
+  async function inspectBusyTerminals(ids: string[]): Promise<BusyTerminal[]> {
+    const busy: BusyTerminal[] = [];
+    for (const id of ids) {
+      const tab = terminalTabs.find((candidate) => candidate.id === id);
+      const sessionId = terminalSessionIds[id] ?? tab?.resumeSessionId;
+      if (!tab || !sessionId) continue;
+      try {
+        const processes = await terminalProcesses(sessionId);
+        if (processes.length > 0) {
+          busy.push({ paneId: id, sessionId, title: tab.title, processes });
+        }
+      } catch {
+        // Ask anyway: a session we cannot inspect may still be running work.
+        busy.push({
+          paneId: id,
+          sessionId,
+          title: tab.title,
+          processes: [{
+            pid: 0,
+            name: "session",
+            command: "Could not list running processes for this terminal.",
+            leader: true
+          }]
+        });
+      }
+    }
+    return busy;
+  }
+
+  function promptBusyTerminals(
+    heading: string,
+    message: string,
+    groups: BusyTerminal[]
+  ): Promise<boolean> {
+    if (terminalCloseRequest) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      terminalCloseRequest = {
+        heading,
+        message,
+        groups,
+        busy: false,
+        error: "",
+        settle: resolve
+      };
+    });
+  }
+
+  /** Closes every pane of a workspace, asking about all of them at once. */
   async function requestCloseWorkspace(workspaceId = activeWorkspaceId) {
     const workspace = workspaceById(workspaceId);
     if (!workspace) return;
-    for (const id of [...workspace.paneIds]) {
-      if (!(await requestCloseTerminalTab(id))) return;
+    const paneIds = [...workspace.paneIds];
+    const busy = await inspectBusyTerminals(paneIds);
+    if (busy.length > 0) {
+      const confirmed = await promptBusyTerminals(
+        `Close “${workspace.name || "Workspace"}”?`,
+        "Closing the workspace stops them.",
+        busy
+      );
+      if (!confirmed) return;
+    }
+    for (const id of [...(workspaceById(workspaceId)?.paneIds ?? [])]) {
+      closeTerminalTab(id);
+    }
+  }
+
+  /**
+   * Closing the window used to skip the running-process prompt and just
+   * tear everything down. Ask once about every busy terminal.
+   */
+  async function requestCloseWindow() {
+    if (closingWindow || terminalCloseRequest) return;
+    closingWindow = true;
+    try {
+      const busy = await inspectBusyTerminals(terminalTabs.map((tab) => tab.id));
+      if (busy.length > 0) {
+        const confirmed = await promptBusyTerminals(
+          detachedMode ? "Close this window?" : "Close Heminus?",
+          "Closing the window stops them.",
+          busy
+        );
+        if (!confirmed) return;
+      }
+      // Pane teardown only sends these after close() is already on its way,
+      // and a destroyed window would leave the shells running headless.
+      await Promise.allSettled(terminalTabs.map((tab) => {
+        const sessionId = terminalSessionIds[tab.id] ?? tab.resumeSessionId;
+        return sessionId ? closeTerminal(sessionId) : Promise.resolve(false);
+      }));
+      for (const tab of [...terminalTabs]) closeTerminalTab(tab.id);
+      allowWindowClose = true;
+      removeCloseRequestedListener?.();
+      removeCloseRequestedListener = null;
+      // GTK ignores destroy() unless a CloseRequested is already in flight
+      // (dock quit). The chrome X never starts that, so close() is required.
+      await appWindow?.close();
+    } catch (cause) {
+      allowWindowClose = false;
+      showMessage(cause, true);
+    } finally {
+      closingWindow = false;
     }
   }
 
@@ -2054,8 +2248,15 @@
     terminalCommandRequests = remainingRequests;
     const { [id]: _retry, ...remainingRetries } = terminalRetryTokens;
     terminalRetryTokens = remainingRetries;
-    // The pane is gone, so a prompt still open for it has nothing left to ask.
-    if (terminalCloseRequest?.paneId === id) settleTerminalCloseRequest(true);
+    // Dismiss only after every pane the prompt asked about is gone.
+    if (
+      terminalCloseRequest &&
+      !terminalCloseRequest.groups.some((group) =>
+        terminalTabs.some((tab) => tab.id === group.paneId)
+      )
+    ) {
+      settleTerminalCloseRequest(true);
+    }
     if (terminalTabs.length === 0) closeTerminalTools();
   }
 
@@ -2068,32 +2269,17 @@
   async function requestCloseTerminalTab(id: string): Promise<boolean> {
     if (terminalCloseRequest) return false;
     const tab = terminalTabs.find((candidate) => candidate.id === id);
-    const sessionId = terminalSessionIds[id];
-    if (!tab || !sessionId) {
+    if (!tab) return true;
+    const busy = await inspectBusyTerminals([id]);
+    if (busy.length === 0) {
       closeTerminalTab(id);
       return true;
     }
-    let processes: SessionProcess[] = [];
-    try {
-      processes = await terminalProcesses(sessionId);
-    } catch {
-      // A session that cannot be inspected is closed the usual way.
-    }
-    if (processes.length === 0) {
-      closeTerminalTab(id);
-      return true;
-    }
-    return new Promise<boolean>((resolve) => {
-      terminalCloseRequest = {
-        paneId: id,
-        sessionId,
-        title: tab.title,
-        processes,
-        busy: false,
-        error: "",
-        settle: resolve
-      };
-    });
+    return promptBusyTerminals(
+      `Close “${tab.title}”?`,
+      "Closing the terminal stops them.",
+      busy
+    );
   }
 
   function settleTerminalCloseRequest(closed: boolean) {
@@ -2103,38 +2289,22 @@
     request.settle(closed);
   }
 
-  async function finishTerminalCloseRequest(killProcesses: boolean) {
+  async function finishTerminalCloseRequest() {
     const request = terminalCloseRequest;
     if (!request || request.busy) return;
     request.busy = true;
     request.error = "";
     try {
-      // Closing here decides the fate of the processes; the pane teardown then
-      // finds the session already gone and leaves them alone.
-      await closeTerminal(request.sessionId, killProcesses);
+      for (const group of request.groups) {
+        await closeTerminal(group.sessionId, true);
+      }
+      const paneIds = request.groups.map((group) => group.paneId);
       settleTerminalCloseRequest(true);
-      closeTerminalTab(request.paneId);
+      for (const paneId of paneIds) closeTerminalTab(paneId);
     } catch (cause) {
       request.error = cause instanceof Error ? cause.message : String(cause);
       request.busy = false;
     }
-  }
-
-  /** Stops the chosen processes, then closes the tab and leaves the rest running. */
-  async function stopTerminalCloseProcesses(pids: number[]) {
-    const request = terminalCloseRequest;
-    if (!request || request.busy || pids.length === 0) return;
-    request.busy = true;
-    request.error = "";
-    try {
-      await killTerminalProcesses(request.sessionId, pids);
-    } catch (cause) {
-      request.error = cause instanceof Error ? cause.message : String(cause);
-      request.busy = false;
-      return;
-    }
-    request.busy = false;
-    await finishTerminalCloseRequest(false);
   }
 
   function retryTerminalPane(id: string) {
@@ -2142,6 +2312,7 @@
     if (!tab) return;
     // A retry must not re-attach to the session that just failed.
     if (tab.resumeSessionId) tab.resumeSessionId = null;
+    tab.snapshot = undefined;
     terminalRetryTokens = {
       ...terminalRetryTokens,
       [id]: (terminalRetryTokens[id] ?? 0) + 1
@@ -2223,12 +2394,15 @@
   function registerTerminalSession(paneId: string, sessionId: string) {
     terminalSessionIds = { ...terminalSessionIds, [paneId]: sessionId };
     const tab = terminalTabs.find((candidate) => candidate.id === paneId);
-    if (tab) tab.resumeSessionId = null;
+    if (tab) tab.resumeSessionId = sessionId;
   }
 
-  function unregisterTerminalSession(paneId: string) {
+  function unregisterTerminalSession(paneId: string, sessionId: string | null) {
+    if (sessionId && terminalSessionIds[paneId] !== sessionId) return;
     const { [paneId]: _, ...remaining } = terminalSessionIds;
     terminalSessionIds = remaining;
+    const tab = terminalTabs.find((candidate) => candidate.id === paneId);
+    if (tab?.resumeSessionId === sessionId) tab.resumeSessionId = null;
   }
 
   function activeTerminalTab(): TerminalTab | null {
@@ -2286,13 +2460,13 @@
     ].join(";");
   }
 
-  function updateTerminalAppearance(patch: Partial<TerminalAppearance>) {
-    const tab = activeTerminalTab();
+  function updateTerminalAppearance(patch: Partial<TerminalAppearance>, paneId = activeTerminalId) {
+    const tab = terminalTabs.find((candidate) => candidate.id === paneId) ?? null;
     if (!tab) return;
     tab.appearance = {
       ...tab.appearance,
       ...patch,
-      fontSize: Math.max(9, Math.min(32, patch.fontSize ?? tab.appearance.fontSize))
+      fontSize: clampTerminalFontSize(patch.fontSize ?? tab.appearance.fontSize)
     };
     if (!tab.host) {
       localStorage.setItem(localTerminalAppearanceKey, JSON.stringify(tab.appearance));
@@ -2842,7 +3016,14 @@
 
   function moveBrowserTerminalTabDrag(event: DragEvent) {
     const current = activeBrowserTerminalTabDrag();
-    if (!current) return;
+    if (!current) {
+      // A tab dragged from another Heminus window: accept it so the drop lands here.
+      if (!usesTauriNativeTerminalDrag && event.dataTransfer?.types.includes(terminalTabDragMime)) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }
+      return;
+    }
     if (event.clientX !== 0 || event.clientY !== 0) {
       current.drag.currentX = event.clientX;
       current.drag.currentY = event.clientY;
@@ -2876,7 +3057,14 @@
 
   function finishBrowserTerminalTabDrop(event: DragEvent) {
     const current = activeBrowserTerminalTabDrag();
-    if (!current) return;
+    if (!current) {
+      if (!usesTauriNativeTerminalDrag && event.dataTransfer?.types.includes(terminalTabDragMime)) {
+        event.preventDefault();
+        void recordTerminalTabLanding(event.clientX, event.clientY)
+          .catch((cause) => showMessage(cause, true));
+      }
+      return;
+    }
     event.preventDefault();
     if (current.sourceKind === "workspace-pane") {
       finishPanePointerDragAt(
@@ -2897,7 +3085,17 @@
     }
   }
 
-  function finishBrowserTerminalTabDrag(event: DragEvent) {
+  async function nextTerminalTabDrop(): Promise<TerminalTabDrop | null> {
+    // The receiving window reports its drop over IPC, which can trail dragend.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const drop = await takeTerminalTabDrop();
+      if (drop) return drop;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    return null;
+  }
+
+  async function finishBrowserTerminalTabDrag(event: DragEvent) {
     const current = activeBrowserTerminalTabDrag();
     if (!current) return;
     const screenX = event.screenX !== 0 || event.screenY !== 0
@@ -2914,6 +3112,17 @@
       window.setTimeout(() => (suppressTopTabClick = false), 0);
     }
     finishTabDrag();
+    if (navigator.userAgent.includes("Linux")) {
+      try {
+        const drop = await nextTerminalTabDrop();
+        if (drop?.kind === "outside") await detachTopTab(sourceId);
+        if (drop?.kind === "landed") await transferDraggedTopTab(sourceId, 0, 0, drop);
+        if (drop) return;
+      } catch (cause) {
+        showMessage(cause, true);
+        return;
+      }
+    }
     if (
       Number.isFinite(screenX) &&
       Number.isFinite(screenY) &&
@@ -3179,7 +3388,10 @@
   function handleGlobalPointerCancel(event: PointerEvent) {
     if (nativeTerminalTabDragActive) return;
     if (topTabPointerDrag) cancelTopTabPointerDrag(event);
-    else finishPanePointerDrag(event);
+    else {
+      panePointerDrag = null;
+      finishTabDrag();
+    }
   }
 
   function terminalPaneStyle(id: string): string {
@@ -3647,9 +3859,13 @@
             onauxclick={(event) => event.button === 1 && void requestCloseWorkspace(workspace.id)}
           >
             <Icon name="grid" /><span>{workspace.name || "Workspace"}</span>
+            {#if workspace.paneIds.some((id) => attentionPaneIds.has(id))}
+              <i class="terminal-tab-attention" title="Needs attention"></i>
+            {/if}
           </button>
           <button
             class="terminal-tab-close"
+            draggable="false"
             title="Close workspace"
             onclick={(event) => {
               event.stopPropagation();
@@ -3691,9 +3907,13 @@
             }}
           >
             <HostIcon hostId={tab.host?.id} /><span>{tab.title}</span>
+            {#if attentionPaneIds.has(tab.id)}
+              <i class="terminal-tab-attention" title="Needs attention"></i>
+            {/if}
           </button>
           <button
             class="terminal-tab-close"
+            draggable="false"
             title={`Close ${tab.title}`}
             onclick={(event) => {
               event.stopPropagation();
@@ -3722,7 +3942,10 @@
     <div class="window-controls">
       <button title="Minimize" onclick={() => appWindow?.minimize()}><Icon name="minimize" /></button>
       <button title="Maximize" onclick={() => appWindow?.toggleMaximize()}><Icon name="maximize" size={16} /></button>
-      <button class="close" title="Close" onclick={() => appWindow?.close()}><Icon name="close" /></button>
+      <button class="close" title="Close" onclick={() => {
+        if (appWindow) void appWindow.close();
+        else void requestCloseWindow();
+      }}><Icon name="close" /></button>
     </div>
   </header>
 
@@ -3809,6 +4032,7 @@
                   snippetVersion={terminalSnippetVersion}
                   historyVersion={terminalHistoryVersion}
                   resumeSessionId={tab.resumeSessionId}
+                  snapshot={tab.snapshot}
                   initialCwd={tab.initialCwd ?? null}
                   commandRequest={terminalCommandRequests[tab.id] ?? null}
                   workspace={visibleWorkspace?.paneIds.includes(tab.id) ?? false}
@@ -3831,9 +4055,11 @@
                   onSessionClosed={unregisterTerminalSession}
                   onUserInput={broadcastTerminalBytes}
                   onActivate={activateTerminalPane}
+                  onAttention={terminalPaneWantsAttention}
                   onCommandRecorded={commandHistoryRecorded}
-                  shouldPreserveSession={() => detachingPaneIds.includes(tab.id)}
+                  shouldPreserveSession={() => detachingPaneIds.has(tab.id)}
                   onRetry={() => retryTerminalPane(tab.id)}
+                  onappearancechange={(patch: Partial<TerminalAppearance>) => updateTerminalAppearance(patch, tab.id)}
                 />
                 {/key}
               {:else}
@@ -4857,26 +5083,34 @@
     >
       {#if workspaceIdFromTabId(terminalContextMenu.tab.id)}
         {@const contextWorkspaceId = workspaceIdFromTabId(terminalContextMenu.tab.id)}
+        <!--
+          `{@const}` is a lazy derived, so it has to be read into a local before
+          the menu closes. Reading it after clearing `terminalContextMenu`
+          recomputes it against null and throws instead of running the action.
+        -->
         <button
           role="menuitem"
           onclick={() => {
+            const workspaceId = contextWorkspaceId;
             terminalContextMenu = null;
-            renameWorkspace(contextWorkspaceId);
+            renameWorkspace(workspaceId);
           }}
         ><Icon name="edit" size={17} /><span>Rename</span></button>
         <button
           role="menuitem"
           onclick={() => {
+            const sourceId = terminalContextMenu?.tab.id;
             terminalContextMenu = null;
-            void detachWorkspace(contextWorkspaceId);
+            if (sourceId) void detachTopTab(sourceId);
           }}
         ><Icon name="detach" size={17} /><span>Detach</span></button>
         <button
           class="danger"
           role="menuitem"
           onclick={() => {
+            const workspaceId = contextWorkspaceId;
             terminalContextMenu = null;
-            void requestCloseWorkspace(contextWorkspaceId);
+            void requestCloseWorkspace(workspaceId);
           }}
         ><Icon name="close" size={17} /><span>Close</span></button>
       {:else}
@@ -4909,7 +5143,7 @@
           onclick={() => {
             const tab = terminalContextMenu?.tab;
             terminalContextMenu = null;
-            if (tab) void detachTerminalTab(tab);
+            if (tab) void detachTopTab(tab.id);
           }}
         ><Icon name="detach" size={17} /><span>Detach</span></button>
         <div class="context-separator"></div>
@@ -5133,15 +5367,14 @@
 
 {#if terminalCloseRequest}
   <TerminalCloseDialog
-    title={terminalCloseRequest.title}
-    processes={terminalCloseRequest.processes}
+    heading={terminalCloseRequest.heading}
+    message={terminalCloseRequest.message}
+    groups={terminalCloseRequest.groups}
     busy={terminalCloseRequest.busy}
     error={terminalCloseRequest.error}
     onCancel={() => {
       if (!terminalCloseRequest?.busy) settleTerminalCloseRequest(false);
     }}
-    onCloseAndStop={() => void finishTerminalCloseRequest(true)}
-    onCloseAndKeep={() => void finishTerminalCloseRequest(false)}
-    onStopSelected={(pids) => void stopTerminalCloseProcesses(pids)}
+    onCloseAndStop={() => void finishTerminalCloseRequest()}
   />
 {/if}

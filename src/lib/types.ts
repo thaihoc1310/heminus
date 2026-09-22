@@ -76,6 +76,15 @@ export interface DetachedTerminalSpec {
   hostId: string | null;
   sessionId: string | null;
   appearance: TerminalAppearance;
+  snapshot?: TerminalSnapshot;
+}
+
+export interface TerminalSnapshot {
+  data: string;
+  rows: number;
+  cols: number;
+  shellAtPrompt?: boolean;
+  multiplexer?: boolean;
 }
 
 export interface DetachedWorkspaceSpec {
@@ -317,6 +326,8 @@ export interface ConnectionLogEntry {
  * {@link TerminalChannelMessage}.
  */
 export type TerminalControlEvent =
+  | { kind: "stream"; id: string }
+  | { kind: "checkpoint" }
   | { kind: "exit" }
   | { kind: "disconnect" }
   | { kind: "error"; message: string }

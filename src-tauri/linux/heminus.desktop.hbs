@@ -9,9 +9,14 @@ Icon={{icon}}
 Name={{name}}
 Terminal=false
 Type=Application
-Actions=new-window;
+Actions=open-workspace;new-terminal;
 
-[Desktop Action new-window]
+[Desktop Action open-workspace]
+Name=Open Workspace
+Exec={{exec}}
+Icon={{icon}}
+
+[Desktop Action new-terminal]
 Name=Open Local Terminal
 Exec={{exec}} --new-terminal
 Icon={{icon}}

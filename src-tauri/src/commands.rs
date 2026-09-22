@@ -76,10 +76,10 @@ pub struct KnownHostSelection {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TerminalTabTransferEvent {
-    payload: String,
-    client_x: f64,
-    client_y: f64,
+pub(crate) struct TerminalTabTransferEvent {
+    pub(crate) payload: String,
+    pub(crate) client_x: f64,
+    pub(crate) client_y: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +124,62 @@ pub async fn create_detached_terminal_window(
     build_detached_terminal_window(&app, state.inner(), payload, &title, None)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LaunchIntent {
+    MainWindow,
+    LocalTerminal { cwd: Option<PathBuf> },
+}
+
+/// Dock actions and CLI flags share this so a second process can tell the
+/// running one whether to focus the workspace or open another local terminal.
+pub(crate) fn launch_intent(
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> LaunchIntent {
+    let args = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_os_string())
+        .collect::<Vec<_>>();
+    let cwd = args
+        .iter()
+        .position(|argument| argument == "--cwd")
+        .and_then(|index| args.get(index + 1))
+        .map(PathBuf::from);
+    if args.iter().any(|argument| argument == "--new-terminal") {
+        LaunchIntent::LocalTerminal { cwd }
+    } else {
+        LaunchIntent::MainWindow
+    }
+}
+
+pub(crate) fn show_or_create_main_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.unminimize();
+        main.show().map_err(|error| error.to_string())?;
+        main.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("Heminus")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(480.0, 360.0)
+        .center()
+        .maximized(false)
+        .background_color(tauri::webview::Color(0x00, 0x00, 0x00, 0x00))
+        .transparent(true)
+        .decorations(false)
+        .resizable(true)
+        .visible(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    if let Some(main) = app.get_webview_window("main") {
+        main.show().map_err(|error| error.to_string())?;
+        main.set_focus().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn build_local_terminal_window(
     app: &AppHandle,
     cwd: Option<&Path>,
@@ -153,7 +209,7 @@ fn build_detached_terminal_window(
     title: &str,
     position: Option<(f64, f64)>,
 ) -> Result<String, String> {
-    if payload.len() > 1_000_000 {
+    if payload.len() > 16 * 1024 * 1024 {
         return Err("Detached terminal payload is too large".into());
     }
 
@@ -223,7 +279,7 @@ pub async fn transfer_terminal_tab(
     screen_x: f64,
     screen_y: f64,
 ) -> Result<TerminalTabTransferResult, String> {
-    if payload.len() > 1_000_000 {
+    if payload.len() > 16 * 1024 * 1024 {
         return Err("Terminal tab payload is too large".into());
     }
     if !screen_x.is_finite() || !screen_y.is_finite() {
@@ -1297,5 +1353,20 @@ mod tests {
         assert!(renamed.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dock_actions_open_the_workspace_or_a_local_terminal() {
+        assert_eq!(launch_intent(["heminus"]), LaunchIntent::MainWindow);
+        assert_eq!(
+            launch_intent(["heminus", "--new-terminal"]),
+            LaunchIntent::LocalTerminal { cwd: None }
+        );
+        assert_eq!(
+            launch_intent(["heminus", "--new-terminal", "--cwd", "/tmp/project"]),
+            LaunchIntent::LocalTerminal {
+                cwd: Some(PathBuf::from("/tmp/project"))
+            }
+        );
     }
 }

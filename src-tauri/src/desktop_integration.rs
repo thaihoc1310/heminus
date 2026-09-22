@@ -71,3 +71,15 @@ pub fn ensure_local_terminal_shortcut() -> Result<bool, String> {
 pub const fn ensure_local_terminal_shortcut() -> Result<bool, String> {
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dock_menu_offers_workspace_and_local_terminal() {
+        let desktop = include_str!("../linux/heminus.desktop.hbs");
+        assert!(desktop.contains("Actions=open-workspace;new-terminal;"));
+        assert!(desktop.contains("Name=Open Workspace"));
+        assert!(desktop.contains("Name=Open Local Terminal"));
+        assert!(desktop.contains("Exec={{exec}} --new-terminal"));
+    }
+}

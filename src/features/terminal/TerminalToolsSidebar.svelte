@@ -19,6 +19,7 @@
     terminalPreferences
   } from "../../lib/terminalPreferences";
   import type { Snippet, TerminalAppearance } from "../../lib/types";
+  import { clampTerminalFontSize } from "../../lib/terminalZoom";
 
   let {
     appearance,
@@ -251,8 +252,7 @@
   }
 
   function changeFontSize(delta: number) {
-    const fontSize = Math.max(9, Math.min(32, appearance.fontSize + delta));
-    onappearancechange({ fontSize });
+    onappearancechange({ fontSize: clampTerminalFontSize(appearance.fontSize + delta) });
   }
 
   function captureHistoryShortcut(event: KeyboardEvent) {
@@ -400,11 +400,14 @@
   {:else if section === "appearance"}
     <div class="terminal-tools-scroll appearance-scroll">
       <section class="terminal-text-size">
-        <span>Text size</span>
+        <div class="terminal-text-size-copy">
+          <span>Text size</span>
+          <small>Ctrl − / + · Ctrl + scroll</small>
+        </div>
         <div>
-          <button title="Decrease text size" onclick={() => changeFontSize(-1)}>−</button>
+          <button title="Decrease text size (Ctrl −)" onclick={() => changeFontSize(-1)}>−</button>
           <output>{appearance.fontSize}</output>
-          <button title="Increase text size" onclick={() => changeFontSize(1)}>+</button>
+          <button title="Increase text size (Ctrl +)" onclick={() => changeFontSize(1)}>+</button>
         </div>
       </section>
 

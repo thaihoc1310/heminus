@@ -6,6 +6,7 @@ mod platform;
 mod proxy;
 mod sftp;
 mod ssh_runtime;
+mod tab_drag;
 mod terminal;
 mod tunnel;
 
@@ -36,18 +37,41 @@ pub fn run() {
         .init();
 
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let open_local_terminal_only = arguments
-        .iter()
-        .any(|argument| argument == "--new-terminal");
-    let initial_cwd = arguments
-        .iter()
-        .position(|argument| argument == "--cwd")
-        .and_then(|index| arguments.get(index + 1))
-        .map(std::path::PathBuf::from);
+    let launch = commands::launch_intent(&arguments);
+    let open_local_terminal_only = matches!(launch, commands::LaunchIntent::LocalTerminal { .. });
+    let initial_cwd = match &launch {
+        commands::LaunchIntent::LocalTerminal { cwd } => cwd.clone(),
+        commands::LaunchIntent::MainWindow => None,
+    };
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+        let app = app.clone();
+        let intent = commands::launch_intent(argv);
+        // A relative --cwd belongs to the second instance, not to this one.
+        let caller_cwd = std::path::PathBuf::from(cwd);
+        // Creating windows inside this event-loop callback deadlocks on Windows.
+        tauri::async_runtime::spawn(async move {
+            match intent {
+                commands::LaunchIntent::LocalTerminal { cwd } => {
+                    let cwd = cwd.map(|path| caller_cwd.join(path));
+                    if let Err(error) = commands::build_local_terminal_window(&app, cwd.as_deref())
+                    {
+                        tracing::warn!("Could not open the dock terminal: {error}");
+                    }
+                }
+                commands::LaunchIntent::MainWindow => {
+                    if let Err(error) = commands::show_or_create_main_window(&app) {
+                        tracing::warn!("Could not open the workspace window: {error}");
+                    }
+                }
+            }
+        });
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
+        .plugin(tab_drag::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -115,6 +139,9 @@ pub fn run() {
             commands::create_detached_terminal_window,
             commands::transfer_terminal_tab,
             commands::terminal_tab_pointer_state,
+            tab_drag::take_terminal_tab_drop,
+            tab_drag::record_terminal_tab_landing,
+            tab_drag::transfer_terminal_tab_to,
             commands::take_detached_terminal_payload,
             commands::home_directory,
             commands::local_path_info,
@@ -170,6 +197,8 @@ pub fn run() {
             sftp::sftp_transfer_remote,
             sftp::sftp_cancel_transfer,
             terminal::terminal_open,
+            terminal::terminal_ack,
+            terminal::terminal_pause,
             terminal::terminal_attach,
             terminal::terminal_detach,
             terminal::terminal_write,

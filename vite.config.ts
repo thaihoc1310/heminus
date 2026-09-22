@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
   plugins: [svelte()],
   clearScreen: false,
   build: {
@@ -36,4 +37,3 @@ export default defineConfig({
     }
   }
 });
-

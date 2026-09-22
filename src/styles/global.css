@@ -289,20 +289,6 @@ select:focus-visible {
   background: #fdf0e3;
 }
 
-.terminal-close-back {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  color: #44535b;
-  border-radius: 11px;
-  background: #eef2f4;
-}
-
-.terminal-close-back:hover {
-  background: #e2e9ec;
-}
-
 .terminal-close-heading {
   display: grid;
   gap: 4px;
@@ -326,8 +312,16 @@ select:focus-visible {
   background: #f7f9fa;
 }
 
+.terminal-close-group {
+  padding: 8px 11px 3px;
+  color: #44535b;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .terminal-close-row {
-  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 11px;
@@ -337,79 +331,12 @@ select:focus-visible {
   border-radius: 10px;
 }
 
-.terminal-close-list.selectable .terminal-close-row {
-  cursor: pointer;
-}
-
-.terminal-close-list.selectable .terminal-close-row:hover {
-  background: #eaf0f3;
-}
-
-.terminal-close-row.picked {
-  background: #e6f1fa;
-}
-
-/* The native control renders as an oversized circle under WebKitGTK, so the
-   real input stays for keyboard and screen readers while this box is shown. */
-.terminal-close-row input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.terminal-close-box {
-  display: grid;
-  place-items: center;
-  width: 17px;
-  height: 17px;
-  color: transparent;
-  border: 1.5px solid #b8c6cd;
-  border-radius: 5px;
-  background: white;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.terminal-close-row:hover .terminal-close-box {
-  border-color: #93a6af;
-}
-
-.terminal-close-row input:checked ~ .terminal-close-box {
-  color: white;
-  border-color: var(--accent);
-  background: var(--accent);
-}
-
-.terminal-close-row input:focus-visible ~ .terminal-close-box {
-  box-shadow: 0 0 0 3px #268be333;
-}
-
-/* Stands in for the checkbox on the summary step, keeping rows aligned. */
 .terminal-close-dot {
   width: 7px;
   height: 7px;
   margin: 0 4px;
   border-radius: 50%;
   background: #7f9aa8;
-}
-
-.terminal-close-selectall {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  position: relative;
-  margin-bottom: 3px;
-  color: #44535b;
-  font-size: 12px;
-  font-weight: 700;
-  border-bottom: 1px solid #e3eaed;
-  border-radius: 10px 10px 0 0;
-}
-
-.terminal-close-count {
-  color: var(--muted);
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
-  font-size: 11px;
-  font-weight: 500;
 }
 
 .terminal-close-detail {
@@ -454,11 +381,6 @@ select:focus-visible {
 .terminal-close-dialog footer {
   align-items: center;
   gap: 8px;
-}
-
-.terminal-close-outcome {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .terminal-close-dialog footer button {
@@ -830,6 +752,7 @@ select:focus-visible {
   cursor: pointer;
   user-select: none;
   touch-action: none;
+  -webkit-user-drag: element;
 }
 
 .top-tabs [data-top-tab-id].dragging,
@@ -841,6 +764,7 @@ select:focus-visible {
   width: 100%;
   padding-right: 39px;
   cursor: pointer;
+  -webkit-user-drag: element;
 }
 
 .top-tabs [data-top-tab-id].drop-before::before,
@@ -873,7 +797,17 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.top-tabs .terminal-tab-attention {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #e5a50a;
+  box-shadow: 0 0 0 2px #e5a50a33;
+}
+
 .top-tabs .terminal-tab-close {
+  -webkit-user-drag: none;
   position: absolute;
   top: 5px;
   right: 5px;
@@ -3420,6 +3354,26 @@ select:focus-visible {
   background: var(--terminal-background, #1e2228);
 }
 
+.terminal-zoom-hint {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 4;
+  padding: 6px 10px;
+  color: var(--terminal-foreground, #c9d1d9);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--terminal-header-border, #3d4654);
+  border-radius: 8px;
+  background: var(--terminal-header-background, #1e2228);
+  pointer-events: none;
+}
+
+.workspace-pane .terminal-zoom-hint {
+  top: 46px;
+}
+
 .persistent-terminals {
   display: flex;
   background: var(--terminal-tool-background, var(--app-terminal-background, #17191c));
@@ -4049,6 +4003,17 @@ select:focus-visible {
   border-bottom: 1px solid var(--terminal-tool-border);
 }
 
+.terminal-text-size-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.terminal-text-size-copy small {
+  color: var(--terminal-tool-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
 .terminal-text-size > div {
   display: flex;
   align-items: center;
@@ -4305,6 +4270,7 @@ select:focus-visible {
 }
 
 .workspace-pane-header {
+  -webkit-user-drag: element;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4360,6 +4326,7 @@ select:focus-visible {
 }
 
 .workspace-pane-header button {
+  -webkit-user-drag: none;
   display: grid;
   place-items: center;
   width: 28px;

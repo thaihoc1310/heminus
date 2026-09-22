@@ -44,6 +44,24 @@ describe("terminal suggestions", () => {
     });
   });
 
+  it("ignores SGR mouse reports from terminal applications", () => {
+    expect(updateCommandInput("snip", "\x1b[<35;42;9M")).toEqual({
+      input: "snip",
+      submitted: []
+    });
+    expect(updateCommandInput("snip", "\x1b[<0;42;9m")).toEqual({
+      input: "snip",
+      submitted: []
+    });
+  });
+
+  it("ignores application-mode arrows and Alt+key sequences", () => {
+    expect(updateCommandInput("snip", "\x1bOA\x1bOD\x1bb\x1b")).toEqual({
+      input: "snip",
+      submitted: []
+    });
+  });
+
   it("uses the command rendered by shell completion before saving history", () => {
     expect(reconcileRenderedCommandInput("cd Wor", "cd Workspace/")).toBe("cd Workspace/");
     expect(reconcileRenderedCommandInput("printf complete", "printf com")).toBe("printf complete");

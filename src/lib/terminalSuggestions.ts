@@ -67,7 +67,8 @@ export function updateCommandInput(
   data: string
 ): { input: string; submitted: string[] } {
   const submitted: string[] = [];
-  const sanitized = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  // CSI (arrows, mouse reports), SS3 (application-mode arrows) and Alt+key.
+  const sanitized = data.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|.)?/gs, "");
   for (const character of sanitized) {
     if (character === "\r" || character === "\n") {
       const command = current.trim();

@@ -82,6 +82,36 @@ export async function createDetachedTerminalWindow(
   });
 }
 
+export type TerminalTabDrop =
+  | { kind: "outside" }
+  | { kind: "cancelled" }
+  | { kind: "landed"; targetLabel: string; clientX: number; clientY: number };
+
+/** Where the last HTML5 tab drag from this window ended, if GTK or a window saw it. */
+export async function takeTerminalTabDrop(): Promise<TerminalTabDrop | null> {
+  return isTauri ? invoke<TerminalTabDrop | null>("take_terminal_tab_drop") : null;
+}
+
+/** Tells the dragging window that its tab was dropped here. */
+export async function recordTerminalTabLanding(clientX: number, clientY: number): Promise<void> {
+  if (isTauri) await invoke("record_terminal_tab_landing", { clientX, clientY });
+}
+
+export async function transferTerminalTabTo(
+  targetLabel: string,
+  payload: DetachedWindowPayload,
+  clientX: number,
+  clientY: number
+): Promise<void> {
+  if (!isTauri) throw new Error("Moving tabs between windows requires the desktop app");
+  await invoke("transfer_terminal_tab_to", {
+    targetLabel,
+    payload: JSON.stringify(payload),
+    clientX,
+    clientY
+  });
+}
+
 export async function takeDetachedTerminalPayload(): Promise<DetachedWindowPayload | null> {
   if (!isTauri) return null;
   const payload = await invoke<string | null>("take_detached_terminal_payload");
@@ -516,6 +546,14 @@ export async function detachTerminal(id: string): Promise<void> {
 
 export async function writeTerminal(id: string, bytes: number[]): Promise<void> {
   return invoke("terminal_write", { id, bytes });
+}
+
+export async function acknowledgeTerminal(id: string, bytes: number): Promise<void> {
+  return invoke("terminal_ack", { id, bytes });
+}
+
+export async function pauseTerminal(id: string, paused: boolean): Promise<void> {
+  return invoke("terminal_pause", { id, paused });
 }
 
 export async function resizeTerminal(id: string, rows: number, cols: number): Promise<void> {
