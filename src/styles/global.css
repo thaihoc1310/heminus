@@ -572,6 +572,38 @@ select:focus-visible {
   background: var(--app-terminal-background, #1f2124);
 }
 
+.application.terminal-focus {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.application.terminal-focus > .titlebar,
+.application.terminal-focus .terminal-tools-slot,
+.application.terminal-focus .workspace-pane-header {
+  display: none;
+}
+
+.terminal-focus-exit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #dce0ec;
+  background: #111214bd;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.terminal-focus-exit:hover,
+.terminal-focus-exit:focus-visible {
+  background: #111214;
+}
+
 .application.dragging-terminal-tab,
 .application.dragging-terminal-tab * {
   cursor: grabbing !important;

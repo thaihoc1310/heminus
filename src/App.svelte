@@ -249,6 +249,9 @@
   let terminalTabs = $state<TerminalTab[]>([]);
   let terminalToolsOpen = $state(false);
   let terminalToolsMounted = $state(false);
+  let terminalFocusMode = $state(false);
+  let terminalFocusChanging = false;
+  let wasFullscreenBeforeFocus = false;
   let terminalToolsCloseTimer: number | null = null;
   let terminalHistoryVersion = $state(0);
   let terminalSnippetVersion = $state(0);
@@ -472,6 +475,10 @@
         event.preventDefault();
         void openTerminal();
       }
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        if (page === "terminal" && activeTerminalId) toggleTerminalTools();
+      }
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "e") {
         event.preventDefault();
         toggleSplit();
@@ -484,6 +491,12 @@
       if (event.key === "Escape") bulkHostContextMenu = null;
       if (event.key === "Escape") groupContextMenu = null;
       if (event.key === "Escape") terminalContextMenu = null;
+    };
+    const onFocusModeKeydown = (event: KeyboardEvent) => {
+      if (event.key !== "F11" || event.ctrlKey || event.metaKey || event.shiftKey || page !== "terminal") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) void toggleTerminalFocusMode();
     };
     const syncWindowedChrome = async () => {
       if (!appWindow) {
@@ -514,6 +527,7 @@
       updateTerminalAppearance({ fontSize: nextTerminalFontSize(current, zoom) });
     };
     window.addEventListener("keydown", onKeydown);
+    window.addEventListener("keydown", onFocusModeKeydown, true);
     window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("resize", syncWindowedChrome);
     const onWindowFocus = () => (windowFocused = true);
@@ -531,6 +545,7 @@
       removeIdentityListener?.();
       removeCloseRequestedListener?.();
       window.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("keydown", onFocusModeKeydown, true);
       window.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", syncWindowedChrome);
       window.removeEventListener("focus", onWindowFocus);
@@ -1893,7 +1908,9 @@
   function terminalPaneVisible(id: string): boolean {
     if (page !== "terminal") return false;
     const workspace = activeWorkspace();
-    return workspace ? workspace.paneIds.includes(id) : activeTerminalId === id;
+    return workspace
+      ? workspace.paneIds.includes(id) && (!workspace.focusedPaneId || workspace.focusedPaneId === id)
+      : activeTerminalId === id;
   }
 
   function terminalPaneWantsAttention(id: string) {
@@ -2436,6 +2453,37 @@
       terminalToolsCloseTimer = null;
     }, 230);
   }
+
+  async function toggleTerminalFocusMode() {
+    if (terminalFocusChanging) return;
+    terminalFocusChanging = true;
+    const leaving = terminalFocusMode;
+    try {
+      if (leaving) {
+        if (appWindow && !wasFullscreenBeforeFocus) await appWindow.setFullscreen(false);
+        terminalFocusMode = false;
+      } else {
+        wasFullscreenBeforeFocus = await appWindow?.isFullscreen() ?? false;
+        if (appWindow && !wasFullscreenBeforeFocus) await appWindow.setFullscreen(true);
+        terminalFocusMode = true;
+        closeTerminalTools();
+      }
+      await tick();
+      terminalGridElement?.querySelector<HTMLTextAreaElement>(
+        `[data-pane-id="${activeTerminalId}"] .xterm-helper-textarea`
+      )?.focus();
+    } catch (cause) {
+      if (leaving) terminalFocusMode = false;
+      showMessage(cause, true);
+    } finally {
+      terminalFocusChanging = false;
+      if (page !== "terminal" && terminalFocusMode) void toggleTerminalFocusMode();
+    }
+  }
+
+  $effect(() => {
+    if (page !== "terminal" && terminalFocusMode) void toggleTerminalFocusMode();
+  });
 
   function toggleTerminalTools() {
     if (terminalToolsOpen) closeTerminalTools();
@@ -3721,10 +3769,19 @@
   class:detached-window={detachedMode}
   class:detached-initialized={detachedInitialized}
   class:terminal-surface={page === "terminal"}
+  class:terminal-focus={page === "terminal" && terminalFocusMode}
   class:single-terminal-surface={page === "terminal" && !activeWorkspace() && Boolean(activeTerminalId)}
   class:dragging-terminal-tab={Boolean(panePointerDrag?.dragging || topTabPointerDrag?.dragging)}
   style={singleTerminalChromeStyle()}
 >
+  {#if page === "terminal" && terminalFocusMode}
+    <button
+      class="terminal-focus-exit"
+      title="Show header (F11)"
+      aria-label="Show header (F11)"
+      onclick={() => void toggleTerminalFocusMode()}
+    ><Icon name="menu" size={16} /></button>
+  {/if}
   <div
     class="window-resize-handle resize-north"
     aria-hidden="true"
@@ -3927,14 +3984,17 @@
       <Icon name="plus" />
     </button>
     <div class="titlebar-space" data-tauri-drag-region></div>
-    {#if !detachedMode}
-      <button class="title-icon" title="Notifications"><Icon name="bell" size={18} /></button>
-    {/if}
     {#if page === "terminal" && activeTerminalId}
+      <button
+        class="title-icon"
+        title="Hide header (F11)"
+        aria-label="Hide header (F11)"
+        onclick={() => void toggleTerminalFocusMode()}
+      ><Icon name="eye-off" size={16} /></button>
       <button
         class="title-icon terminal-tools-toggle"
         class:active={terminalToolsOpen}
-        title={terminalToolsOpen ? "Close terminal tools" : "Open terminal tools"}
+        title={terminalToolsOpen ? "Close terminal tools (Ctrl+Shift+O)" : "Open terminal tools (Ctrl+Shift+O)"}
         aria-pressed={terminalToolsOpen}
         onclick={toggleTerminalTools}
       ><Icon name="sidebar" size={18} /></button>
@@ -4040,6 +4100,7 @@
                   onClose={() => void requestCloseTerminalTab(tab.id)}
                   onBroadcast={() => toggleBroadcast(tab.id)}
                   onFocus={() => focusWorkspacePane(tab.id)}
+                  onFocusModeToggle={() => void toggleTerminalFocusMode()}
                   headerDraggable={!usesTauriNativeTerminalDrag}
                   onHeaderPointerDown={(event: PointerEvent) => {
                     if (usesTauriNativeTerminalDrag) startPanePointerDrag(event, tab.id);

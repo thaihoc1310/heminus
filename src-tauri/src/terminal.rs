@@ -29,10 +29,12 @@ struct TerminalSession {
 struct TerminalEventSink {
     destination: Option<Channel<InvokeResponseBody>>,
     destination_window: Option<String>,
+    /// Output not yet rendered by the attached pane, or produced while detached.
     replay: VecDeque<u8>,
     /// The backlog set aside by a transfer checkpoint, restored if it aborts.
     stashed_replay: Option<VecDeque<u8>>,
     generation: u64,
+    ack_token: Option<Uuid>,
     in_flight: usize,
     paused: bool,
     closed: bool,
@@ -42,7 +44,7 @@ struct TerminalEventSink {
 /// Unacknowledged output before the PTY reader waits for the pane to catch up.
 /// Minimized windows get throttled timers and ack slowly, so this is sized to
 /// keep a noisy build moving there while still bounding xterm's queue.
-const TERMINAL_OUTPUT_HIGH_WATER: usize = 2 * 1024 * 1024;
+const TERMINAL_OUTPUT_HIGH_WATER: usize = 1024 * 1024;
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
@@ -172,6 +174,7 @@ impl Drop for TerminalManager {
 pub enum TerminalEvent {
     Stream {
         id: Uuid,
+        token: Uuid,
     },
     Checkpoint,
     Exit,
@@ -375,6 +378,7 @@ fn clear_failed_destination(event_sink: &Arc<Mutex<TerminalEventSink>>, generati
     {
         sink.destination = None;
         sink.destination_window = None;
+        sink.ack_token = None;
         sink.in_flight = 0;
         sink.wake.notify_all();
     }
@@ -387,6 +391,7 @@ fn detach_destination(sink: &mut TerminalEventSink, window_label: &str) -> bool 
     sink.generation = sink.generation.wrapping_add(1);
     sink.destination = None;
     sink.destination_window = None;
+    sink.ack_token = None;
     sink.in_flight = 0;
     sink.wake.notify_all();
     true
@@ -428,6 +433,7 @@ fn publish_terminal_output(event_sink: &Arc<Mutex<TerminalEventSink>>, bytes: &[
         } else {
             sink.destination = None;
             sink.destination_window = None;
+            sink.ack_token = None;
             sink.in_flight = 0;
         }
     }
@@ -438,6 +444,7 @@ pub fn terminal_ack(
     manager: State<'_, TerminalManager>,
     window: WebviewWindow,
     id: Uuid,
+    token: Uuid,
     bytes: usize,
 ) -> Result<(), String> {
     let sessions = manager
@@ -450,11 +457,20 @@ pub fn terminal_ack(
             .lock()
             .map_err(|_| "terminal sink lock poisoned")?;
         if sink.destination_window.as_deref() == Some(window.label()) {
-            sink.in_flight = sink.in_flight.saturating_sub(bytes);
-            sink.wake.notify_all();
+            acknowledge_output(&mut sink, token, bytes);
         }
     }
     Ok(())
+}
+
+fn acknowledge_output(sink: &mut TerminalEventSink, token: Uuid, bytes: usize) {
+    if sink.ack_token != Some(token) {
+        return;
+    }
+    sink.in_flight = sink.in_flight.saturating_sub(bytes);
+    let replay = sink.stashed_replay.as_mut().unwrap_or(&mut sink.replay);
+    replay.drain(..bytes.min(replay.len()));
+    sink.wake.notify_all();
 }
 
 #[tauri::command]
@@ -769,10 +785,12 @@ pub fn terminal_open(
         .take_writer()
         .map_err(|error| error.to_string())?;
     let id = Uuid::new_v4();
+    let ack_token = Uuid::new_v4();
     let sessions = Arc::clone(&manager.sessions);
     let event_sink = Arc::new(Mutex::new(TerminalEventSink {
         destination: Some(on_event),
         destination_window: Some(window.label().to_string()),
+        ack_token: Some(ack_token),
         replay: VecDeque::new(),
         generation: 0,
         ..Default::default()
@@ -809,7 +827,13 @@ pub fn terminal_open(
         );
 
     let log_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    publish_terminal_event(&event_sink, TerminalEvent::Stream { id });
+    publish_terminal_event(
+        &event_sink,
+        TerminalEvent::Stream {
+            id,
+            token: ack_token,
+        },
+    );
     if let Some(hops) = connection_log {
         publish_terminal_event(
             &event_sink,
@@ -912,14 +936,21 @@ pub fn terminal_attach(
             .map_err(|_| "terminal event sink lock poisoned")?;
         sink.generation = sink.generation.wrapping_add(1);
         sink.destination_window = Some(window.label().to_string());
+        let ack_token = Uuid::new_v4();
+        sink.ack_token = Some(ack_token);
         sink.in_flight = 0;
         sink.stashed_replay = None;
         let previous_destination = sink.destination.replace(on_event.clone());
         if let Err(error) = on_event.send(InvokeResponseBody::Json(
-            serde_json::to_string(&TerminalEvent::Stream { id }).map_err(|e| e.to_string())?,
+            serde_json::to_string(&TerminalEvent::Stream {
+                id,
+                token: ack_token,
+            })
+            .map_err(|e| e.to_string())?,
         )) {
             sink.destination = None;
             sink.destination_window = None;
+            sink.ack_token = None;
             return Err(error.to_string());
         }
         // Sent in pieces: the buffer holds up to 2 MiB, and one message that
@@ -932,6 +963,7 @@ pub fn terminal_attach(
             {
                 sink.destination = None;
                 sink.destination_window = None;
+                sink.ack_token = None;
                 return Err("Could not attach the detached terminal output".to_string());
             }
         }
@@ -1227,6 +1259,28 @@ mod tests {
             .copied()
             .collect::<Vec<_>>();
         assert_eq!(replay, b"first second");
+    }
+
+    #[test]
+    fn acknowledged_output_does_not_accumulate_in_replay() {
+        let (sink, _) = recording_sink();
+        let token = Uuid::new_v4();
+        sink.lock().unwrap().ack_token = Some(token);
+        publish_terminal_output(&sink, b"rendered");
+        {
+            let mut guard = sink.lock().unwrap();
+            acknowledge_output(&mut guard, Uuid::new_v4(), 8);
+            assert_eq!(guard.replay.len(), 8);
+            acknowledge_output(&mut guard, token, 8);
+            assert_eq!(guard.in_flight, 0);
+            assert!(guard.replay.is_empty());
+        }
+        publish_terminal_output(&sink, b"checkpoint");
+        let mut guard = sink.lock().unwrap();
+        pause_sink(&mut guard, true).unwrap();
+        acknowledge_output(&mut guard, token, 10);
+        pause_sink(&mut guard, false).unwrap();
+        assert!(guard.replay.is_empty());
     }
 
     #[test]

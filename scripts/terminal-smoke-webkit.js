@@ -12,6 +12,9 @@ const type = (data) => textarea.dispatchEvent(new InputEvent("input", { data, in
 const key = (key, keyCode) => textarea.dispatchEvent(new KeyboardEvent("keydown", { key, keyCode, bubbles: true, cancelable: true }));
 
 check("webgl renderer active", Boolean(document.querySelector(".xterm-screen canvas")));
+const beforeFocusKey = smoke.text().length;
+key("F11", 122); await delay(30);
+check("F11 toggles focus without reaching the shell", smoke.focusToggles.length === 1 && smoke.text().length === beforeFocusKey);
 
 // A shell with no prompt markers (SSH host, zsh) still gets suggestions.
 smoke.emit("$ ");
@@ -71,6 +74,13 @@ smoke.attention.length = 0;
 smoke.emit("\x07"); smoke.emit("\x1b]9;4;1;50\x07"); smoke.emit("\x1b]9;Claude is waiting\x07");
 smoke.emit("\x1b]777;notify;Codex;done\x07"); await delay(60);
 check("bell and notifications ask for attention", smoke.attention.length === 3, JSON.stringify(smoke.attention));
+
+const resizeCount = smoke.resizes.length;
+document.querySelector("#terminal").style.display = "none";
+await delay(100);
+check("hidden pane does not shrink its PTY", smoke.resizes.length === resizeCount);
+document.querySelector("#terminal").style.display = "block";
+await delay(100);
 
 const bench = await smoke.benchmark(20);
 out.push("BENCH " + JSON.stringify(bench));

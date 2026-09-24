@@ -92,6 +92,7 @@
     onRetry = () => {},
     onBroadcast = () => {},
     onFocus = () => {},
+    onFocusModeToggle = () => {},
     headerDraggable = false,
     onHeaderPointerDown = (_event: PointerEvent) => {},
     onHeaderDragStart = (_event: DragEvent) => {},
@@ -122,6 +123,7 @@
     onRetry?: () => void;
     onBroadcast?: () => void;
     onFocus?: () => void;
+    onFocusModeToggle?: () => void;
     headerDraggable?: boolean;
     onHeaderPointerDown?: (event: PointerEvent) => void;
     onHeaderDragStart?: (event: DragEvent) => void;
@@ -519,6 +521,7 @@
     // prompt markers never reach us; remember that one was started instead.
     let insideMultiplexer = false;
     let streamId: string | null = null;
+    let ackToken: string | null = null;
     let acknowledgedBytes = 0;
     let ackTimer: number | null = null;
     let checkpoint: ((snapshot: TerminalSnapshot) => void) | null = null;
@@ -557,7 +560,7 @@
         fontWeightBold: "600",
         letterSpacing: 0.1,
         lineHeight: 1.16,
-        scrollback: 20_000,
+        scrollback: 5_000,
         smoothScrollDuration: 80,
         theme: terminalTheme(appearance.theme).palette
       });
@@ -722,7 +725,7 @@
         container.addEventListener("mouseup", handleTerminalMiddleMouseEvent, true);
         container.addEventListener("auxclick", handleTerminalAuxClick, true);
       }
-      fitAddon.fit();
+      if (container.clientWidth && container.clientHeight) fitAddon.fit();
       if (snapshot && resumeSessionId) {
         terminal.resize(snapshot.cols, snapshot.rows);
         await new Promise<void>((resolve) => terminal!.write(snapshot.data, resolve));
@@ -732,10 +735,10 @@
       const flushAcknowledgements = () => {
         if (ackTimer !== null) window.clearTimeout(ackTimer);
         ackTimer = null;
-        if (!streamId || !acknowledgedBytes) return;
+        if (!streamId || !ackToken || !acknowledgedBytes) return;
         const bytes = acknowledgedBytes;
         acknowledgedBytes = 0;
-        void acknowledgeTerminal(streamId, bytes).catch((cause) => {
+        void acknowledgeTerminal(streamId, ackToken, bytes).catch((cause) => {
           if (!disposed) error = String(cause);
         });
       };
@@ -765,7 +768,10 @@
       };
       const handleTerminalEvent = (event: TerminalControlEvent) => {
         if (!terminal) return;
-        if (event.kind === "stream") streamId = event.id;
+        if (event.kind === "stream") {
+          streamId = event.id;
+          ackToken = event.token;
+        }
         if (event.kind === "checkpoint") {
           terminal.write("", () => {
             if (!terminal || disposed) return;
@@ -1061,6 +1067,12 @@
         });
       });
       terminal.attachCustomKeyEventHandler((event) => {
+        if (event.type === "keydown" && event.key === "F11" && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) onFocusModeToggle();
+          return false;
+        }
         if (
           event.type === "keydown" &&
           event.ctrlKey &&
@@ -1127,7 +1139,7 @@
         if (resizeFrame !== null) return;
         resizeFrame = window.requestAnimationFrame(() => {
           resizeFrame = null;
-          if (!terminal || !fitAddon) return;
+          if (!terminal || !fitAddon || !container.clientWidth || !container.clientHeight) return;
           fitAddon.fit();
           // WebKitGTK shows a WebGL canvas that returns from display:none one
           // draw behind, so output that arrived while the tab was hidden stays

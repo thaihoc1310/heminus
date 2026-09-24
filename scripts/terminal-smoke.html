@@ -12,6 +12,7 @@
   const writes = [];
   const resizes = [];
   const attention = [];
+  const focusToggles = [];
   let serial = 0;
   window.__TAURI_INTERNALS__ = {
     transformCallback: () => ++serial,
@@ -21,7 +22,7 @@
         const id = args.id ?? `session-${++serial}`;
         channels.set(id, args.onEvent);
         pending.set(id, 0);
-        args.onEvent.onmessage({ kind: 'stream', id });
+        args.onEvent.onmessage({ kind: 'stream', id, token: `stream-${++serial}` });
         return id;
       }
       if (command === 'terminal_ack') pending.set(args.id, Math.max(0, pending.get(args.id) - args.bytes));
@@ -50,14 +51,15 @@
       paneId: 'pane', title: 'Smoke', appearance: { theme: 'heminus_dark', fontSize: 14 },
       snapshot, resumeSessionId: snapshot ? session : null,
       onSessionReady: (_, id) => { session = id; },
-      onAttention: (id) => attention.push(id)
+      onAttention: (id) => attention.push(id),
+      onFocusModeToggle: () => focusToggles.push(performance.now())
     }});
     while (!terminalTransfers.has('pane')) await delay();
     await delay();
   }
   await render();
   window.smoke = {
-    writes, resizes, emit, attention,
+    writes, resizes, emit, attention, focusToggles,
     text: () => new TextDecoder().decode(Uint8Array.from(writes.flatMap(write => write.bytes))),
     async snapshot() { return terminalTransfers.get('pane').prepare(); },
     async restore(snapshot) {
@@ -73,7 +75,7 @@
       const start = performance.now();
       let total = 0;
       while (total < megabytes * 1024 * 1024) {
-        if (pending.get(session) >= 2 * 1024 * 1024) { await delay(1); continue; }
+        if (pending.get(session) >= 1024 * 1024) { await delay(1); continue; }
         emit(chunk); total += chunk.length; peak = Math.max(peak, pending.get(session));
       }
       while (pending.get(session)) await delay(1);

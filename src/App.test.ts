@@ -67,6 +67,24 @@ function dragData() {
   };
 }
 
+it("toggles terminal focus with F11 without closing the workspace", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const app = view.container.querySelector(".application")!;
+  expect(view.container.querySelectorAll(".terminal-instance")).toHaveLength(2);
+  expect(app.classList.contains("terminal-focus")).toBe(false);
+  await fireEvent.click(view.getByRole("button", { name: "Hide header (F11)" }));
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(true));
+  expect(view.container.querySelectorAll(".terminal-instance")).toHaveLength(2);
+  await fireEvent.click(view.getByRole("button", { name: "Show header (F11)" }));
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(false));
+  await fireEvent.keyDown(window, { key: "F11" });
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(true));
+  await fireEvent.keyDown(window, { key: "F11" });
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(false));
+  expect(ipc.closeTerminal).not.toHaveBeenCalled();
+});
+
 it("detaches the workspace from its context menu with both panes", async () => {
   const view = render(App);
   const workspace = await view.findByRole("group", { name: "Workspace terminal tab" });

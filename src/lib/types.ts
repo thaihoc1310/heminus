@@ -326,7 +326,7 @@ export interface ConnectionLogEntry {
  * {@link TerminalChannelMessage}.
  */
 export type TerminalControlEvent =
-  | { kind: "stream"; id: string }
+  | { kind: "stream"; id: string; token: string }
   | { kind: "checkpoint" }
   | { kind: "exit" }
   | { kind: "disconnect" }

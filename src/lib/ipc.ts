@@ -548,8 +548,8 @@ export async function writeTerminal(id: string, bytes: number[]): Promise<void> 
   return invoke("terminal_write", { id, bytes });
 }
 
-export async function acknowledgeTerminal(id: string, bytes: number): Promise<void> {
-  return invoke("terminal_ack", { id, bytes });
+export async function acknowledgeTerminal(id: string, token: string, bytes: number): Promise<void> {
+  return invoke("terminal_ack", { id, token, bytes });
 }
 
 export async function pauseTerminal(id: string, paused: boolean): Promise<void> {
