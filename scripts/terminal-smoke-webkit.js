@@ -75,6 +75,19 @@ smoke.emit("\x07"); smoke.emit("\x1b]9;4;1;50\x07"); smoke.emit("\x1b]9;Claude i
 smoke.emit("\x1b]777;notify;Codex;done\x07"); await delay(60);
 check("bell and notifications ask for attention", smoke.attention.length === 3, JSON.stringify(smoke.attention));
 
+// Wheel in a mouse-tracking app: one SGR report per row of travel.
+const wheelAt = (deltaY) => document.querySelector(".xterm-screen").dispatchEvent(
+  new WheelEvent("wheel", { deltaY, deltaMode: 0, clientX: 40, clientY: 40, bubbles: true, cancelable: true }));
+let wheelStart = smoke.text().length;
+wheelAt(120); await delay(40);
+check("plain shell wheel sends no reports", !smoke.text().slice(wheelStart).includes("\x1b[<65;"));
+smoke.emit("\x1b[?1049h\x1b[?1000h\x1b[?1006h"); await delay(30);
+wheelStart = smoke.text().length;
+wheelAt(120); await delay(40);
+const reports = smoke.text().slice(wheelStart).split("\x1b[<65;").length - 1;
+check("tracked wheel sends one report per row", reports >= 4 && reports <= 8, String(reports));
+smoke.emit("\x1b[?1000l\x1b[?1006l\x1b[?1049l"); await delay(30);
+
 const resizeCount = smoke.resizes.length;
 document.querySelector("#terminal").style.display = "none";
 await delay(100);

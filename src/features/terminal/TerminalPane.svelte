@@ -68,6 +68,11 @@
     type TerminalZoomAction
   } from "../../lib/terminalZoom";
   import {
+    TerminalMouseTracking,
+    encodeWheelReports,
+    wheelReportPosition
+  } from "../../lib/terminalWheel";
+  import {
     buildTerminalSuggestions,
     highlightedCommand,
     reconcileRenderedCommandInput,
@@ -534,6 +539,7 @@
     const outputDecoder = new TextDecoder();
     const activate = () => onActivate(paneId);
     const preventContextMenu = (event: MouseEvent) => event.preventDefault();
+    let handleApplicationWheel: ((event: WheelEvent) => void) | null = null;
     const handleZoomWheel = (event: WheelEvent) => {
       const zoom = terminalZoomActionFromWheel(event);
       if (!zoom) return;
@@ -572,16 +578,22 @@
       // SerializeAddon omits mouse encoding and cursor visibility. Herdr uses
       // SGR mouse coordinates; restoring tracking alone would corrupt clicks.
       const extraModes = new Map<number, boolean>([[25, true]]);
+      const mouseTracking = new TerminalMouseTracking();
       for (const final of ["h", "l"]) {
         terminal.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+          const enabled = final === "h";
           for (const mode of params) {
-            if (typeof mode === "number" && [25, 1005, 1006, 1015, 1016].includes(mode)) {
-              extraModes.set(mode, final === "h");
-            }
+            if (typeof mode !== "number") continue;
+            if ([25, 1005, 1006, 1015, 1016].includes(mode)) extraModes.set(mode, enabled);
+            mouseTracking.setPrivateMode(mode, enabled);
           }
           return false;
         });
       }
+      terminal.parser.registerEscHandler({ final: "c" }, () => {
+        mouseTracking.reset();
+        return false;
+      });
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.loadAddon(searchAddon);
@@ -661,6 +673,41 @@
       // Keep the WebView menu from covering menus drawn by terminal applications.
       container.addEventListener("contextmenu", preventContextMenu, true);
       container.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
+      // Apps that capture the wheel (Claude Code, Codex) otherwise get at most
+      // one report per gesture. Send one report per row the finger actually moved.
+      handleApplicationWheel = (event: WheelEvent) => {
+        if (!mouseTracking.reportsWheel || event.shiftKey || terminalZoomActionFromWheel(event)) return;
+        const screen = container.querySelector(".xterm-screen");
+        if (!screen || !terminal) return;
+        const bounds = screen.getBoundingClientRect();
+        const cellWidth = bounds.width / terminal.cols;
+        const cellHeight = bounds.height / terminal.rows;
+        if (cellWidth <= 0 || cellHeight <= 0) return;
+        const lines = mouseTracking.consume(event.deltaY, event.deltaMode, cellHeight, terminal.rows);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (lines === 0) return;
+        const position = wheelReportPosition(
+          event.clientX,
+          event.clientY,
+          bounds,
+          cellWidth,
+          cellHeight
+        );
+        if (!position) return;
+        const report = encodeWheelReports({
+          lines,
+          position,
+          encoding: mouseTracking.encoding,
+          cols: terminal.cols,
+          rows: terminal.rows,
+          ctrl: event.ctrlKey,
+          alt: event.altKey,
+          shift: false
+        });
+        if (report) terminal.input(report);
+      };
+      container.addEventListener("wheel", handleApplicationWheel, { capture: true, passive: false });
       const clearTerminalSelection = () => {
         terminal?.clearSelection();
       };
@@ -1198,6 +1245,9 @@
       container?.removeEventListener("focusin", activate);
       container?.removeEventListener("contextmenu", preventContextMenu, true);
       container?.removeEventListener("wheel", handleZoomWheel, true);
+      if (handleApplicationWheel) {
+        container?.removeEventListener("wheel", handleApplicationWheel, true);
+      }
       if (handleTerminalMiddlePointerDown) {
         container?.removeEventListener(
           "pointerdown",
