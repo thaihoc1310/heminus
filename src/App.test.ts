@@ -85,6 +85,22 @@ it("toggles terminal focus with F11 without closing the workspace", async () => 
   expect(ipc.closeTerminal).not.toHaveBeenCalled();
 });
 
+it("toggles terminal tools with Ctrl+Alt+J", async () => {
+  vi.mocked(ipc.listSnippets).mockResolvedValue([]);
+  vi.mocked(ipc.listAllCommandHistory).mockResolvedValue([]);
+  const view = render(App);
+  const toggle = await view.findByRole("button", { name: "Open terminal tools (Ctrl+Alt+J)" });
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  await fireEvent.keyDown(toggle, { key: "o", ctrlKey: true, shiftKey: true });
+  await fireEvent.keyDown(toggle, { key: "j", ctrlKey: true, altKey: true, shiftKey: true });
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  await fireEvent.keyDown(toggle, { key: "j", ctrlKey: true, altKey: true });
+  await waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("true"));
+  expect(view.getByRole("button", { name: "Close terminal tools (Ctrl+Alt+J)" })).toBe(toggle);
+  await fireEvent.keyDown(toggle, { key: "j", ctrlKey: true, altKey: true });
+  await waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("false"));
+});
+
 it("detaches the workspace from its context menu with both panes", async () => {
   const view = render(App);
   const workspace = await view.findByRole("group", { name: "Workspace terminal tab" });

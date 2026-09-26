@@ -475,7 +475,14 @@
         event.preventDefault();
         void openTerminal();
       }
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "o") {
+      if (
+        event.ctrlKey &&
+        event.altKey &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        !event.repeat &&
+        event.key.toLowerCase() === "j"
+      ) {
         event.preventDefault();
         if (page === "terminal" && activeTerminalId) toggleTerminalTools();
       }
@@ -3994,7 +4001,7 @@
       <button
         class="title-icon terminal-tools-toggle"
         class:active={terminalToolsOpen}
-        title={terminalToolsOpen ? "Close terminal tools (Ctrl+Shift+O)" : "Open terminal tools (Ctrl+Shift+O)"}
+        title={terminalToolsOpen ? "Close terminal tools (Ctrl+Alt+J)" : "Open terminal tools (Ctrl+Alt+J)"}
         aria-pressed={terminalToolsOpen}
         onclick={toggleTerminalTools}
       ><Icon name="sidebar" size={18} /></button>

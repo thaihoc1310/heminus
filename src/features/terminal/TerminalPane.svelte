@@ -1179,6 +1179,18 @@
           openTerminalSearch();
           return false;
         }
+        // The window handler toggles terminal tools. Swallow the chord here so
+        // xterm does not send it to the shell, but let the keydown bubble.
+        if (
+          event.ctrlKey &&
+          event.altKey &&
+          !event.shiftKey &&
+          !event.metaKey &&
+          event.key.toLowerCase() === "j"
+        ) {
+          if (event.type === "keydown") event.preventDefault();
+          return false;
+        }
         return true;
       });
 
