@@ -3407,6 +3407,7 @@ select:focus-visible {
 }
 
 .persistent-terminals {
+  position: relative;
   display: flex;
   background: var(--terminal-tool-background, var(--app-terminal-background, #17191c));
 }
@@ -3425,29 +3426,24 @@ select:focus-visible {
   min-height: 0;
 }
 
+/* Only the panel's transform animates. Animating the slot's width would
+   refit every terminal (and resize its PTY) on each frame; instead the grid
+   changes size once: when the slot joins the layout on open, and when it
+   leaves it (overlaying the grid while it slides out) on close. */
 .terminal-tools-slot {
-  flex: 0 0 0;
-  width: 0;
+  flex: 0 0 344px;
+  width: 344px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   color: var(--terminal-tool-foreground);
-  background: var(--terminal-tool-background);
-  border-left: 1px solid transparent;
-  transform: translateX(16px);
-  transition:
-    flex-basis 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    border-color 160ms ease;
-  will-change: flex-basis, width, transform;
 }
 
-.terminal-tools-slot.open {
-  flex-basis: 344px;
-  width: 344px;
-  border-left-color: var(--terminal-tool-border);
-  transform: translateX(0);
+.terminal-tools-slot:not(.open) {
+  position: absolute;
+  z-index: 90;
+  inset: 0 0 0 auto;
+  pointer-events: none;
 }
 
 .terminal-tools-panel {
@@ -3460,6 +3456,13 @@ select:focus-visible {
   min-height: 0;
   color: var(--terminal-tool-foreground);
   background: var(--terminal-tool-background);
+  border-left: 1px solid var(--terminal-tool-border);
+  transform: translateX(100%);
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.terminal-tools-slot.open .terminal-tools-panel {
+  transform: translateX(0);
 }
 
 .terminal-tools-header {
@@ -7493,20 +7496,14 @@ select:focus-visible {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .persistent-terminals {
-    position: relative;
-  }
-
   .terminal-tools-slot {
     position: absolute;
     z-index: 70;
     inset: 0 0 0 auto;
-    box-shadow: -14px 0 34px transparent;
+    width: min(320px, calc(100vw - 44px));
   }
 
   .terminal-tools-slot.open {
-    flex-basis: min(320px, calc(100vw - 44px));
-    width: min(320px, calc(100vw - 44px));
     box-shadow: -14px 0 34px #00000036;
   }
 
