@@ -51,13 +51,14 @@ impl ProcessSupervisor {
     /// Heminus's own transport helpers — the proxy connector and the askpass
     /// responder, both re-executions of this binary — are part of the plumbing,
     /// not work the person started, so they are never offered up for review.
+    /// Neither are clipboard owners (see [`is_clipboard_owner`]).
     pub fn background_processes(&self) -> Vec<SessionProcess> {
         let own_executable = std::env::current_exe()
             .ok()
             .map(|path| path.to_string_lossy().into_owned());
         self.processes()
             .into_iter()
-            .filter(|process| !process.leader)
+            .filter(|process| !process.leader && !is_clipboard_owner(process))
             .filter(|process| {
                 own_executable
                     .as_deref()
@@ -73,6 +74,14 @@ impl ProcessSupervisor {
     pub fn terminate_processes(&self, pids: &[u32]) -> Result<(), String> {
         self.inner.terminate_processes(pids)
     }
+}
+
+/// `xclip`, `xsel` and `wl-copy` linger in the background to serve what was
+/// copied (by Claude Code, Neovim, tmux…) until something else takes the
+/// clipboard. They are not work to review; closing the tab still stops them,
+/// and GNOME keeps the copied text once they exit.
+fn is_clipboard_owner(process: &SessionProcess) -> bool {
+    matches!(process.name.as_str(), "xclip" | "xsel" | "wl-copy")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -296,6 +305,77 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// Closing a tab after copying text in Claude Code used to ask about the
+    /// `xclip` left serving the clipboard.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn clipboard_owners_are_not_offered_for_review() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::time::{Duration, Instant};
+
+        let directory = std::env::temp_dir().join(format!("heminus-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        // A renamed shell blocked on a FIFO: it lives on with the name `xclip`
+        // and no children (coreutils' `sleep` may be a multicall binary that
+        // refuses to run under another name).
+        let fake_xclip = directory.join("xclip");
+        std::fs::copy("/bin/sh", &fake_xclip).expect("fake xclip");
+        let fifo = directory.join("fifo");
+        let _ = std::fs::remove_file(&fifo);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.arg("-c");
+        command.arg(format!(
+            "({} -c 'read line < {}' &) ; sleep 120",
+            fake_xclip.display(),
+            fifo.display()
+        ));
+        let mut child = pair.slave.spawn_command(command).expect("shell");
+        drop(pair.slave);
+        let supervisor = ProcessSupervisor::attach(child.process_id()).expect("supervisor");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let clipboard = loop {
+            let found = supervisor
+                .processes()
+                .into_iter()
+                .find(|p| p.name == "xclip");
+            if found.is_some() || Instant::now() > deadline {
+                break found.expect("the fake xclip should be in the session");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let background = supervisor.background_processes();
+        assert!(
+            !background.iter().any(|p| p.pid == clipboard.pid),
+            "xclip must not be offered for review: {background:?}"
+        );
+        assert!(
+            background.iter().any(|p| p.name == "sleep"),
+            "{background:?}"
+        );
+
+        supervisor.terminate();
+        assert!(supervisor.processes().iter().all(|p| p.leader));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
