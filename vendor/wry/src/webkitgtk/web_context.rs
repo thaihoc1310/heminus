@@ -46,6 +46,13 @@ impl WebContextImpl {
       }
       context_builder = context_builder.website_data_manager(&data_manager);
     }
+    // Heminus: WebKit sizes the web process's memory limit from system RAM,
+    // so its cache purges and GC under pressure never trigger on a desktop.
+    // A fixed budget lets the idle terminal webview hand memory back.
+    let mut pressure = webkit2gtk::MemoryPressureSettings::new();
+    // MB; relief starts at a third of it. 384 measured no lower than 512.
+    pressure.set_memory_limit(512);
+    context_builder = context_builder.memory_pressure_settings(&pressure);
     let context = context_builder.build();
 
     Self::create_context(context)
@@ -60,6 +67,9 @@ impl WebContextImpl {
   pub fn create_context(context: WebContext) -> Self {
     let automation = false;
     context.set_automation_allowed(automation);
+    // Heminus: one local page that never navigates has no use for the
+    // browser-sized page and resource caches.
+    context.set_cache_model(webkit2gtk::CacheModel::DocumentViewer);
 
     // e.g. wry 0.9.4
     let app_info = ApplicationInfo::new();

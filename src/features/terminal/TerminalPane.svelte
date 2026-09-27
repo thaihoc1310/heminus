@@ -307,6 +307,7 @@
   let lastCommandRequestId = "";
   let operatingSystemDetectionBuffer = "";
   let operatingSystemDetected = false;
+  let operatingSystemScannedBytes = 0;
   let zoomHint = $state<number | null>(null);
   let zoomHintTimer: number | null = null;
   let lastWheelZoomAt = 0;
@@ -512,6 +513,7 @@
     let sessionId: string | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let resizeFrame: number | null = null;
+    let ptyResizeTimer: number | null = null;
     let primarySelectionFrame: number | null = null;
     let primarySelectionWrite = Promise.resolve();
     let flushTimer: number | null = null;
@@ -521,6 +523,8 @@
     let fitAddon: FitAddon | null = null;
     let webLinksAddon: WebLinksAddon | null = null;
     let searchAddon: SearchAddon | null = null;
+    let webgl: WebglAddon | null = null;
+    let webglUnavailable = false;
     const shell = new ShellPromptState();
     // Herdr/tmux run their panes' shells inside one alternate screen, so the
     // prompt markers never reach us; remember that one was started instead.
@@ -648,15 +652,6 @@
         searchResultCount = result.resultCount;
       });
       terminal.open(container);
-      try {
-        // GPU rendering keeps full-screen redraws (Herdr, htop) smooth; xterm 6
-        // otherwise falls back to the much slower DOM renderer.
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        terminal.loadAddon(webgl);
-      } catch {
-        // No WebGL2 in this WebView: the DOM renderer still works.
-      }
       const imeTextarea = terminal.textarea;
       if (supportsPrimarySelection && imeTextarea) {
         imeTextarea.style.whiteSpace = "pre";
@@ -806,10 +801,11 @@
             const stripped = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
             operatingSystemDetectionBuffer = `${operatingSystemDetectionBuffer}${stripped}`.slice(-16_384);
             const detected = detectHostOperatingSystem(operatingSystemDetectionBuffer);
-            if (detected) {
-              rememberHostOperatingSystem(host.id, detected);
-              operatingSystemDetected = true;
-            }
+            if (detected) rememberHostOperatingSystem(host.id, detected);
+            // The login banner comes first; past it, keep scanning would cost
+            // a decode plus several 16 KB regex passes on every chunk.
+            operatingSystemScannedBytes += bytes.length;
+            if (detected || operatingSystemScannedBytes > 64 * 1024) operatingSystemDetected = true;
           }
         }
       };
@@ -1194,32 +1190,80 @@
         return true;
       });
 
+      // GPU rendering keeps full-screen redraws (Herdr, htop) smooth; xterm 6
+      // otherwise falls back to the much slower DOM renderer. Only visible
+      // panes hold a WebGL context: each one costs tens of MB in the web
+      // process, so hidden tabs give theirs back.
+      let webglCanvas: HTMLCanvasElement | undefined;
+      const attachWebgl = () => {
+        if (webgl || webglUnavailable || !terminal) return false;
+        try {
+          const before = new Set(terminal.element?.querySelectorAll("canvas"));
+          const addon = new WebglAddon();
+          addon.onContextLoss(() => {
+            addon.dispose();
+            if (webgl === addon) webgl = null;
+          });
+          terminal.loadAddon(addon);
+          webgl = addon;
+          webglCanvas = [...(terminal.element?.querySelectorAll("canvas") ?? [])]
+            .find((canvas) => !before.has(canvas));
+          return true;
+        } catch {
+          // No WebGL2 in this WebView: the DOM renderer still works.
+          webglUnavailable = true;
+          return false;
+        }
+      };
+      const detachWebgl = () => {
+        if (!webgl) return;
+        webgl.dispose();
+        webgl = null;
+        // dispose() only drops the canvas; the GL context and its buffers
+        // would otherwise live on until the next garbage collection.
+        webglCanvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+        webglCanvas = undefined;
+      };
       const syncTerminalSize = () => {
         if (resizeFrame !== null) return;
         resizeFrame = window.requestAnimationFrame(() => {
           resizeFrame = null;
-          if (!terminal || !fitAddon || !container.clientWidth || !container.clientHeight) return;
+          if (!terminal || !fitAddon) return;
+          if (!container.clientWidth || !container.clientHeight) {
+            detachWebgl();
+            return;
+          }
+          const shown = attachWebgl();
           fitAddon.fit();
-          // WebKitGTK shows a WebGL canvas that returns from display:none one
-          // draw behind, so output that arrived while the tab was hidden stays
-          // invisible until the next write. A second draw two frames later
-          // brings the screen up to date.
-          terminal.refresh(0, terminal.rows - 1);
-          window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-            terminal?.refresh(0, terminal.rows - 1);
-          }));
+          if (shown) {
+            // WebKitGTK shows a WebGL canvas that comes back from display:none
+            // one draw behind, so output that arrived while the tab was hidden
+            // stays invisible until the next write. A second draw two frames
+            // later brings the screen up to date. Plain resizes need neither.
+            terminal.refresh(0, terminal.rows - 1);
+            window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+              terminal?.refresh(0, terminal.rows - 1);
+            }));
+          }
           positionSuggestions();
-          if (
-            !sessionId ||
-            (terminal.rows === lastPtyRows && terminal.cols === lastPtyCols)
-          ) return;
-          lastPtyRows = terminal.rows;
-          lastPtyCols = terminal.cols;
-          void resizeTerminal(sessionId, terminal.rows, terminal.cols).catch(
-            (cause: unknown) => {
-              error = cause instanceof Error ? cause.message : String(cause);
-            }
-          );
+          // Each PTY resize is a SIGWINCH that makes the shell or a remote TUI
+          // redraw everything; a divider drag would send one per frame.
+          if (ptyResizeTimer !== null) window.clearTimeout(ptyResizeTimer);
+          ptyResizeTimer = window.setTimeout(() => {
+            ptyResizeTimer = null;
+            if (
+              !terminal ||
+              !sessionId ||
+              (terminal.rows === lastPtyRows && terminal.cols === lastPtyCols)
+            ) return;
+            lastPtyRows = terminal.rows;
+            lastPtyCols = terminal.cols;
+            void resizeTerminal(sessionId, terminal.rows, terminal.cols).catch(
+              (cause: unknown) => {
+                error = cause instanceof Error ? cause.message : String(cause);
+              }
+            );
+          }, 80);
         });
       };
       resizeObserver = new ResizeObserver(syncTerminalSize);
@@ -1240,6 +1284,7 @@
       if (ackTimer !== null) window.clearTimeout(ackTimer);
       if (flushTimer !== null) window.clearTimeout(flushTimer);
       if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+      if (ptyResizeTimer !== null) window.clearTimeout(ptyResizeTimer);
       if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
       if (zoomHintTimer !== null) window.clearTimeout(zoomHintTimer);
       resizeObserver?.disconnect();

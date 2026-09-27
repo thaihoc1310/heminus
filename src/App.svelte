@@ -2418,7 +2418,11 @@
   function registerTerminalSession(paneId: string, sessionId: string) {
     terminalSessionIds = { ...terminalSessionIds, [paneId]: sessionId };
     const tab = terminalTabs.find((candidate) => candidate.id === paneId);
-    if (tab) tab.resumeSessionId = sessionId;
+    if (!tab) return;
+    tab.resumeSessionId = sessionId;
+    // The pane has replayed the moved scrollback by now; holding the
+    // serialized copy would keep up to 5,000 lines alive per moved tab.
+    tab.snapshot = undefined;
   }
 
   function unregisterTerminalSession(paneId: string, sessionId: string | null) {

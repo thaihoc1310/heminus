@@ -56,6 +56,8 @@ impl Drop for TerminalSession {
 }
 
 const TERMINAL_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
+/// Replay capacity kept once the webview has acknowledged everything.
+const TERMINAL_REPLAY_IDLE_CAPACITY: usize = 64 * 1024;
 
 /// Replay is delivered in pieces so re-attaching never builds one huge message.
 const TERMINAL_REPLAY_CHUNK: usize = 256 * 1024;
@@ -418,11 +420,12 @@ fn publish_terminal_output(event_sink: &Arc<Mutex<TerminalEventSink>>, bytes: &[
     if sink.closed {
         return;
     }
+    // Trim before growing: extending first lets the buffer's capacity double
+    // past the limit, and a VecDeque never gives that capacity back.
+    let excess = (sink.replay.len() + bytes.len()).saturating_sub(TERMINAL_REPLAY_LIMIT);
+    let excess = excess.min(sink.replay.len());
+    sink.replay.drain(..excess);
     sink.replay.extend(bytes);
-    let excess = sink.replay.len().saturating_sub(TERMINAL_REPLAY_LIMIT);
-    if excess > 0 {
-        sink.replay.drain(..excess);
-    }
     // Keep sends under this lock so the checkpoint cannot overtake live output.
     if let Some(destination) = &sink.destination {
         if destination
@@ -470,6 +473,10 @@ fn acknowledge_output(sink: &mut TerminalEventSink, token: Uuid, bytes: usize) {
     sink.in_flight = sink.in_flight.saturating_sub(bytes);
     let replay = sink.stashed_replay.as_mut().unwrap_or(&mut sink.replay);
     replay.drain(..bytes.min(replay.len()));
+    // Once the webview has caught up, drop the room a burst left behind.
+    if replay.is_empty() && replay.capacity() > TERMINAL_REPLAY_IDLE_CAPACITY {
+        replay.shrink_to(TERMINAL_REPLAY_IDLE_CAPACITY);
+    }
     sink.wake.notify_all();
 }
 
@@ -1316,6 +1323,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(replay.len(), TERMINAL_REPLAY_LIMIT);
         assert!(replay.ends_with(b"tail"));
+    }
+
+    #[test]
+    fn the_replay_buffer_gives_back_room_once_everything_is_acknowledged() {
+        let (sink, _sent) = recording_sink();
+        let token = Uuid::new_v4();
+        sink.lock().unwrap().ack_token = Some(token);
+        let chunk = vec![b'o'; 16 * 1024];
+        let mut published = 0;
+        while published < 2 * TERMINAL_REPLAY_LIMIT {
+            publish_terminal_output(&sink, &chunk);
+            sink.lock().unwrap().in_flight = 0;
+            published += chunk.len();
+        }
+
+        let mut guard = sink.lock().unwrap();
+        // Trimming before growing keeps a full buffer from doubling its room.
+        assert!(guard.replay.capacity() <= TERMINAL_REPLAY_LIMIT + chunk.len());
+        acknowledge_output(&mut guard, token, TERMINAL_REPLAY_LIMIT);
+        assert!(guard.replay.capacity() <= TERMINAL_REPLAY_IDLE_CAPACITY);
     }
 
     #[test]

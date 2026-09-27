@@ -111,13 +111,12 @@ pub fn run() {
                     tracing::warn!("Could not configure Ctrl+Alt+H: {error}");
                 }
             }
+            // The main window is not created from the config ("create": false),
+            // so a terminal-only launch never spins up a web process for it.
             if open_local_terminal_only {
                 commands::build_local_terminal_window(app.handle(), initial_cwd.as_deref())?;
-                if let Some(main) = app.get_webview_window("main") {
-                    main.destroy()?;
-                }
-            } else if let Some(main) = app.get_webview_window("main") {
-                main.show()?;
+            } else {
+                commands::show_or_create_main_window(app.handle())?;
             }
             Ok(())
         })
