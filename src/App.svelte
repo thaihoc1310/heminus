@@ -249,6 +249,9 @@
   let terminalTabs = $state<TerminalTab[]>([]);
   let terminalToolsOpen = $state(false);
   let terminalToolsMounted = $state(false);
+  // In the layout only while fully open: sliding over the grid instead of
+  // squeezing it keeps the terminal reflow out of the animation.
+  let terminalToolsDocked = $state(false);
   let terminalFocusMode = $state(false);
   let terminalFocusChanging = false;
   let wasFullscreenBeforeFocus = false;
@@ -2450,6 +2453,10 @@
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         terminalToolsOpen = true;
+        terminalToolsCloseTimer = window.setTimeout(() => {
+          terminalToolsDocked = true;
+          terminalToolsCloseTimer = null;
+        }, 230);
       });
     });
   }
@@ -2460,6 +2467,7 @@
       window.clearTimeout(terminalToolsCloseTimer);
     }
     terminalToolsCloseTimer = window.setTimeout(() => {
+      terminalToolsDocked = false;
       terminalToolsMounted = false;
       terminalToolsCloseTimer = null;
     }, 230);
@@ -4164,6 +4172,7 @@
           <div
             class="terminal-tools-slot"
             class:open={terminalToolsOpen}
+            class:docked={terminalToolsDocked}
           >
             <TerminalToolsSidebar
               appearance={activeTerminalAppearance()}

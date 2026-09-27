@@ -1226,7 +1226,10 @@
       };
       const syncTerminalSize = () => {
         if (resizeFrame !== null) return;
-        resizeFrame = window.requestAnimationFrame(() => {
+        // A task, not an animation frame: fitting clears the WebGL canvas and
+        // xterm draws it again on the next frame. Fitting inside a frame
+        // would paint that frame blank; from a task the redraw lands in time.
+        resizeFrame = window.setTimeout(() => {
           resizeFrame = null;
           if (!terminal || !fitAddon) return;
           if (!container.clientWidth || !container.clientHeight) {
@@ -1234,16 +1237,19 @@
             return;
           }
           const shown = attachWebgl();
+          const fittedCols = terminal.cols;
+          const fittedRows = terminal.rows;
           fitAddon.fit();
-          if (shown) {
-            // WebKitGTK shows a WebGL canvas that comes back from display:none
-            // one draw behind, so output that arrived while the tab was hidden
-            // stays invisible until the next write. A second draw two frames
-            // later brings the screen up to date. Plain resizes need neither.
+          if (shown || terminal.cols !== fittedCols || terminal.rows !== fittedRows) {
+            // WebKitGTK presents a WebGL canvas one draw late after it is
+            // resized or comes back from display:none, so the first draw
+            // would leave the pane blank (or stale) until the next output.
+            // Drawing again right after it keeps that to a single frame.
             terminal.refresh(0, terminal.rows - 1);
-            window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            const redraw = terminal.onRender(() => {
+              redraw.dispose();
               terminal?.refresh(0, terminal.rows - 1);
-            }));
+            });
           }
           positionSuggestions();
           // Each PTY resize is a SIGWINCH that makes the shell or a remote TUI
@@ -1283,7 +1289,7 @@
       terminalTransfers.delete(paneId);
       if (ackTimer !== null) window.clearTimeout(ackTimer);
       if (flushTimer !== null) window.clearTimeout(flushTimer);
-      if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+      if (resizeFrame !== null) window.clearTimeout(resizeFrame);
       if (ptyResizeTimer !== null) window.clearTimeout(ptyResizeTimer);
       if (primarySelectionFrame !== null) window.cancelAnimationFrame(primarySelectionFrame);
       if (zoomHintTimer !== null) window.clearTimeout(zoomHintTimer);

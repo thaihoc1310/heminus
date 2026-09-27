@@ -3427,9 +3427,10 @@ select:focus-visible {
 }
 
 /* Only the panel's transform animates. Animating the slot's width would
-   refit every terminal (and resize its PTY) on each frame; instead the grid
-   changes size once: when the slot joins the layout on open, and when it
-   leaves it (overlaying the grid while it slides out) on close. */
+   refit every terminal (and resize its PTY) on each frame. The panel slides
+   over the grid and docks once it is in place, and undocks only after it
+   has slid out, so the one refit (a full scrollback reflow) happens outside
+   the animation. */
 .terminal-tools-slot {
   flex: 0 0 344px;
   width: 344px;
@@ -3439,7 +3440,7 @@ select:focus-visible {
   color: var(--terminal-tool-foreground);
 }
 
-.terminal-tools-slot:not(.open) {
+.terminal-tools-slot:not(.docked) {
   position: absolute;
   z-index: 90;
   inset: 0 0 0 auto;
