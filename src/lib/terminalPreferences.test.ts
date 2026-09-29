@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest";
+import { get } from "svelte/store";
 import {
   formatTerminalShortcut,
   matchesTerminalShortcut,
@@ -48,5 +50,28 @@ describe("terminal preferences shortcuts", () => {
     expect(normalizeSuggestionMinimumCharacters(0)).toBe(1);
     expect(normalizeSuggestionMinimumCharacters(4.6)).toBe(5);
     expect(normalizeSuggestionMinimumCharacters(20)).toBe(10);
+  });
+});
+
+describe("history suggestions shortcut", () => {
+  it("moves the old Ctrl+Shift+H default off the pane-focus chord", async () => {
+    localStorage.setItem(
+      "heminus-terminal-preferences",
+      JSON.stringify({ historySuggestionsShortcut: "Ctrl+Shift+H" })
+    );
+    vi.resetModules();
+    const preferences = await import("./terminalPreferences");
+    expect(get(preferences.terminalPreferences).historySuggestionsShortcut).toBe("Ctrl+Shift+S");
+    localStorage.clear();
+  });
+
+  it("refuses chords Heminus already uses and keeps custom ones", async () => {
+    vi.resetModules();
+    const preferences = await import("./terminalPreferences");
+    preferences.setHistorySuggestionsShortcut("Ctrl+Shift+L");
+    expect(get(preferences.terminalPreferences).historySuggestionsShortcut).toBe("Ctrl+Shift+S");
+    preferences.setHistorySuggestionsShortcut("Ctrl+Alt+Y");
+    expect(get(preferences.terminalPreferences).historySuggestionsShortcut).toBe("Ctrl+Alt+Y");
+    localStorage.clear();
   });
 });

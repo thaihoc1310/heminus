@@ -13,6 +13,7 @@
   import {
     formatTerminalShortcut,
     setHistorySuggestions,
+    isReservedTerminalShortcut,
     setHistorySuggestionsShortcut,
     setSuggestionMinimumCharacters,
     shortcutFromKeyboardEvent,
@@ -262,7 +263,8 @@
       return;
     }
     const shortcut = shortcutFromKeyboardEvent(event);
-    if (!shortcut) return;
+    // A chord Heminus already uses keeps the capture open for another try.
+    if (!shortcut || isReservedTerminalShortcut(shortcut)) return;
     setHistorySuggestionsShortcut(shortcut);
     capturingHistoryShortcut = false;
   }

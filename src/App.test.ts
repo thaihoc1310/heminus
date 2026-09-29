@@ -137,6 +137,25 @@ it("moves a pane out of its workspace and back with Move to…, and cycles tabs"
   expect(ipc.closeTerminal).not.toHaveBeenCalled();
 });
 
+it("moves focus between workspace panes with Ctrl+Shift+H/J/K/L", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const active = () =>
+    view.container.querySelector(".terminal-instance.active-pane")?.getAttribute("data-pane-id");
+  expect(active()).toBe("a");
+  // Whichever way the two panes split, right-then-down reaches b and
+  // left-then-up comes back to a.
+  for (const code of ["KeyL", "KeyJ"]) {
+    await fireEvent.keyDown(document.body, { key: code.at(-1), code, ctrlKey: true, shiftKey: true });
+  }
+  await waitFor(() => expect(active()).toBe("b"));
+  for (const code of ["KeyH", "KeyK"]) {
+    await fireEvent.keyDown(document.body, { key: code.at(-1), code, ctrlKey: true, shiftKey: true });
+  }
+  await waitFor(() => expect(active()).toBe("a"));
+  expect(view.queryByText("New tab")).toBeNull();
+});
+
 it("detaches the workspace from its context menu with both panes", async () => {
   const view = render(App);
   const workspace = await view.findByRole("group", { name: "Workspace terminal tab" });

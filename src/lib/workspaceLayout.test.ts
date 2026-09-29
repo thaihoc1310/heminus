@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  paneInDirection,
   layoutDividers,
   layoutRects,
   leafOrder,
@@ -98,5 +99,38 @@ describe("workspace layout", () => {
   it("ignores a malformed divider path instead of resizing the wrong split", () => {
     const layout = splitPane(splitPane(null, "a", null, "right"), "b", "a", "right");
     expect(setSplitRatio(layout, [7], 0.9)).toEqual(layout);
+  });
+});
+
+describe("paneInDirection", () => {
+  // a | b
+  //   | c
+  const rects = {
+    a: { left: 0, top: 0, width: 50, height: 100 },
+    b: { left: 50, top: 0, width: 50, height: 50 },
+    c: { left: 50, top: 50, width: 50, height: 50 }
+  };
+
+  it("moves to the pane on that side", () => {
+    expect(paneInDirection(rects, "a", "right")).toBe("b");
+    expect(paneInDirection(rects, "b", "down")).toBe("c");
+    expect(paneInDirection(rects, "c", "up")).toBe("b");
+    expect(paneInDirection(rects, "c", "left")).toBe("a");
+  });
+
+  it("stays put at an edge", () => {
+    expect(paneInDirection(rects, "a", "left")).toBeNull();
+    expect(paneInDirection(rects, "b", "up")).toBeNull();
+    expect(paneInDirection(rects, "b", "right")).toBeNull();
+  });
+
+  it("prefers the nearest overlapping pane over a closer-centred one beyond it", () => {
+    const wide = {
+      a: { left: 0, top: 0, width: 30, height: 50 },
+      b: { left: 30, top: 0, width: 30, height: 100 },
+      c: { left: 60, top: 0, width: 40, height: 50 }
+    };
+    expect(paneInDirection(wide, "a", "right")).toBe("b");
+    expect(paneInDirection(wide, "c", "left")).toBe("b");
   });
 });

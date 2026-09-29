@@ -238,3 +238,41 @@ function prune(
   if (!second) return first;
   return { ...layout, first, second };
 }
+
+export type PaneDirection = "left" | "right" | "up" | "down";
+
+/** The pane next to `current` in `direction`: the nearest one that lies
+ * entirely on that side, preferring those that overlap it across the axis. */
+export function paneInDirection(
+  rects: Record<string, PaneRect>,
+  current: string,
+  direction: PaneDirection
+): string | null {
+  const from = rects[current];
+  if (!from) return null;
+  const horizontal = direction === "left" || direction === "right";
+  let best: string | null = null;
+  let bestScore = Infinity;
+  for (const [id, rect] of Object.entries(rects)) {
+    if (id === current) continue;
+    const gap =
+      direction === "left" ? from.left - (rect.left + rect.width)
+      : direction === "right" ? rect.left - (from.left + from.width)
+      : direction === "up" ? from.top - (rect.top + rect.height)
+      : rect.top - (from.top + from.height);
+    // Layout percentages carry float noise; a touching edge is a gap of ~0.
+    if (gap < -0.01) continue;
+    const overlap = horizontal
+      ? Math.min(from.top + from.height, rect.top + rect.height) - Math.max(from.top, rect.top)
+      : Math.min(from.left + from.width, rect.left + rect.width) - Math.max(from.left, rect.left);
+    const offset = horizontal
+      ? Math.abs(rect.top + rect.height / 2 - (from.top + from.height / 2))
+      : Math.abs(rect.left + rect.width / 2 - (from.left + from.width / 2));
+    const score = gap * 1000 + (overlap > 0.01 ? 0 : 500) + offset;
+    if (score < bestScore) {
+      bestScore = score;
+      best = id;
+    }
+  }
+  return best;
+}

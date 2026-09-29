@@ -1245,14 +1245,18 @@
           if (event.type === "keydown") event.preventDefault();
           return false;
         }
-        // Ctrl+Tab / Ctrl+Shift+Tab switch tabs and Ctrl+Shift+E opens "Move
-        // to…" (window handler); xterm would otherwise send Tab / Ctrl+E.
+        // Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Ctrl+Shift+E opens "Move
+        // to…" and Ctrl+Shift+H/J/K/L move between panes (window handler).
+        // xterm would otherwise send Tab, Ctrl+E, or Ctrl+H/J/K/L, which
+        // the shell reads as backspace, Enter, kill-line and clear.
         if (
           event.ctrlKey &&
           !event.altKey &&
           !event.metaKey &&
           (event.key === "Tab" || event.code === "Tab" ||
-            (event.shiftKey && event.key.toLowerCase() === "e"))
+            (event.shiftKey &&
+              (event.key.toLowerCase() === "e" ||
+                ["KeyH", "KeyJ", "KeyK", "KeyL"].includes(event.code))))
         ) {
           if (event.type === "keydown") event.preventDefault();
           return false;

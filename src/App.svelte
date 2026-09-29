@@ -84,9 +84,11 @@
     layoutRects,
     leafOrder,
     normalizeLayout,
+    paneInDirection,
     removePane as removeLayoutPane,
     setSplitRatio,
-    splitPane
+    splitPane,
+    type PaneDirection
   } from "./lib/workspaceLayout";
   import { terminalTheme, terminalThemes } from "./lib/terminalThemes";
   import {
@@ -487,13 +489,20 @@
         event.preventDefault();
         toggleHistorySuggestions();
       }
-      if (event.ctrlKey && event.key.toLowerCase() === "k" && !insidePane) {
+      if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "k" && !insidePane) {
         event.preventDefault();
         void switchPage("new-tab");
       }
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "t") {
         event.preventDefault();
         void openTerminal();
+      }
+      const paneDirection = event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey
+        ? paneDirectionKeys[event.code]
+        : undefined;
+      if (paneDirection) {
+        event.preventDefault();
+        if (page === "terminal") focusPaneInDirection(paneDirection);
       }
       if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "Tab" || event.code === "Tab")) {
         event.preventDefault();
@@ -2021,6 +2030,29 @@
       event.preventDefault();
       void closeMovePicker(targets[movePicker.index] ?? null);
     }
+  }
+
+  /** Ctrl+Shift+H/J/K/L, vim-style; by key position, so any layout or IME. */
+  const paneDirectionKeys: Record<string, PaneDirection | undefined> = {
+    KeyH: "left",
+    KeyJ: "down",
+    KeyK: "up",
+    KeyL: "right"
+  };
+
+  function focusPaneInDirection(direction: PaneDirection) {
+    const workspace = activeWorkspace();
+    if (!workspace || !activeTerminalId) return;
+    const target = paneInDirection(layoutRects(workspace.layout), activeTerminalId, direction);
+    if (!target) return;
+    activateTerminalPane(target);
+    // A zoomed workspace shows one pane; follow focus to the next one.
+    if (workspace.focusedPaneId) workspace.focusedPaneId = target;
+    void tick().then(() =>
+      terminalGridElement?.querySelector<HTMLTextAreaElement>(
+        `[data-pane-id="${target}"] .xterm-helper-textarea`
+      )?.focus()
+    );
   }
 
   /** Ctrl+Tab / Ctrl+Shift+Tab: the next or previous terminal tab, in bar order. */

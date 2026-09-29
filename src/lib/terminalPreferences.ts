@@ -9,9 +9,31 @@ export interface TerminalPreferences {
 const storageKey = "heminus-terminal-preferences";
 const defaults: TerminalPreferences = {
   historySuggestions: true,
-  historySuggestionsShortcut: "Ctrl+Shift+H",
+  historySuggestionsShortcut: "Ctrl+Shift+S",
   suggestionMinimumCharacters: 2
 };
+
+/** Chords Heminus itself handles, which the history toggle must not take. */
+const reservedShortcuts = new Set([
+  // Ctrl+Shift+H/J/K/L move focus between workspace panes.
+  "Ctrl+Shift+H",
+  "Ctrl+Shift+J",
+  "Ctrl+Shift+K",
+  "Ctrl+Shift+L",
+  "Ctrl+Shift+T",
+  "Ctrl+Shift+E",
+  "Ctrl+Shift+B",
+  "Ctrl+Shift+C",
+  "Ctrl+Shift+V",
+  "Ctrl+Shift+F",
+  "Ctrl+Alt+J",
+  "Ctrl+Tab",
+  "Ctrl+Shift+Tab"
+]);
+
+export function isReservedTerminalShortcut(shortcut: string): boolean {
+  return reservedShortcuts.has(shortcut);
+}
 
 type ShortcutEvent = Pick<
   KeyboardEvent,
@@ -37,8 +59,11 @@ function load(): TerminalPreferences {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? "{}") as Partial<TerminalPreferences>;
     return {
       historySuggestions: saved.historySuggestions ?? defaults.historySuggestions,
+      // Ctrl+Shift+H used to be the default; it now moves to the left pane.
       historySuggestionsShortcut:
-        saved.historySuggestionsShortcut ?? defaults.historySuggestionsShortcut,
+        saved.historySuggestionsShortcut && !isReservedTerminalShortcut(saved.historySuggestionsShortcut)
+          ? saved.historySuggestionsShortcut
+          : defaults.historySuggestionsShortcut,
       suggestionMinimumCharacters: normalizeSuggestionMinimumCharacters(
         saved.suggestionMinimumCharacters ?? defaults.suggestionMinimumCharacters
       )
@@ -60,6 +85,7 @@ export function setHistorySuggestions(enabled: boolean) {
 }
 
 export function setHistorySuggestionsShortcut(shortcut: string) {
+  if (isReservedTerminalShortcut(shortcut)) return;
   terminalPreferences.update((current) => {
     if (current.historySuggestionsShortcut === shortcut) return current;
     const next = { ...current, historySuggestionsShortcut: shortcut };
