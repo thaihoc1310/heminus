@@ -2504,6 +2504,33 @@
     if (page !== "terminal" && terminalFocusMode) void toggleTerminalFocusMode();
   });
 
+  /**
+   * Tauri's drag region hands the pointer to the window manager on the first
+   * press, so on Linux the second click of a double-click never reaches the
+   * page and the header cannot maximize. Drag only once the pointer moves.
+   */
+  function startWindowDrag(event: PointerEvent) {
+    if (event.button !== 0 || !appWindow) return;
+    const current = appWindow;
+    const target = event.currentTarget as HTMLElement;
+    const { clientX, clientY, pointerId } = event;
+    target.setPointerCapture(pointerId);
+    const stop = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", stop);
+      target.removeEventListener("pointercancel", stop);
+      if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+    };
+    const move = (next: PointerEvent) => {
+      if (Math.hypot(next.clientX - clientX, next.clientY - clientY) < 4) return;
+      stop();
+      void current.startDragging();
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", stop);
+    target.addEventListener("pointercancel", stop);
+  }
+
   function toggleTerminalTools() {
     if (terminalToolsOpen) closeTerminalTools();
     else openTerminalTools();
@@ -3736,7 +3763,6 @@
       `--app-terminal-background:${theme.palette.background}`,
       `--app-terminal-header-foreground:${theme.chrome.headerForeground}`,
       `--app-terminal-header-muted:${theme.chrome.headerMuted}`,
-      `--app-terminal-header-border:${theme.chrome.headerBorder}`,
       `--app-terminal-header-hover:${theme.chrome.controlHover}`,
       `--app-terminal-header-active:${theme.chrome.activeBackground}`,
       `--app-terminal-header-accent:${theme.chrome.activeForeground}`
@@ -4002,7 +4028,12 @@
     <button class="add-tab" title="New tab" onclick={() => switchPage("new-tab")}>
       <Icon name="plus" />
     </button>
-    <div class="titlebar-space" data-tauri-drag-region></div>
+    <div
+      class="titlebar-space"
+      role="presentation"
+      onpointerdown={startWindowDrag}
+      ondblclick={() => void appWindow?.toggleMaximize()}
+    ></div>
     {#if page === "terminal" && activeTerminalId}
       <button
         class="title-icon"
@@ -4181,7 +4212,6 @@
               onrun={(command) => runInActiveTerminal(command, true)}
               onpaste={(command) => runInActiveTerminal(command, false)}
               onrunall={runInAllTerminals}
-              onclose={closeTerminalTools}
               onopenfull={() => {
                 closeTerminalTools();
                 void openSnippets();

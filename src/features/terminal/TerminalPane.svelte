@@ -284,6 +284,9 @@
   let commandInput = $state("");
   let suggestions = $state<TerminalSuggestion[]>([]);
   let suggestionIndex = $state(-1);
+  // What was typed before the arrows started previewing suggestions on the
+  // command line; the list and its highlights keep matching this.
+  let suggestionQuery = $state<string | null>(null);
   let suggestionStyle = $state("");
   let applySuggestion: ((command: string) => void) | null = null;
   let terminalApi: Terminal | null = null;
@@ -523,8 +526,6 @@
     let fitAddon: FitAddon | null = null;
     let webLinksAddon: WebLinksAddon | null = null;
     let searchAddon: SearchAddon | null = null;
-    let webgl: WebglAddon | null = null;
-    let webglUnavailable = false;
     const shell = new ShellPromptState();
     // Herdr/tmux run their panes' shells inside one alternate screen, so the
     // prompt markers never reach us; remember that one was started instead.
@@ -652,6 +653,17 @@
         searchResultCount = result.resultCount;
       });
       terminal.open(container);
+      try {
+        // GPU rendering keeps full-screen redraws (Herdr, htop) smooth; xterm 6
+        // otherwise falls back to the much slower DOM renderer. Every pane
+        // keeps its context: a WebGL canvas created when a hidden tab comes
+        // back paints nothing until the next redraw in WebKitGTK.
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        terminal.loadAddon(webgl);
+      } catch {
+        // No WebGL2 in this WebView: the DOM renderer still works.
+      }
       const imeTextarea = terminal.textarea;
       if (supportsPrimarySelection && imeTextarea) {
         imeTextarea.style.whiteSpace = "pre";
@@ -993,11 +1005,12 @@
       };
       commandHandlerVersion += 1;
       const positionSuggestions = () => {
-        if (!terminal || suggestions.length === 0) return;
+        // Previewing a suggestion moves the cursor; the list stays put.
+        if (!terminal || suggestions.length === 0 || suggestionQuery !== null) return;
         const cellWidth = container.clientWidth / Math.max(terminal.cols, 1);
         const cellHeight = container.clientHeight / Math.max(terminal.rows, 1);
         const width = Math.min(520, Math.max(290, container.clientWidth - 20));
-        const height = Math.min(suggestions.length, 7) * 42 + 42;
+        const height = Math.min(suggestions.length, 7) * 32 + 14;
         const cursorLeft = 10 + terminal.buffer.active.cursorX * cellWidth;
         const cursorTop = container.offsetTop + 8 + terminal.buffer.active.cursorY * cellHeight;
         const left = Math.max(10, Math.min(cursorLeft, container.clientWidth - width - 10));
@@ -1021,14 +1034,19 @@
           $terminalPreferences.suggestionMinimumCharacters
         );
         suggestionIndex = -1;
+        suggestionQuery = null;
         requestAnimationFrame(positionSuggestions);
       };
-      applySuggestion = (command: string) => {
+      const replaceCommandInput = (command: string) => {
         const erase = "\x7f".repeat([...commandInput].length);
         queueData(`${erase}${command}`);
         commandInput = command;
+      };
+      applySuggestion = (command: string) => {
+        replaceCommandInput(command);
         suggestions = [];
         suggestionIndex = -1;
+        suggestionQuery = null;
         terminal?.focus();
       };
       terminal.onData((data) => {
@@ -1070,11 +1088,15 @@
             const direction = data.endsWith("A") ? -1 : 1;
             const start = suggestionIndex < 0 ? (direction > 0 ? -1 : 0) : suggestionIndex;
             suggestionIndex = (start + direction + suggestions.length) % suggestions.length;
+            suggestionQuery ??= commandInput;
+            replaceCommandInput(suggestions[suggestionIndex].command);
             return;
           }
           if (data === "\x1b") {
+            if (suggestionQuery !== null) replaceCommandInput(suggestionQuery);
             suggestions = [];
             suggestionIndex = -1;
+            suggestionQuery = null;
             return;
           }
           if (data === "\t" || (data === "\r" && suggestionIndex >= 0)) {
@@ -1190,40 +1212,7 @@
         return true;
       });
 
-      // GPU rendering keeps full-screen redraws (Herdr, htop) smooth; xterm 6
-      // otherwise falls back to the much slower DOM renderer. Only visible
-      // panes hold a WebGL context: each one costs tens of MB in the web
-      // process, so hidden tabs give theirs back.
-      let webglCanvas: HTMLCanvasElement | undefined;
-      const attachWebgl = () => {
-        if (webgl || webglUnavailable || !terminal) return false;
-        try {
-          const before = new Set(terminal.element?.querySelectorAll("canvas"));
-          const addon = new WebglAddon();
-          addon.onContextLoss(() => {
-            addon.dispose();
-            if (webgl === addon) webgl = null;
-          });
-          terminal.loadAddon(addon);
-          webgl = addon;
-          webglCanvas = [...(terminal.element?.querySelectorAll("canvas") ?? [])]
-            .find((canvas) => !before.has(canvas));
-          return true;
-        } catch {
-          // No WebGL2 in this WebView: the DOM renderer still works.
-          webglUnavailable = true;
-          return false;
-        }
-      };
-      const detachWebgl = () => {
-        if (!webgl) return;
-        webgl.dispose();
-        webgl = null;
-        // dispose() only drops the canvas; the GL context and its buffers
-        // would otherwise live on until the next garbage collection.
-        webglCanvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
-        webglCanvas = undefined;
-      };
+      let hiddenSinceFit = false;
       const syncTerminalSize = () => {
         if (resizeFrame !== null) return;
         // A task, not an animation frame: fitting clears the WebGL canvas and
@@ -1233,10 +1222,11 @@
           resizeFrame = null;
           if (!terminal || !fitAddon) return;
           if (!container.clientWidth || !container.clientHeight) {
-            detachWebgl();
+            hiddenSinceFit = true;
             return;
           }
-          const shown = attachWebgl();
+          const shown = hiddenSinceFit;
+          hiddenSinceFit = false;
           const fittedCols = terminal.cols;
           const fittedRows = terminal.rows;
           fitAddon.fit();
@@ -1595,23 +1585,24 @@
     >
       <div class="terminal-suggestion-list">
         {#each suggestions as suggestion, index (`${suggestion.kind}:${suggestion.command}:${index}`)}
+          {@const selected = suggestionIndex === index || (suggestionIndex < 0 && index === 0)}
           <button
-            class:selected={suggestionIndex === index || (suggestionIndex < 0 && index === 0)}
+            class:selected
             role="option"
-            aria-selected={suggestionIndex === index || (suggestionIndex < 0 && index === 0)}
+            aria-selected={selected}
             onclick={() => chooseSuggestion(index)}
           >
             <span class="suggestion-kind">
-              <Icon name={suggestion.kind === "snippet" ? "code" : "clock"} size={17} />
+              <Icon name={suggestion.kind === "snippet" ? "code" : "clock"} size={15} />
             </span>
-            <span class="suggestion-copy">
-              <strong>
-                {#each highlightedCommand(suggestion.command, commandInput) as part}
-                  {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
-                {/each}
-              </strong>
-              <small>{suggestion.kind === "snippet" ? `Snippet · ${suggestion.detail}` : suggestion.detail}</small>
+            <span class="suggestion-command">
+              {#each highlightedCommand(suggestion.command, suggestionQuery ?? commandInput) as part}
+                {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
+              {/each}
             </span>
+            {#if selected}
+              <span class="suggestion-enter" aria-hidden="true"><Icon name="enter" size={14} /></span>
+            {/if}
           </button>
         {/each}
       </div>

@@ -188,7 +188,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 15px;
   background: white;
-  box-shadow: 0 24px 70px #1018204d;
 }
 
 .app-dialog-form {
@@ -447,7 +446,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 11px;
   background: white;
-  box-shadow: 0 16px 42px #17212a26;
 }
 
 .custom-select-menu > button {
@@ -577,7 +575,6 @@ select:focus-visible {
 }
 
 .application.terminal-focus > .titlebar,
-.application.terminal-focus .terminal-tools-slot,
 .application.terminal-focus .workspace-pane-header {
   display: none;
 }
@@ -636,7 +633,6 @@ select:focus-visible {
 .application.single-terminal-surface .titlebar {
   color: var(--app-terminal-header-foreground, #dce0ec);
   background: var(--app-terminal-background, var(--nav));
-  box-shadow: inset 0 -1px var(--app-terminal-header-border, transparent);
 }
 
 .titlebar button {
@@ -949,7 +945,6 @@ select:focus-visible {
       var(--drag-tab-active, #ffffff12)
     ),
     var(--drag-tab-background, #1e2228);
-  box-shadow: 0 12px 32px #0000004d;
   pointer-events: none;
   animation: top-tab-drag-preview-in 100ms ease-out both;
 }
@@ -1210,7 +1205,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 15px;
   background: #fbfcfd;
-  box-shadow: 0 18px 48px #17212a2b;
 }
 
 .tag-filter-search {
@@ -1654,7 +1648,6 @@ select:focus-visible {
   border: 1px solid transparent;
   border-radius: var(--radius-lg);
   background: var(--card);
-  box-shadow: 0 1px 2px #18212a08;
   cursor: pointer;
   transition:
     border-color 120ms ease,
@@ -1716,7 +1709,6 @@ select:focus-visible {
   border: 1px solid #dce3e6;
   border-radius: 13px;
   background: #f8fafb;
-  box-shadow: 0 18px 45px #17212a2b;
 }
 
 .host-context-menu.submenu-left .context-submenu-panel {
@@ -1843,7 +1835,6 @@ select:focus-visible {
 
 .host-card:hover {
   border-color: #ccd6da;
-  box-shadow: 0 5px 18px #18212a0d;
   transform: translateY(-1px);
 }
 
@@ -2056,7 +2047,6 @@ select:focus-visible {
   border: 1px solid #dfe5e8;
   border-radius: 14px;
   background: white;
-  box-shadow: 0 16px 42px #1c2a341f;
 }
 
 .host-editor-menu button {
@@ -2267,7 +2257,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 11px;
   background: #f7f9fa;
-  box-shadow: 0 10px 28px #17212a14;
 }
 
 .host-tag-editor-menu > button {
@@ -2720,7 +2709,6 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   background: #edf2f4;
-  box-shadow: -12px 0 34px #17222d1f;
   animation: host-subeditor-in 180ms cubic-bezier(0.22, 0.75, 0.28, 1) backwards;
 }
 
@@ -3074,7 +3062,6 @@ select:focus-visible {
 .chain-picker > button:hover,
 .chain-picker > button.selected {
   background: white;
-  box-shadow: 0 1px 4px #17222d10;
 }
 
 .chain-picker > button > span:nth-child(2),
@@ -3436,6 +3423,7 @@ select:focus-visible {
   width: 344px;
   min-width: 0;
   min-height: 0;
+  padding: 4px 8px 8px 0;
   overflow: hidden;
   color: var(--terminal-tool-foreground);
 }
@@ -3451,14 +3439,21 @@ select:focus-visible {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: 344px;
-  min-width: 344px;
+  /* Softer than the theme's own border: the panel separates by surface,
+     not by lines. */
+  --terminal-tool-border: color-mix(in srgb, var(--terminal-tool-foreground) 8%, transparent);
+  --terminal-tool-card: color-mix(in srgb, var(--terminal-tool-foreground) 4%, transparent);
+  --terminal-tool-hover: color-mix(in srgb, var(--terminal-tool-foreground) 7%, transparent);
+  --terminal-tool-active: color-mix(in srgb, var(--terminal-tool-foreground) 10%, transparent);
+  width: 336px;
+  min-width: 336px;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   color: var(--terminal-tool-foreground);
-  background: var(--terminal-tool-background);
-  border-left: 1px solid var(--terminal-tool-border);
-  transform: translateX(100%);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--terminal-tool-background) 97%, var(--terminal-tool-foreground));
+  transform: translateX(calc(100% + 12px));
   transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -3471,8 +3466,7 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   min-width: 0;
-  padding: 6px 9px 6px 12px;
-  border-bottom: 1px solid var(--terminal-tool-border);
+  padding: 8px 8px 2px;
 }
 
 .terminal-tools-header nav {
@@ -3498,7 +3492,6 @@ select:focus-visible {
 
 .terminal-tools-header nav button:hover,
 .terminal-tools-header nav button.active,
-.terminal-tools-close:hover,
 .terminal-tool-icon:hover,
 .terminal-tool-icon.active {
   color: var(--terminal-tool-foreground);
@@ -3521,8 +3514,7 @@ select:focus-visible {
   align-items: center;
   gap: 7px;
   min-width: 0;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--terminal-tool-border);
+  padding: 8px;
 }
 
 .terminal-tool-primary {
@@ -3536,14 +3528,14 @@ select:focus-visible {
   color: var(--terminal-tool-foreground);
   font-size: 12px;
   font-weight: 700;
-  border: 1px solid var(--terminal-tool-border);
+  border: 0;
   border-radius: 9px;
-  background: var(--terminal-tool-active);
+  background: var(--terminal-tool-hover);
   cursor: pointer;
 }
 
 .terminal-tool-primary:hover {
-  border-color: var(--terminal-tool-accent);
+  background: var(--terminal-tool-active);
 }
 
 .terminal-tool-primary:disabled {
@@ -3560,13 +3552,14 @@ select:focus-visible {
   height: 34px;
   padding: 0 9px;
   color: var(--terminal-tool-muted);
-  border: 1px solid var(--terminal-tool-border);
+  border: 0;
   border-radius: 9px;
-  background: color-mix(in srgb, var(--terminal-tool-card) 75%, transparent);
+  background: var(--terminal-tool-card);
 }
 
 .terminal-tool-search:focus-within {
-  border-color: color-mix(in srgb, var(--terminal-tool-accent) 55%, var(--terminal-tool-border));
+  background: var(--terminal-tool-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--terminal-tool-accent) 45%, transparent);
 }
 
 .terminal-tool-search input {
@@ -3606,8 +3599,7 @@ select:focus-visible {
   padding: 6px;
   border: 1px solid var(--terminal-tool-border);
   border-radius: 11px;
-  background: var(--terminal-tool-card);
-  box-shadow: 0 14px 36px #0008;
+  background: color-mix(in srgb, var(--terminal-tool-background) 88%, var(--terminal-tool-foreground));
 }
 
 .terminal-tool-popover button {
@@ -3647,8 +3639,8 @@ select:focus-visible {
 .terminal-tools-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  margin-right: 12px;
-  padding: 12px;
+  margin-right: 4px;
+  padding: 4px 4px 8px 8px;
   overflow: auto;
   --scrollbar-thumb: var(--terminal-scrollbar, var(--terminal-tool-muted));
   --scrollbar-thumb-hover: var(--terminal-scrollbar-hover, var(--terminal-tool-muted));
@@ -3659,9 +3651,8 @@ select:focus-visible {
 .terminal-snippet-editor {
   display: grid;
   gap: 8px;
-  margin: 10px 12px 0;
+  margin: 4px 8px 0;
   padding: 11px;
-  border: 1px solid var(--terminal-tool-border);
   border-radius: 12px;
   background: var(--terminal-tool-card);
 }
@@ -3685,10 +3676,10 @@ select:focus-visible {
   padding: 8px 10px;
   color: var(--terminal-tool-foreground);
   caret-color: var(--terminal-tool-accent);
-  border: 1px solid var(--terminal-tool-border);
+  border: 1px solid transparent;
   border-radius: 8px;
   outline: 0;
-  background: color-mix(in srgb, var(--terminal-tool-background) 82%, transparent);
+  background: var(--terminal-tool-hover);
   box-shadow: none;
 }
 
@@ -3711,21 +3702,22 @@ select:focus-visible {
 
 .terminal-command-list {
   display: grid;
-  gap: 8px;
+  gap: 2px;
 }
 
 .terminal-command-card {
   display: grid;
-  gap: 7px;
+  gap: 4px;
   min-width: 0;
-  padding: 11px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  background: var(--terminal-tool-card);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: transparent;
+  transition: background-color 100ms ease;
 }
 
-.terminal-command-card:hover {
-  border-color: var(--terminal-tool-border);
+.terminal-command-card:hover,
+.terminal-command-card:focus-within {
+  background: var(--terminal-tool-hover);
 }
 
 .terminal-command-heading {
@@ -3753,7 +3745,7 @@ select:focus-visible {
 .terminal-command-card code {
   display: block;
   overflow: hidden;
-  color: var(--terminal-tool-foreground);
+  color: var(--terminal-tool-muted);
   font-size: 11px;
   line-height: 1.45;
   text-overflow: ellipsis;
@@ -3784,18 +3776,18 @@ select:focus-visible {
 }
 
 .terminal-command-actions button {
-  height: 28px;
+  height: 24px;
   padding: 0 9px;
   color: var(--terminal-tool-foreground);
   font-size: 11px;
-  border: 1px solid var(--terminal-tool-border);
+  border: 0;
   border-radius: 7px;
   background: var(--terminal-tool-active);
   cursor: pointer;
 }
 
 .terminal-command-actions button:hover {
-  border-color: var(--terminal-tool-accent);
+  background: color-mix(in srgb, var(--terminal-tool-foreground) 16%, transparent);
 }
 
 .terminal-tools-empty {
@@ -3824,13 +3816,32 @@ select:focus-visible {
 }
 
 .history-list {
-  gap: 6px;
+  gap: 2px;
 }
 
 .history-card {
-  grid-template-columns: minmax(0, 1fr) auto;
+  position: relative;
   align-items: center;
-  min-height: 48px;
+  min-height: 36px;
+}
+
+.history-card code {
+  color: var(--terminal-tool-foreground);
+}
+
+/* Over the end of the row rather than beside it, so a hidden pair of
+   buttons does not cut every command short. */
+.history-card .terminal-command-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  padding-left: 18px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--terminal-tool-background) 91%, var(--terminal-tool-foreground)) 18px
+  );
+  transform: translateY(-50%);
 }
 
 .appearance-scroll {
@@ -3875,7 +3886,7 @@ select:focus-visible {
   padding: 9px 10px;
   color: var(--terminal-tool-foreground);
   text-align: left;
-  border: 1px solid var(--terminal-tool-border);
+  border: 0;
   border-radius: 11px;
   background: var(--terminal-tool-card);
 }
@@ -4003,7 +4014,6 @@ select:focus-visible {
   display: grid;
   gap: 8px;
   padding-bottom: 14px;
-  border-bottom: 1px solid var(--terminal-tool-border);
 }
 
 .terminal-appearance-heading,
@@ -4036,7 +4046,6 @@ select:focus-visible {
 
 .terminal-text-size {
   padding: 14px 0;
-  border-bottom: 1px solid var(--terminal-tool-border);
 }
 
 .terminal-text-size-copy {
@@ -4180,7 +4189,6 @@ select:focus-visible {
   border: 1px solid var(--terminal-tool-border, #ffffff1c);
   border-radius: 12px;
   background: var(--terminal-tool-card, #1e2530);
-  box-shadow: 0 18px 48px #0009;
 }
 
 .terminal-snippet-context button {
@@ -4702,7 +4710,6 @@ select:focus-visible {
   border: 1px solid var(--terminal-header-border, #30363d);
   border-radius: 10px;
   background: var(--terminal-header-background, #181c21);
-  box-shadow: 0 10px 28px #00000052;
   animation: terminal-search-in 120ms ease-out both;
 }
 
@@ -4948,92 +4955,87 @@ select:focus-visible {
 }
 
 .terminal-suggestions {
+  --suggestion-ink: var(--terminal-foreground, #c9d1d9);
   position: absolute;
   z-index: 70;
   overflow: hidden;
-  color: var(--terminal-foreground, #c9d1d9);
-  border: 1px solid var(--terminal-header-border, #30363d);
-  border-radius: 17px;
-  background: var(--terminal-background, #1e2228);
-  box-shadow: 0 16px 48px #00000066;
-  backdrop-filter: blur(12px);
+  color: var(--suggestion-ink);
+  border: 1px solid color-mix(in srgb, var(--suggestion-ink) 7%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--terminal-background, #1e2228) 90%, var(--suggestion-ink));
   animation: terminal-suggestions-in 110ms ease-out both;
 }
 
 @keyframes terminal-suggestions-in {
   from {
     opacity: 0;
-    transform: translateY(5px) scale(0.985);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 
 .terminal-suggestion-list {
-  max-height: 294px;
+  max-height: 238px;
   overflow: auto;
-  padding: 8px;
+  padding: 7px;
+  scrollbar-width: none;
 }
 
 .terminal-suggestion-list > button {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   width: 100%;
-  min-height: 42px;
-  padding: 5px 9px;
+  height: 32px;
+  padding: 0 4px 0 10px;
   color: inherit;
   text-align: left;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   cursor: pointer;
 }
 
-.terminal-suggestion-list > button:hover,
+.terminal-suggestion-list > button:hover {
+  background: color-mix(in srgb, var(--suggestion-ink) 5%, transparent);
+}
+
 .terminal-suggestion-list > button.selected {
-  background: var(--terminal-control-hover, #ffffff12);
+  background: color-mix(in srgb, var(--suggestion-ink) 9%, transparent);
 }
 
 .suggestion-kind {
   display: grid;
-  width: 30px;
-  height: 30px;
   place-items: center;
-  color: var(--terminal-active-foreground, #79c0ff);
+  color: color-mix(in srgb, var(--suggestion-ink) 72%, transparent);
 }
 
-.suggestion-copy {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.suggestion-copy strong,
-.suggestion-copy small {
+.suggestion-command {
   overflow: hidden;
+  font-family: "JetBrains Mono", "Ubuntu Mono", monospace;
+  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.suggestion-copy strong {
-  font-family: "JetBrains Mono", "Ubuntu Mono", monospace;
-  font-size: 13px;
-  font-weight: 400;
+.suggestion-command mark {
+  color: inherit;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--suggestion-ink) 16%, transparent);
 }
 
-.suggestion-copy small {
-  color: var(--terminal-header-muted, #8b949e);
-  font-size: 9px;
-}
-
-.suggestion-copy mark {
-  padding: 2px 1px;
-  color: var(--terminal-foreground, #c9d1d9);
-  background: var(--terminal-selection, #264f7866);
+.suggestion-enter {
+  display: grid;
+  width: 26px;
+  height: 24px;
+  place-items: center;
+  color: color-mix(in srgb, var(--suggestion-ink) 80%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--suggestion-ink) 10%, transparent);
 }
 
 .sftp-page {
@@ -5133,7 +5135,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 14px;
   background: #fbfcfd;
-  box-shadow: 0 18px 48px #17212a2b;
 }
 
 .left-source-menu > label {
@@ -5241,7 +5242,6 @@ select:focus-visible {
   border: 1px solid #dce3e6;
   border-radius: 12px;
   background: #f9fbfb;
-  box-shadow: 0 16px 38px #17212a26;
 }
 
 .file-actions-menu button {
@@ -5537,7 +5537,6 @@ select:focus-visible {
   border-radius: 14px;
   background: #eef8ffed;
   pointer-events: none;
-  box-shadow: 0 8px 28px #186ca820;
 }
 
 .file-drop-overlay strong {
@@ -5566,7 +5565,6 @@ select:focus-visible {
   border: 1px solid #cfd9de;
   border-radius: 6px;
   background: #fbfcfd;
-  box-shadow: 0 12px 30px #17212a33;
   pointer-events: none;
 }
 
@@ -5587,7 +5585,6 @@ select:focus-visible {
   border: 1px solid #dce3e6;
   border-radius: 13px;
   background: #fbfcfd;
-  box-shadow: 0 18px 46px #17212a33;
 }
 
 .file-context-menu button {
@@ -5646,7 +5643,6 @@ select:focus-visible {
   border: 1px solid #dce4e7;
   border-radius: 16px;
   background: white;
-  box-shadow: 0 26px 80px #10182059;
 }
 
 .permission-editor > header {
@@ -5764,7 +5760,6 @@ select:focus-visible {
   height: 17px;
   border-radius: 50%;
   background: white;
-  box-shadow: 0 1px 4px #25313b40;
   transition: transform 140ms ease;
 }
 
@@ -6091,7 +6086,6 @@ select:focus-visible {
   padding: 9px 14px;
   border-top: 1px solid #dbe3e6;
   background: #fbfcfd;
-  box-shadow: 0 -8px 24px #17212a0d;
 }
 
 .transfer-job-icon {
@@ -6279,7 +6273,6 @@ select:focus-visible {
   border: 1px solid #ccd6da;
   border-radius: 13px;
   background: #e2e8ea;
-  box-shadow: 0 1px 2px #18212a0a;
 }
 
 .command-search input {
@@ -6291,7 +6284,6 @@ select:focus-visible {
 
 .command-search:focus-within {
   border-color: #b9c6cb;
-  box-shadow: 0 1px 3px #18212a12;
 }
 
 .command-search input:focus,
@@ -6473,7 +6465,6 @@ select:focus-visible {
   border: 1px solid #dde5e8;
   border-radius: 14px;
   background: white;
-  box-shadow: 0 16px 42px #1c2a3424;
 }
 
 .host-create-dropdown {
@@ -6777,7 +6768,6 @@ select:focus-visible {
 
 .forwarding-card.running-card .forwarding-kind-icon {
   background: #278fe8;
-  box-shadow: 0 5px 14px #278fe833;
 }
 
 .favorite-dot,
@@ -7078,7 +7068,6 @@ select:focus-visible {
 
 .known-host-card:hover {
   border-color: #ccd8dd;
-  box-shadow: 0 5px 18px #18212a0b;
 }
 
 .known-host-card-main {
@@ -7429,7 +7418,6 @@ select:focus-visible {
     inset: 36px 0 0 auto;
     display: grid;
     width: min(420px, 100%);
-    box-shadow: -18px 0 50px #17222d26;
   }
 
   .manager-inspector {
@@ -7504,13 +7492,9 @@ select:focus-visible {
     width: min(320px, calc(100vw - 44px));
   }
 
-  .terminal-tools-slot.open {
-    box-shadow: -14px 0 34px #00000036;
-  }
-
   .terminal-tools-panel {
-    width: min(320px, calc(100vw - 44px));
-    min-width: min(320px, calc(100vw - 44px));
+    width: 100%;
+    min-width: 0;
   }
 
   .sftp-split {

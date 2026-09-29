@@ -28,7 +28,6 @@
     onrun,
     onpaste,
     onrunall,
-    onclose,
     onopenfull,
     oncatalogchange = () => {}
   }: {
@@ -38,7 +37,6 @@
     onrun: (command: string) => void;
     onpaste: (command: string) => void;
     onrunall: (command: string) => void;
-    onclose: () => void;
     onopenfull: () => void;
     oncatalogchange?: (snippets: Snippet[]) => void;
   } = $props();
@@ -308,9 +306,6 @@
         onclick={() => setSection("config")}
       ><Icon name="appearance" size={18} /></button>
     </nav>
-    <button class="terminal-tools-close" title="Close terminal tools" onclick={onclose}>
-      <Icon name="close" size={16} />
-    </button>
   </header>
 
   {#if section === "snippets"}
