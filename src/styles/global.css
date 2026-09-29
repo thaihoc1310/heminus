@@ -574,9 +574,13 @@ select:focus-visible {
   grid-template-rows: minmax(0, 1fr);
 }
 
-.application.terminal-focus > .titlebar,
-.application.terminal-focus .workspace-pane-header {
+.application.terminal-focus > .titlebar {
   display: none;
+}
+
+/* Below the pane headers, whose controls sit at their right end. */
+.application:has(.terminal-grid.split-workspace) .terminal-focus-exit {
+  top: 42px;
 }
 
 .terminal-focus-exit {
@@ -619,7 +623,7 @@ select:focus-visible {
 }
 
 .titlebar.pane-extract-target {
-  box-shadow: inset 0 -3px var(--app-terminal-header-accent, #268be3);
+  box-shadow: inset 0 -3px var(--terminal-accent, #268be3);
 }
 
 .application.detached-window .top-tabs {
@@ -805,7 +809,7 @@ select:focus-visible {
   content: "";
   pointer-events: none;
   border-radius: 999px;
-  background: var(--app-terminal-header-accent, #d8c89d);
+  background: var(--terminal-accent, #d8c89d);
 }
 
 .top-tabs [data-top-tab-id].drop-before::before {
@@ -1709,6 +1713,27 @@ select:focus-visible {
   border: 1px solid #dce3e6;
   border-radius: 13px;
   background: #f8fafb;
+}
+
+/* A terminal tab's menu wears that tab's theme instead of the vault's. */
+.host-context-menu.terminal-context-menu,
+.host-context-menu.terminal-context-menu .context-submenu-panel {
+  color: var(--menu-foreground);
+  border-color: color-mix(in srgb, var(--menu-foreground) 10%, transparent);
+  background: color-mix(in srgb, var(--menu-background) 92%, var(--menu-foreground));
+}
+
+.host-context-menu.terminal-context-menu button:hover,
+.host-context-menu.terminal-context-menu button:focus-visible {
+  background: color-mix(in srgb, var(--menu-foreground) 9%, transparent);
+}
+
+.host-context-menu.terminal-context-menu button > svg {
+  color: var(--menu-muted);
+}
+
+.host-context-menu.terminal-context-menu .context-separator {
+  background: color-mix(in srgb, var(--menu-foreground) 10%, transparent);
 }
 
 .host-context-menu.submenu-left .context-submenu-panel {
@@ -3418,12 +3443,16 @@ select:focus-visible {
    over the grid and docks once it is in place, and undocks only after it
    has slid out, so the one refit (a full scrollback reflow) happens outside
    the animation. */
+/* Text follows the terminal's size (Ctrl -/+); the width is the person's,
+   dragged at the panel's left edge, and never more than 60% of the window. */
 .terminal-tools-slot {
-  flex: 0 0 344px;
-  width: 344px;
+  --tools-panel-width: min(var(--tools-width, 336px), 60vw);
+  position: relative;
+  flex: 0 0 calc(var(--tools-panel-width) + 8px);
+  width: calc(var(--tools-panel-width) + 8px);
   min-width: 0;
   min-height: 0;
-  padding: 4px 8px 8px 0;
+  padding: 6px 8px 6px 0;
   overflow: hidden;
   color: var(--terminal-tool-foreground);
 }
@@ -3445,12 +3474,13 @@ select:focus-visible {
   --terminal-tool-card: color-mix(in srgb, var(--terminal-tool-foreground) 4%, transparent);
   --terminal-tool-hover: color-mix(in srgb, var(--terminal-tool-foreground) 7%, transparent);
   --terminal-tool-active: color-mix(in srgb, var(--terminal-tool-foreground) 10%, transparent);
-  width: 336px;
-  min-width: 336px;
+  width: var(--tools-panel-width);
+  min-width: var(--tools-panel-width);
   height: 100%;
   min-height: 0;
   overflow: hidden;
   color: var(--terminal-tool-foreground);
+  font-size: calc(12px * var(--tools-scale, 1));
   border-radius: 14px;
   background: color-mix(in srgb, var(--terminal-tool-background) 97%, var(--terminal-tool-foreground));
   transform: translateX(calc(100% + 12px));
@@ -3459,6 +3489,35 @@ select:focus-visible {
 
 .terminal-tools-slot.open .terminal-tools-panel {
   transform: translateX(0);
+}
+
+.terminal-tools-resize {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.terminal-tools-resize::after {
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 1px;
+  width: 2px;
+  content: "";
+  border-radius: 999px;
+  background: var(--terminal-accent, var(--terminal-tool-accent));
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.terminal-tools-resize:hover::after,
+.terminal-tools-resize.active::after {
+  opacity: 0.8;
 }
 
 .terminal-tools-header {
@@ -3526,7 +3585,7 @@ select:focus-visible {
   height: 34px;
   padding: 0 11px;
   color: var(--terminal-tool-foreground);
-  font-size: 12px;
+  font-size: calc(12px * var(--tools-scale, 1));
   font-weight: 700;
   border: 0;
   border-radius: 9px;
@@ -3661,7 +3720,7 @@ select:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: calc(12px * var(--tools-scale, 1));
 }
 
 .terminal-snippet-editor-heading button {
@@ -3737,7 +3796,7 @@ select:focus-visible {
 
 .terminal-command-heading strong {
   overflow: hidden;
-  font-size: 12px;
+  font-size: calc(12px * var(--tools-scale, 1));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3746,7 +3805,7 @@ select:focus-visible {
   display: block;
   overflow: hidden;
   color: var(--terminal-tool-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3755,7 +3814,7 @@ select:focus-visible {
 .terminal-command-card small {
   overflow: hidden;
   color: var(--terminal-tool-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--tools-scale, 1));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3779,7 +3838,7 @@ select:focus-visible {
   height: 24px;
   padding: 0 9px;
   color: var(--terminal-tool-foreground);
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
   border: 0;
   border-radius: 7px;
   background: var(--terminal-tool-active);
@@ -3802,12 +3861,12 @@ select:focus-visible {
 
 .terminal-tools-empty strong {
   color: var(--terminal-tool-foreground);
-  font-size: 12px;
+  font-size: calc(12px * var(--tools-scale, 1));
 }
 
 .terminal-tools-empty span {
   max-width: 230px;
-  font-size: 10px;
+  font-size: calc(10px * var(--tools-scale, 1));
   line-height: 1.45;
 }
 
@@ -3867,12 +3926,12 @@ select:focus-visible {
 }
 
 .terminal-config-section > header strong {
-  font-size: 12px;
+  font-size: calc(12px * var(--tools-scale, 1));
 }
 
 .terminal-config-section > header small {
   color: var(--terminal-tool-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--tools-scale, 1));
   line-height: 1.4;
 }
 
@@ -3941,12 +4000,12 @@ select:focus-visible {
 }
 
 .terminal-config-copy strong {
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
 }
 
 .terminal-config-copy small {
   color: var(--terminal-tool-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--tools-scale, 1));
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -4022,7 +4081,7 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   color: var(--terminal-tool-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
   font-weight: 600;
 }
 
@@ -4055,7 +4114,7 @@ select:focus-visible {
 
 .terminal-text-size-copy small {
   color: var(--terminal-tool-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--tools-scale, 1));
   font-weight: 500;
 }
 
@@ -4078,13 +4137,13 @@ select:focus-visible {
 }
 
 .terminal-text-size button {
-  font-size: 18px;
+  font-size: calc(18px * var(--tools-scale, 1));
   cursor: pointer;
 }
 
 .terminal-text-size output {
   width: 42px;
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
 }
 
 .theme-section {
@@ -4135,12 +4194,12 @@ select:focus-visible {
 }
 
 .terminal-sidebar-themes strong {
-  font-size: 11px;
+  font-size: calc(11px * var(--tools-scale, 1));
 }
 
 .terminal-sidebar-themes small {
   color: var(--terminal-tool-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--tools-scale, 1));
 }
 
 .terminal-sidebar-theme-preview {
@@ -4188,7 +4247,8 @@ select:focus-visible {
   color: var(--terminal-tool-foreground, #eef2f6);
   border: 1px solid var(--terminal-tool-border, #ffffff1c);
   border-radius: 12px;
-  background: var(--terminal-tool-card, #1e2530);
+  /* Opaque: inside the panel the card color is a translucent tint. */
+  background: color-mix(in srgb, var(--terminal-tool-background, #1e2530) 90%, var(--terminal-tool-foreground, #eef2f6));
 }
 
 .terminal-snippet-context button {
@@ -4249,9 +4309,11 @@ select:focus-visible {
   user-select: text;
 }
 
+/* Panes separate by a hairline in the theme's own colors; a fixed grey
+   backdrop showed through the rounded corners. */
 .terminal-grid.split-workspace {
   overflow: hidden;
-  background: #3a3e44;
+  background: var(--terminal-tool-background, #17191c);
 }
 
 .terminal-grid.resizing-workspace {
@@ -4268,14 +4330,13 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 4px solid #17191c;
-  border-radius: 12px;
-  box-shadow: inset 0 0 0 1px transparent;
-  transition: box-shadow 100ms ease;
+  border: 1px solid color-mix(in srgb, var(--terminal-tool-foreground, #c9d1d9) 10%, transparent);
+  border-radius: 10px;
+  transition: border-color 100ms ease;
 }
 
 .terminal-grid.split-workspace .terminal-instance:hover {
-  box-shadow: inset 0 0 0 1px #8c846d;
+  border-color: color-mix(in srgb, var(--terminal-tool-foreground, #c9d1d9) 26%, transparent);
 }
 
 .terminal-grid.split-workspace .terminal-instance.drag-source {
@@ -4287,9 +4348,9 @@ select:focus-visible {
   z-index: 20;
   content: "";
   pointer-events: none;
-  border: 2px solid #48a8f5;
+  border: 2px solid var(--terminal-accent, #48a8f5);
   border-radius: 8px;
-  background: #268be342;
+  background: color-mix(in srgb, var(--terminal-accent, #268be3) 26%, transparent);
   opacity: 0;
 }
 
@@ -4323,7 +4384,6 @@ select:focus-visible {
   padding: 0 8px 0 14px;
   color: var(--terminal-header-foreground, #c9d1d9);
   background: var(--terminal-header-background, #181c21);
-  border-bottom: 1px solid var(--terminal-header-border, #30363d);
   cursor: grab;
 }
 
@@ -4956,6 +5016,8 @@ select:focus-visible {
 
 .terminal-suggestions {
   --suggestion-ink: var(--terminal-foreground, #c9d1d9);
+  /* Rows follow the terminal's text size; see suggestionRowHeight(). */
+  --suggestion-row: calc(var(--terminal-font-size, 14px) * 2.3);
   position: absolute;
   z-index: 70;
   overflow: hidden;
@@ -4978,7 +5040,7 @@ select:focus-visible {
 }
 
 .terminal-suggestion-list {
-  max-height: 238px;
+  max-height: calc(7 * var(--suggestion-row) + 14px);
   overflow: auto;
   padding: 7px;
   scrollbar-width: none;
@@ -4990,7 +5052,7 @@ select:focus-visible {
   align-items: center;
   gap: 12px;
   width: 100%;
-  height: 32px;
+  height: var(--suggestion-row);
   padding: 0 4px 0 10px;
   color: inherit;
   text-align: left;
@@ -5017,7 +5079,7 @@ select:focus-visible {
 .suggestion-command {
   overflow: hidden;
   font-family: "JetBrains Mono", "Ubuntu Mono", monospace;
-  font-size: 14px;
+  font-size: var(--terminal-font-size, 14px);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

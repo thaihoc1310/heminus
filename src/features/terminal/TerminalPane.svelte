@@ -333,6 +333,7 @@
   let activeTheme = $derived(terminalTheme(appearance.theme));
   let terminalStyle = $derived(
     [
+      `--terminal-font-size:${appearance.fontSize}px`,
       `--terminal-background:${activeTheme.palette.background ?? "#1e2228"}`,
       `--terminal-foreground:${activeTheme.palette.foreground ?? "#c9d1d9"}`,
       `--terminal-cursor:${activeTheme.palette.cursor ?? activeTheme.palette.foreground ?? "#c9d1d9"}`,
@@ -404,6 +405,11 @@
       disposed = true;
     };
   });
+
+  /** Matches `.terminal-suggestion-list > button` in global.css. */
+  function suggestionRowHeight(fontSize: number): number {
+    return Math.round(fontSize * 2.3);
+  }
 
   function chooseSuggestion(index: number) {
     const suggestion = suggestions[index];
@@ -1010,7 +1016,7 @@
         const cellWidth = container.clientWidth / Math.max(terminal.cols, 1);
         const cellHeight = container.clientHeight / Math.max(terminal.rows, 1);
         const width = Math.min(520, Math.max(290, container.clientWidth - 20));
-        const height = Math.min(suggestions.length, 7) * 32 + 14;
+        const height = Math.min(suggestions.length, 7) * suggestionRowHeight(appearance.fontSize) + 14;
         const cursorLeft = 10 + terminal.buffer.active.cursorX * cellWidth;
         const cursorTop = container.offsetTop + 8 + terminal.buffer.active.cursorY * cellHeight;
         const left = Math.max(10, Math.min(cursorLeft, container.clientWidth - width - 10));
@@ -1230,6 +1236,18 @@
           const fittedCols = terminal.cols;
           const fittedRows = terminal.rows;
           fitAddon.fit();
+          // Whole rows never fill the pane exactly; split what is left over
+          // between top and bottom instead of leaving it all at the bottom.
+          const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+          if (screen && terminal.element) {
+            const style = getComputedStyle(terminal.element);
+            const slack =
+              terminal.element.clientHeight -
+              parseFloat(style.paddingTop) -
+              parseFloat(style.paddingBottom) -
+              screen.offsetHeight;
+            screen.style.marginTop = `${Math.max(0, Math.floor(slack / 2))}px`;
+          }
           if (shown || terminal.cols !== fittedCols || terminal.rows !== fittedRows) {
             // WebKitGTK presents a WebGL canvas one draw late after it is
             // resized or comes back from display:none, so the first draw

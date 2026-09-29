@@ -254,7 +254,7 @@
   let terminalToolsDocked = $state(false);
   let terminalFocusMode = $state(false);
   let terminalFocusChanging = false;
-  let wasFullscreenBeforeFocus = false;
+  let wasMaximizedBeforeFocus = false;
   let terminalToolsCloseTimer: number | null = null;
   let terminalHistoryVersion = $state(0);
   let terminalSnippetVersion = $state(0);
@@ -327,6 +327,20 @@
   let nativeDragScaleFactor = 1;
   const appearanceSaveTimers = new Map<string, number>();
   const localTerminalAppearanceKey = "heminus-local-terminal-appearance";
+  const terminalToolsWidthKey = "heminus-terminal-tools-width";
+  const clampTerminalToolsWidth = (width: number) =>
+    Math.round(Math.min(720, Math.max(280, width)));
+  let terminalToolsWidth = $state(
+    (() => {
+      try {
+        const saved = Number(localStorage.getItem(terminalToolsWidthKey));
+        return saved ? clampTerminalToolsWidth(saved) : 336;
+      } catch {
+        return 336;
+      }
+    })()
+  );
+  let terminalToolsResizing = $state(false);
 
   function workspaceById(id: string | null): RuntimeWorkspace | null {
     if (!id) return null;
@@ -2478,12 +2492,14 @@
     terminalFocusChanging = true;
     const leaving = terminalFocusMode;
     try {
+      // Maximize rather than fullscreen, so the desktop's top bar (clock,
+      // tray, system stats) stays visible while the header is hidden.
       if (leaving) {
-        if (appWindow && !wasFullscreenBeforeFocus) await appWindow.setFullscreen(false);
+        if (appWindow && !wasMaximizedBeforeFocus) await appWindow.unmaximize();
         terminalFocusMode = false;
       } else {
-        wasFullscreenBeforeFocus = await appWindow?.isFullscreen() ?? false;
-        if (appWindow && !wasFullscreenBeforeFocus) await appWindow.setFullscreen(true);
+        wasMaximizedBeforeFocus = await appWindow?.isMaximized() ?? false;
+        if (appWindow && !wasMaximizedBeforeFocus) await appWindow.maximize();
         terminalFocusMode = true;
         closeTerminalTools();
       }
@@ -2531,14 +2547,58 @@
     target.addEventListener("pointercancel", stop);
   }
 
+  /** Drag the panel's left edge; the grid refits as it goes. */
+  function startTerminalToolsResize(event: PointerEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget as HTMLElement;
+    const { clientX, pointerId } = event;
+    const startWidth = terminalToolsWidth;
+    handle.setPointerCapture(pointerId);
+    terminalToolsResizing = true;
+    const move = (next: PointerEvent) => {
+      const limit = window.innerWidth * 0.6;
+      terminalToolsWidth = Math.min(
+        clampTerminalToolsWidth(startWidth + clientX - next.clientX),
+        Math.round(limit)
+      );
+    };
+    const stop = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      terminalToolsResizing = false;
+      try {
+        localStorage.setItem(terminalToolsWidthKey, String(terminalToolsWidth));
+      } catch {
+        // No storage in this webview: the width lasts until the app closes.
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  }
+
   function toggleTerminalTools() {
     if (terminalToolsOpen) closeTerminalTools();
     else openTerminalTools();
   }
 
-  function terminalToolsStyle(): string {
-    const theme = terminalTheme(activeTerminalAppearance().theme);
+  function terminalMenuStyle(tab: TerminalTab): string {
+    const theme = terminalTheme(tab.appearance.theme);
     return [
+      `--menu-background:${theme.palette.background}`,
+      `--menu-foreground:${theme.palette.foreground}`,
+      `--menu-muted:${theme.chrome.headerMuted}`
+    ].join(";");
+  }
+
+  function terminalToolsStyle(): string {
+    const appearance = activeTerminalAppearance();
+    const theme = terminalTheme(appearance.theme);
+    return [
+      `--tools-scale:${appearance.fontSize / DEFAULT_TERMINAL_FONT_SIZE}`,
+      `--tools-width:${terminalToolsWidth}px`,
       `--terminal-tool-background:${theme.palette.background}`,
       `--terminal-tool-foreground:${theme.palette.foreground}`,
       `--terminal-tool-muted:${theme.chrome.headerMuted}`,
@@ -3817,7 +3877,7 @@
   class:terminal-focus={page === "terminal" && terminalFocusMode}
   class:single-terminal-surface={page === "terminal" && !activeWorkspace() && Boolean(activeTerminalId)}
   class:dragging-terminal-tab={Boolean(panePointerDrag?.dragging || topTabPointerDrag?.dragging)}
-  style={singleTerminalChromeStyle()}
+  style={`${singleTerminalChromeStyle()};--terminal-accent:${activeDividerColor()}`}
 >
   {#if page === "terminal" && terminalFocusMode}
     <button
@@ -4205,6 +4265,16 @@
             class:open={terminalToolsOpen}
             class:docked={terminalToolsDocked}
           >
+            {#if terminalToolsDocked}
+              <div
+                class="terminal-tools-resize"
+                class:active={terminalToolsResizing}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize terminal tools"
+                onpointerdown={startTerminalToolsResize}
+              ></div>
+            {/if}
             <TerminalToolsSidebar
               appearance={activeTerminalAppearance()}
               historyVersion={terminalHistoryVersion}
@@ -5184,6 +5254,7 @@
   {#if terminalContextMenu}
     <div
       class="host-context-menu terminal-context-menu"
+      style={terminalMenuStyle(terminalContextMenu.tab)}
       style:left={`${terminalContextMenu.x}px`}
       style:top={`${terminalContextMenu.y}px`}
       role="menu"

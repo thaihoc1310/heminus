@@ -52,7 +52,9 @@ function defineTheme(
   id: TerminalTheme,
   label: string,
   description: string,
-  palette: ITheme
+  palette: ITheme,
+  /** The theme's signature color, when brightBlue is not it. */
+  signature?: string
 ): TerminalThemeDefinition {
   const background = palette.background ?? "#1e2228";
   const foreground = palette.foreground ?? "#c9d1d9";
@@ -64,7 +66,7 @@ function defineTheme(
   for (let weight = 0.65; weight <= 1 && contrastRatio(chromeMuted, background) < 3; weight += 0.05) {
     chromeMuted = mix(foreground, background, weight);
   }
-  const accent = palette.brightBlue ?? palette.blue ?? foreground;
+  const accent = signature ?? palette.brightBlue ?? palette.blue ?? foreground;
   const completePalette: ITheme = {
     ...palette,
     cursor: palette.cursor ?? accent,
@@ -175,7 +177,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#50627f", brightRed: "#ff7994", brightGreen: "#76f2bd",
     brightYellow: "#ffe08a", brightBlue: "#62a8ff", brightMagenta: "#d0b0ff",
     brightCyan: "#71e9ff", brightWhite: "#ffffff"
-  }),
+  }, "#26d9ff"),
   defineTheme("hacker_green", "Hacker Green", "Phosphor green", {
     background: "#001208", foreground: "#8df59c", cursor: "#39ff5a", cursorAccent: "#001208",
     selectionBackground: "#20c84355",
@@ -184,7 +186,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#3b6b47", brightRed: "#ff7582", brightGreen: "#53ff6e",
     brightYellow: "#e5f47b", brightBlue: "#78c1ff", brightMagenta: "#d8a5ff",
     brightCyan: "#69f5c6", brightWhite: "#eaffed"
-  }),
+  }, "#39ff5a"),
   defineTheme("hacker_red", "Hacker Red", "Scarlet phosphor", {
     background: "#190204", foreground: "#ffb3b3", cursor: "#ff303f", cursorAccent: "#190204",
     selectionBackground: "#e0182d55",
@@ -193,7 +195,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#744148", brightRed: "#ff3448", brightGreen: "#78dda0",
     brightYellow: "#f3d778", brightBlue: "#87a9ed", brightMagenta: "#e782c2",
     brightCyan: "#79dce0", brightWhite: "#fff0f0"
-  }),
+  }, "#ff5364"),
   defineTheme("rose_pine_moon", "Rosé Pine Moon", "Soft moonlit violet", {
     background: "#232136", foreground: "#e0def4", cursor: "#e0def4", cursorAccent: "#232136",
     selectionBackground: "#44415a77",
@@ -247,7 +249,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#002b36", brightRed: "#cb4b16", brightGreen: "#586e75",
     brightYellow: "#657b83", brightBlue: "#839496", brightMagenta: "#6c71c4",
     brightCyan: "#93a1a1", brightWhite: "#fdf6e3"
-  }),
+  }, "#268bd2"),
   defineTheme("solarized_light", "Solarized Light", "Precision light contrast", {
     background: "#fdf6e3", foreground: "#657b83", cursor: "#586e75", cursorAccent: "#fdf6e3",
     selectionBackground: "#eee8d5cc",
@@ -256,7 +258,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#002b36", brightRed: "#cb4b16", brightGreen: "#586e75",
     brightYellow: "#657b83", brightBlue: "#839496", brightMagenta: "#6c71c4",
     brightCyan: "#93a1a1", brightWhite: "#fdf6e3"
-  }),
+  }, "#268bd2"),
   defineTheme("dracula", "Dracula", "Classic violet dark", {
     background: "#282a36", foreground: "#f8f8f2", cursor: "#f8f8f0", cursorAccent: "#282a36",
     selectionBackground: "#44475aaa",
@@ -314,7 +316,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#a6b0a0", brightRed: "#f85552", brightGreen: "#8da101",
     brightYellow: "#dfa000", brightBlue: "#3a94c5", brightMagenta: "#df69ba",
     brightCyan: "#35a77c", brightWhite: "#fffbef"
-  }),
+  }, "#a7c080"),
   defineTheme("kanagawa_dragon", "Kanagawa Dragon", "Ink and ash", {
     background: "#181616", foreground: "#c5c9c5", cursor: "#c8c093", cursorAccent: "#181616",
     black: "#0d0c0c", red: "#c4746e", green: "#8a9a7b", yellow: "#c4b28a",
@@ -338,7 +340,7 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#7e7e7e", brightRed: "#ff8080", brightGreen: "#99ffe4",
     brightYellow: "#ffc799", brightBlue: "#b9aeda", brightMagenta: "#ecaad6",
     brightCyan: "#f591b2", brightWhite: "#ffffff"
-  })
+  }, "#ffc799")
 ];
 
 export function terminalTheme(id: TerminalTheme | undefined): TerminalThemeDefinition {
