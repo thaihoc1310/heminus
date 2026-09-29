@@ -593,8 +593,8 @@ select:focus-visible {
   width: 28px;
   height: 28px;
   padding: 0;
-  color: #dce0ec;
-  background: #111214bd;
+  color: var(--app-terminal-header-foreground, #dce0ec);
+  background: color-mix(in srgb, var(--app-terminal-background, #111214) 75%, transparent);
   border: 0;
   border-radius: 7px;
   cursor: pointer;
@@ -602,7 +602,17 @@ select:focus-visible {
 
 .terminal-focus-exit:hover,
 .terminal-focus-exit:focus-visible {
-  background: #111214;
+  background: var(--app-terminal-background, #111214);
+}
+
+.application.terminal-focus .terminal-search {
+  right: 44px;
+}
+
+/* With the tools open it sits in the panel's header row, empty at the right. */
+.application:has(.terminal-tools-slot.open) .terminal-focus-exit {
+  top: 16px;
+  right: 18px;
 }
 
 .application.dragging-terminal-tab,
@@ -1732,6 +1742,10 @@ select:focus-visible {
   color: var(--menu-muted);
 }
 
+.host-context-menu.terminal-context-menu button.danger {
+  color: color-mix(in srgb, var(--danger) 70%, var(--menu-foreground));
+}
+
 .host-context-menu.terminal-context-menu .context-separator {
   background: color-mix(in srgb, var(--menu-foreground) 10%, transparent);
 }
@@ -2734,6 +2748,7 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   background: #edf2f4;
+  border-left: 1px solid var(--line);
   animation: host-subeditor-in 180ms cubic-bezier(0.22, 0.75, 0.28, 1) backwards;
 }
 
@@ -3520,6 +3535,25 @@ select:focus-visible {
   opacity: 0.8;
 }
 
+/* Mid-drag the panel alone takes the live width, growing over (or pulling
+   back from) the grid, which keeps its width until the drag ends. */
+.terminal-tools-slot.resizing {
+  --tools-live-panel-width: min(var(--tools-live-width), 60vw);
+  --tools-live-offset: calc(var(--tools-panel-width) - var(--tools-live-panel-width));
+  z-index: 90;
+  overflow: visible;
+}
+
+.terminal-tools-slot.resizing .terminal-tools-panel {
+  width: var(--tools-live-panel-width);
+  min-width: var(--tools-live-panel-width);
+  margin-left: var(--tools-live-offset);
+}
+
+.terminal-tools-slot.resizing .terminal-tools-resize {
+  left: var(--tools-live-offset);
+}
+
 .terminal-tools-header {
   display: flex;
   align-items: center;
@@ -3654,7 +3688,8 @@ select:focus-visible {
   z-index: 80;
   top: 39px;
   right: 0;
-  width: 150px;
+  width: max-content;
+  min-width: 150px;
   padding: 6px;
   border: 1px solid var(--terminal-tool-border);
   border-radius: 11px;
@@ -3666,7 +3701,8 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  height: 34px;
+  height: calc(34px * var(--tools-scale, 1));
+  white-space: nowrap;
   padding: 0 10px;
   color: var(--terminal-tool-muted);
   border: 0;
@@ -3835,7 +3871,7 @@ select:focus-visible {
 }
 
 .terminal-command-actions button {
-  height: 24px;
+  height: calc(24px * var(--tools-scale, 1));
   padding: 0 9px;
   color: var(--terminal-tool-foreground);
   font-size: calc(11px * var(--tools-scale, 1));
@@ -3956,7 +3992,7 @@ select:focus-visible {
 
 .terminal-config-stepper {
   display: grid;
-  grid-template-columns: 26px 28px 26px;
+  grid-template-columns: calc(26px * var(--tools-scale, 1)) calc(28px * var(--tools-scale, 1)) calc(26px * var(--tools-scale, 1));
   align-items: center;
   overflow: hidden;
   border: 1px solid var(--terminal-tool-border);
@@ -3967,13 +4003,13 @@ select:focus-visible {
 .terminal-config-stepper button {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 28px;
+  width: calc(26px * var(--tools-scale, 1));
+  height: calc(28px * var(--tools-scale, 1));
   padding: 0;
   color: var(--terminal-tool-muted);
   border: 0;
   background: transparent;
-  font: 500 15px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+  font: 500 calc(15px * var(--tools-scale, 1))/1 "Ubuntu Sans", Ubuntu, sans-serif;
 }
 
 .terminal-config-stepper button:hover:not(:disabled),
@@ -3989,7 +4025,7 @@ select:focus-visible {
 
 .terminal-config-stepper output {
   color: var(--terminal-tool-foreground);
-  font: 600 10px/1 "Ubuntu Sans", Ubuntu, sans-serif;
+  font: 600 calc(10px * var(--tools-scale, 1))/1 "Ubuntu Sans", Ubuntu, sans-serif;
   text-align: center;
 }
 
@@ -4017,7 +4053,7 @@ select:focus-visible {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  font: 500 8px/1.2 "Ubuntu Sans", Ubuntu, sans-serif;
+  font: 500 calc(8px * var(--tools-scale, 1))/1.2 "Ubuntu Sans", Ubuntu, sans-serif;
   letter-spacing: 0.02em;
   white-space: nowrap;
   opacity: 0.7;
@@ -4128,8 +4164,8 @@ select:focus-visible {
 .terminal-text-size output {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 32px;
+  width: calc(34px * var(--tools-scale, 1));
+  height: calc(32px * var(--tools-scale, 1));
   color: var(--terminal-tool-foreground);
   border: 1px solid var(--terminal-tool-border);
   border-radius: 8px;
@@ -5093,7 +5129,7 @@ select:focus-visible {
 .suggestion-enter {
   display: grid;
   width: 26px;
-  height: 24px;
+  height: min(24px, calc(var(--suggestion-row) - 6px));
   place-items: center;
   color: color-mix(in srgb, var(--suggestion-ink) 80%, transparent);
   border-radius: 6px;
@@ -7480,6 +7516,7 @@ select:focus-visible {
     inset: 36px 0 0 auto;
     display: grid;
     width: min(420px, 100%);
+    border-left-color: #cfd9de;
   }
 
   .manager-inspector {
@@ -7554,9 +7591,15 @@ select:focus-visible {
     width: min(320px, calc(100vw - 44px));
   }
 
+  /* An overlay on live text here; without a shadow it needs an edge. */
   .terminal-tools-panel {
     width: 100%;
     min-width: 0;
+    border: 1px solid var(--terminal-tool-border);
+  }
+
+  .terminal-tools-resize {
+    display: none;
   }
 
   .sftp-split {

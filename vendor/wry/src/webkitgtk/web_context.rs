@@ -52,6 +52,9 @@ impl WebContextImpl {
     let mut pressure = webkit2gtk::MemoryPressureSettings::new();
     // MB; relief starts at a third of it. 384 measured no lower than 512.
     pressure.set_memory_limit(512);
+    // Strict relief also throws away JIT code on every 30 s poll; with many
+    // busy tabs the default (half the limit) would keep re-triggering it.
+    pressure.set_strict_threshold(0.8);
     context_builder = context_builder.memory_pressure_settings(&pressure);
     let context = context_builder.build();
 

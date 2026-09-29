@@ -311,6 +311,7 @@
   let operatingSystemDetectionBuffer = "";
   let operatingSystemDetected = false;
   let operatingSystemScannedBytes = 0;
+  let operatingSystemScannedChunks = 0;
   let zoomHint = $state<number | null>(null);
   let zoomHintTimer: number | null = null;
   let lastWheelZoomAt = 0;
@@ -823,7 +824,13 @@
             // The login banner comes first; past it, keep scanning would cost
             // a decode plus several 16 KB regex passes on every chunk.
             operatingSystemScannedBytes += bytes.length;
-            if (detected || operatingSystemScannedBytes > 64 * 1024) operatingSystemDetected = true;
+            operatingSystemScannedChunks += 1;
+            // Keystroke echoes are a few bytes each, so bound chunks too.
+            if (
+              detected ||
+              operatingSystemScannedBytes > 64 * 1024 ||
+              operatingSystemScannedChunks > 300
+            ) operatingSystemDetected = true;
           }
         }
       };
@@ -1010,15 +1017,21 @@
         terminal?.focus();
       };
       commandHandlerVersion += 1;
+      // Where the cursor was when previewing began; the list stays put while
+      // previewed commands move the real cursor.
+      let previewAnchor: { x: number; y: number } | null = null;
       const positionSuggestions = () => {
-        // Previewing a suggestion moves the cursor; the list stays put.
-        if (!terminal || suggestions.length === 0 || suggestionQuery !== null) return;
+        if (!terminal || suggestions.length === 0) return;
+        const cursor = previewAnchor ?? {
+          x: terminal.buffer.active.cursorX,
+          y: terminal.buffer.active.cursorY
+        };
         const cellWidth = container.clientWidth / Math.max(terminal.cols, 1);
         const cellHeight = container.clientHeight / Math.max(terminal.rows, 1);
         const width = Math.min(520, Math.max(290, container.clientWidth - 20));
         const height = Math.min(suggestions.length, 7) * suggestionRowHeight(appearance.fontSize) + 14;
-        const cursorLeft = 10 + terminal.buffer.active.cursorX * cellWidth;
-        const cursorTop = container.offsetTop + 8 + terminal.buffer.active.cursorY * cellHeight;
+        const cursorLeft = 10 + cursor.x * cellWidth;
+        const cursorTop = container.offsetTop + 8 + cursor.y * cellHeight;
         const left = Math.max(10, Math.min(cursorLeft, container.clientWidth - width - 10));
         const top =
           cursorTop > height + 18
@@ -1041,9 +1054,11 @@
         );
         suggestionIndex = -1;
         suggestionQuery = null;
+        previewAnchor = null;
         requestAnimationFrame(positionSuggestions);
       };
       const replaceCommandInput = (command: string) => {
+        if (command === commandInput) return;
         const erase = "\x7f".repeat([...commandInput].length);
         queueData(`${erase}${command}`);
         commandInput = command;
@@ -1053,6 +1068,7 @@
         suggestions = [];
         suggestionIndex = -1;
         suggestionQuery = null;
+        previewAnchor = null;
         terminal?.focus();
       };
       terminal.onData((data) => {
@@ -1094,8 +1110,17 @@
             const direction = data.endsWith("A") ? -1 : 1;
             const start = suggestionIndex < 0 ? (direction > 0 ? -1 : 0) : suggestionIndex;
             suggestionIndex = (start + direction + suggestions.length) % suggestions.length;
-            suggestionQuery ??= commandInput;
-            replaceCommandInput(suggestions[suggestionIndex].command);
+            if (suggestionQuery === null) {
+              suggestionQuery = commandInput;
+              previewAnchor = {
+                x: terminal!.buffer.active.cursorX,
+                y: terminal!.buffer.active.cursorY
+              };
+            }
+            const command = suggestions[suggestionIndex].command;
+            // A line break or tab would run or complete it in the shell, so
+            // multi-line snippets preview in the list only; Tab/Enter insert.
+            replaceCommandInput(/[\r\n\t]/.test(command) ? suggestionQuery : command);
             return;
           }
           if (data === "\x1b") {
@@ -1103,6 +1128,7 @@
             suggestions = [];
             suggestionIndex = -1;
             suggestionQuery = null;
+            previewAnchor = null;
             return;
           }
           if (data === "\t" || (data === "\r" && suggestionIndex >= 0)) {
@@ -1181,6 +1207,8 @@
           event.preventDefault();
           event.stopPropagation();
           toggleHistorySuggestions();
+          // Rebuild from what was typed, not from a previewed suggestion.
+          if (suggestionQuery !== null) replaceCommandInput(suggestionQuery);
           refreshSuggestions();
           return false;
         }
@@ -1218,6 +1246,24 @@
         return true;
       });
 
+      // Whole rows never fill the pane exactly; split what is left over
+      // between top and bottom instead of leaving it all at the bottom.
+      let verticalPadding: number | null = null;
+      let centeredFor = "";
+      const centerRows = () => {
+        const element = terminal?.element;
+        const screen = element?.querySelector<HTMLElement>(".xterm-screen");
+        if (!element || !screen) return;
+        if (verticalPadding === null) {
+          const style = getComputedStyle(element);
+          verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+        }
+        const key = `${element.clientHeight}:${screen.offsetHeight}`;
+        if (key === centeredFor) return;
+        centeredFor = key;
+        const slack = element.clientHeight - verticalPadding - screen.offsetHeight;
+        screen.style.marginTop = `${Math.max(0, Math.floor(slack / 2))}px`;
+      };
       let hiddenSinceFit = false;
       const syncTerminalSize = () => {
         if (resizeFrame !== null) return;
@@ -1236,18 +1282,7 @@
           const fittedCols = terminal.cols;
           const fittedRows = terminal.rows;
           fitAddon.fit();
-          // Whole rows never fill the pane exactly; split what is left over
-          // between top and bottom instead of leaving it all at the bottom.
-          const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
-          if (screen && terminal.element) {
-            const style = getComputedStyle(terminal.element);
-            const slack =
-              terminal.element.clientHeight -
-              parseFloat(style.paddingTop) -
-              parseFloat(style.paddingBottom) -
-              screen.offsetHeight;
-            screen.style.marginTop = `${Math.max(0, Math.floor(slack / 2))}px`;
-          }
+          centerRows();
           if (shown || terminal.cols !== fittedCols || terminal.rows !== fittedRows) {
             // WebKitGTK presents a WebGL canvas one draw late after it is
             // resized or comes back from display:none, so the first draw
@@ -1256,6 +1291,9 @@
             terminal.refresh(0, terminal.rows - 1);
             const redraw = terminal.onRender(() => {
               redraw.dispose();
+              // xterm defers resizing its screen while it is not rendering, so
+              // the height read right after fit() may still be the old one.
+              centerRows();
               terminal?.refresh(0, terminal.rows - 1);
             });
           }
@@ -1357,7 +1395,16 @@
       }
       const mountedTerminal = terminal;
       terminal = null;
+      // xterm's WebGL renderer only drops its canvas on dispose; the context
+      // would keep one of WebKit's ~16 slots until garbage collection, and
+      // closing and reopening tabs could then evict a live pane's context.
+      const canvases = [
+        ...(mountedTerminal?.element?.querySelectorAll<HTMLCanvasElement>(".xterm-screen canvas") ?? [])
+      ];
       mountedTerminal?.dispose();
+      for (const canvas of canvases) {
+        canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+      }
       terminalApi = null;
       searchAddonApi = null;
       refitTerminal = null;

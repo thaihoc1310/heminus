@@ -63,8 +63,8 @@ function defineTheme(
   // background itself), too faint for labels and secondary text.
   // Start well below the foreground and move toward it until labels read.
   let chromeMuted = mix(foreground, background, 0.6);
-  for (let weight = 0.65; weight <= 1 && contrastRatio(chromeMuted, background) < 3; weight += 0.05) {
-    chromeMuted = mix(foreground, background, weight);
+  for (let step = 13; step <= 20 && contrastRatio(chromeMuted, background) < 3; step += 1) {
+    chromeMuted = mix(foreground, background, step / 20);
   }
   const accent = signature ?? palette.brightBlue ?? palette.blue ?? foreground;
   const completePalette: ITheme = {

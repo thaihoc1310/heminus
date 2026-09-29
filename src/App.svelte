@@ -256,6 +256,7 @@
   let terminalFocusChanging = false;
   let wasMaximizedBeforeFocus = false;
   let terminalToolsCloseTimer: number | null = null;
+  let terminalToolsRequest = 0;
   let terminalHistoryVersion = $state(0);
   let terminalSnippetVersion = $state(0);
   let terminalCommandRequests = $state<Record<string, TerminalCommandRequest>>({});
@@ -340,7 +341,9 @@
       }
     })()
   );
-  let terminalToolsResizing = $state(false);
+  // While dragging, only the panel follows the pointer; the grid (and every
+  // pane's scrollback reflow) takes the new width once, on release.
+  let terminalToolsDragWidth = $state<number | null>(null);
 
   function workspaceById(id: string | null): RuntimeWorkspace | null {
     if (!id) return null;
@@ -2464,8 +2467,11 @@
       terminalToolsCloseTimer = null;
     }
     terminalToolsMounted = true;
+    const request = ++terminalToolsRequest;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
+        // Closed again before the panel got its first frame.
+        if (request !== terminalToolsRequest) return;
         terminalToolsOpen = true;
         terminalToolsCloseTimer = window.setTimeout(() => {
           terminalToolsDocked = true;
@@ -2476,6 +2482,7 @@
   }
 
   function closeTerminalTools() {
+    terminalToolsRequest += 1;
     terminalToolsOpen = false;
     if (terminalToolsCloseTimer !== null) {
       window.clearTimeout(terminalToolsCloseTimer);
@@ -2531,20 +2538,19 @@
     const target = event.currentTarget as HTMLElement;
     const { clientX, clientY, pointerId } = event;
     target.setPointerCapture(pointerId);
+    // Capture ends on release, cancel, or the element going away alike.
     const stop = () => {
       target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", stop);
-      target.removeEventListener("pointercancel", stop);
-      if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+      target.removeEventListener("lostpointercapture", stop);
     };
     const move = (next: PointerEvent) => {
       if (Math.hypot(next.clientX - clientX, next.clientY - clientY) < 4) return;
       stop();
+      if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
       void current.startDragging();
     };
     target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", stop);
-    target.addEventListener("pointercancel", stop);
+    target.addEventListener("lostpointercapture", stop);
   }
 
   /** Drag the panel's left edge; the grid refits as it goes. */
@@ -2553,21 +2559,20 @@
     event.preventDefault();
     const handle = event.currentTarget as HTMLElement;
     const { clientX, pointerId } = event;
-    const startWidth = terminalToolsWidth;
+    const startWidth = Math.min(terminalToolsWidth, Math.round(window.innerWidth * 0.6));
     handle.setPointerCapture(pointerId);
-    terminalToolsResizing = true;
+    terminalToolsDragWidth = startWidth;
     const move = (next: PointerEvent) => {
-      const limit = window.innerWidth * 0.6;
-      terminalToolsWidth = Math.min(
+      terminalToolsDragWidth = Math.min(
         clampTerminalToolsWidth(startWidth + clientX - next.clientX),
-        Math.round(limit)
+        Math.round(window.innerWidth * 0.6)
       );
     };
     const stop = () => {
       handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", stop);
-      handle.removeEventListener("pointercancel", stop);
-      terminalToolsResizing = false;
+      handle.removeEventListener("lostpointercapture", stop);
+      if (terminalToolsDragWidth !== null) terminalToolsWidth = terminalToolsDragWidth;
+      terminalToolsDragWidth = null;
       try {
         localStorage.setItem(terminalToolsWidthKey, String(terminalToolsWidth));
       } catch {
@@ -2575,8 +2580,7 @@
       }
     };
     handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", stop);
-    handle.addEventListener("pointercancel", stop);
+    handle.addEventListener("lostpointercapture", stop);
   }
 
   function toggleTerminalTools() {
@@ -2598,7 +2602,6 @@
     const theme = terminalTheme(appearance.theme);
     return [
       `--tools-scale:${appearance.fontSize / DEFAULT_TERMINAL_FONT_SIZE}`,
-      `--tools-width:${terminalToolsWidth}px`,
       `--terminal-tool-background:${theme.palette.background}`,
       `--terminal-tool-foreground:${theme.palette.foreground}`,
       `--terminal-tool-muted:${theme.chrome.headerMuted}`,
@@ -4264,11 +4267,14 @@
             class="terminal-tools-slot"
             class:open={terminalToolsOpen}
             class:docked={terminalToolsDocked}
+            class:resizing={terminalToolsDragWidth !== null}
+            style:--tools-width={`${terminalToolsWidth}px`}
+            style:--tools-live-width={terminalToolsDragWidth === null ? undefined : `${terminalToolsDragWidth}px`}
           >
             {#if terminalToolsDocked}
               <div
                 class="terminal-tools-resize"
-                class:active={terminalToolsResizing}
+                class:active={terminalToolsDragWidth !== null}
                 role="separator"
                 aria-orientation="vertical"
                 aria-label="Resize terminal tools"
