@@ -1354,19 +1354,15 @@ fn parse_terminal_theme(value: &str) -> TerminalTheme {
         "paper_light" => TerminalTheme::PaperLight,
         "flexoki_dark" => TerminalTheme::FlexokiDark,
         "flexoki_light" => TerminalTheme::FlexokiLight,
-        "kanagawa_dragon" => TerminalTheme::KanagawaWave,
         "kanagawa_lotus" => TerminalTheme::KanagawaLotus,
         "hacker_green" => TerminalTheme::HackerGreen,
         "hacker_red" => TerminalTheme::HackerRed,
-        "everforest_dark" => TerminalTheme::FlexokiDark,
         "everforest_light" => TerminalTheme::SolarizedLight,
         "night_owl" => TerminalTheme::HackerBlue,
         "light_owl" => TerminalTheme::PaperLight,
-        "rose_pine" => TerminalTheme::RosePineMoon,
         "rose_pine_moon" => TerminalTheme::RosePineMoon,
         "rose_pine_dawn" => TerminalTheme::RosePineDawn,
         "catppuccin_mocha" => TerminalTheme::CatppuccinMocha,
-        "catppuccin_latte" => TerminalTheme::RosePineDawn,
         "tokyo_night" => TerminalTheme::TokyoNight,
         "tokyo_day" => TerminalTheme::TokyoDay,
         "solarized_dark" => TerminalTheme::SolarizedDark,
@@ -2347,6 +2343,14 @@ mod tests {
             TerminalTheme::SolarizedLight,
             TerminalTheme::Dracula,
             TerminalTheme::Monokai,
+            TerminalTheme::CatppuccinLatte,
+            TerminalTheme::GruvboxLight,
+            TerminalTheme::Nord,
+            TerminalTheme::OneDark,
+            TerminalTheme::EverforestDark,
+            TerminalTheme::KanagawaDragon,
+            TerminalTheme::RosePine,
+            TerminalTheme::Vesper,
         ];
         for theme in themes {
             assert_eq!(parse_terminal_theme(terminal_theme_name(theme)), theme);
@@ -2356,13 +2360,9 @@ mod tests {
     #[test]
     fn removed_near_duplicate_themes_migrate_to_curated_equivalents() {
         let aliases = [
-            ("kanagawa_dragon", TerminalTheme::KanagawaWave),
-            ("everforest_dark", TerminalTheme::FlexokiDark),
             ("everforest_light", TerminalTheme::SolarizedLight),
             ("night_owl", TerminalTheme::HackerBlue),
             ("light_owl", TerminalTheme::PaperLight),
-            ("rose_pine", TerminalTheme::RosePineMoon),
-            ("catppuccin_latte", TerminalTheme::RosePineDawn),
             ("atom_one_dark", TerminalTheme::HeminusDark),
             ("atom_one_light", TerminalTheme::PaperLight),
         ];
