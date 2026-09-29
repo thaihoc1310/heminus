@@ -18,7 +18,15 @@ export type TerminalTheme =
   | "solarized_dark"
   | "solarized_light"
   | "dracula"
-  | "monokai";
+  | "monokai"
+  | "catppuccin_latte"
+  | "gruvbox_light"
+  | "nord"
+  | "one_dark"
+  | "everforest_dark"
+  | "kanagawa_dragon"
+  | "rose_pine"
+  | "vesper";
 
 export interface EnvironmentVariable {
   name: string;

@@ -22,6 +22,32 @@ function alpha(color: string, opacity: string): string {
   return /^#[0-9a-f]{6}$/i.test(color) ? `${color}${opacity}` : color;
 }
 
+/** WCAG contrast ratio between two #rrggbb colors. */
+export function contrastRatio(a: string, b: string): number {
+  const luminance = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((index) => {
+      const channel = parseInt(hex.slice(index, index + 2), 16) / 255;
+      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (light + 0.05) / (dark + 0.05);
+}
+
+/** `weight` of `color` over `base`, both #rrggbb. */
+function mix(color: string, base: string, weight: number): string {
+  if (!/^#[0-9a-f]{6}$/i.test(color) || !/^#[0-9a-f]{6}$/i.test(base)) return color;
+  const channel = (hex: string, index: number) => parseInt(hex.slice(1 + index * 2, 3 + index * 2), 16);
+  return `#${[0, 1, 2]
+    .map((index) =>
+      Math.round(channel(color, index) * weight + channel(base, index) * (1 - weight))
+        .toString(16)
+        .padStart(2, "0")
+    )
+    .join("")}`;
+}
+
 function defineTheme(
   id: TerminalTheme,
   label: string,
@@ -31,6 +57,13 @@ function defineTheme(
   const background = palette.background ?? "#1e2228";
   const foreground = palette.foreground ?? "#c9d1d9";
   const muted = palette.brightBlack ?? foreground;
+  // brightBlack is often close to the background (Solarized Dark uses the
+  // background itself), too faint for labels and secondary text.
+  // Start well below the foreground and move toward it until labels read.
+  let chromeMuted = mix(foreground, background, 0.6);
+  for (let weight = 0.65; weight <= 1 && contrastRatio(chromeMuted, background) < 3; weight += 0.05) {
+    chromeMuted = mix(foreground, background, weight);
+  }
   const accent = palette.brightBlue ?? palette.blue ?? foreground;
   const completePalette: ITheme = {
     ...palette,
@@ -61,7 +94,7 @@ function defineTheme(
       // Pane chrome intentionally shares the exact terminal background.
       headerBackground: background,
       headerForeground: foreground,
-      headerMuted: muted,
+      headerMuted: chromeMuted,
       headerBorder: alpha(foreground, "20"),
       controlHover: alpha(foreground, "12"),
       activeForeground: accent,
@@ -241,6 +274,70 @@ export const terminalThemes: TerminalThemeDefinition[] = [
     brightBlack: "#75715e", brightRed: "#f92672", brightGreen: "#a6e22e",
     brightYellow: "#e6db74", brightBlue: "#66d9ef", brightMagenta: "#ae81ff",
     brightCyan: "#a1efe4", brightWhite: "#f9f8f5"
+  }),
+  defineTheme("catppuccin_latte", "Catppuccin Latte", "Pastel morning", {
+    background: "#eff1f5", foreground: "#4c4f69", cursor: "#dc8a78", cursorAccent: "#eff1f5",
+    black: "#bcc0cc", red: "#d20f39", green: "#40a02b", yellow: "#df8e1d",
+    blue: "#1e66f5", magenta: "#ea76cb", cyan: "#179299", white: "#5c5f77",
+    brightBlack: "#acb0be", brightRed: "#e7103f", brightGreen: "#46b02f",
+    brightYellow: "#e49931", brightBlue: "#3878f6", brightMagenta: "#ef95d7",
+    brightCyan: "#19a1a8", brightWhite: "#6c6f85"
+  }),
+  defineTheme("gruvbox_light", "Gruvbox Light", "Warm retro paper", {
+    background: "#fbf1c7", foreground: "#3c3836", cursor: "#3c3836", cursorAccent: "#fbf1c7",
+    black: "#fbf1c7", red: "#cc241d", green: "#98971a", yellow: "#d79921",
+    blue: "#458588", magenta: "#b16286", cyan: "#689d6a", white: "#7c6f64",
+    brightBlack: "#928374", brightRed: "#9d0006", brightGreen: "#79740e",
+    brightYellow: "#b57614", brightBlue: "#076678", brightMagenta: "#8f3f71",
+    brightCyan: "#427b58", brightWhite: "#3c3836"
+  }),
+  defineTheme("nord", "Nord", "Arctic frost blue", {
+    background: "#2e3440", foreground: "#d8dee9", cursor: "#eceff4", cursorAccent: "#2e3440",
+    black: "#3b4252", red: "#bf616a", green: "#a3be8c", yellow: "#ebcb8b",
+    blue: "#81a1c1", magenta: "#b48ead", cyan: "#88c0d0", white: "#e5e9f0",
+    brightBlack: "#596377", brightRed: "#bf616a", brightGreen: "#a3be8c",
+    brightYellow: "#ebcb8b", brightBlue: "#81a1c1", brightMagenta: "#b48ead",
+    brightCyan: "#8fbcbb", brightWhite: "#eceff4"
+  }),
+  defineTheme("one_dark", "One Dark", "Balanced editor dark", {
+    background: "#21252b", foreground: "#abb2bf", cursor: "#abb2bf", cursorAccent: "#21252b",
+    black: "#21252b", red: "#e06c75", green: "#98c379", yellow: "#e5c07b",
+    blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2", white: "#abb2bf",
+    brightBlack: "#767676", brightRed: "#e06c75", brightGreen: "#98c379",
+    brightYellow: "#e5c07b", brightBlue: "#61afef", brightMagenta: "#c678dd",
+    brightCyan: "#56b6c2", brightWhite: "#abb2bf"
+  }),
+  defineTheme("everforest_dark", "Everforest Dark", "Calm forest green", {
+    background: "#1e2326", foreground: "#d3c6aa", cursor: "#e69875", cursorAccent: "#1e2326",
+    black: "#7a8478", red: "#e67e80", green: "#a7c080", yellow: "#dbbc7f",
+    blue: "#7fbbb3", magenta: "#d699b6", cyan: "#83c092", white: "#f2efdf",
+    brightBlack: "#a6b0a0", brightRed: "#f85552", brightGreen: "#8da101",
+    brightYellow: "#dfa000", brightBlue: "#3a94c5", brightMagenta: "#df69ba",
+    brightCyan: "#35a77c", brightWhite: "#fffbef"
+  }),
+  defineTheme("kanagawa_dragon", "Kanagawa Dragon", "Ink and ash", {
+    background: "#181616", foreground: "#c5c9c5", cursor: "#c8c093", cursorAccent: "#181616",
+    black: "#0d0c0c", red: "#c4746e", green: "#8a9a7b", yellow: "#c4b28a",
+    blue: "#8ba4b0", magenta: "#a292a3", cyan: "#8ea4a2", white: "#c8c093",
+    brightBlack: "#a6a69c", brightRed: "#e46876", brightGreen: "#87a987",
+    brightYellow: "#e6c384", brightBlue: "#7fb4ca", brightMagenta: "#938aa9",
+    brightCyan: "#7aa89f", brightWhite: "#c5c9c5"
+  }),
+  defineTheme("rose_pine", "Rosé Pine", "Muted pine night", {
+    background: "#191724", foreground: "#e0def4", cursor: "#e0def4", cursorAccent: "#191724",
+    black: "#26233a", red: "#eb6f92", green: "#31748f", yellow: "#f6c177",
+    blue: "#9ccfd8", magenta: "#c4a7e7", cyan: "#ebbcba", white: "#e0def4",
+    brightBlack: "#6e6a86", brightRed: "#eb6f92", brightGreen: "#31748f",
+    brightYellow: "#f6c177", brightBlue: "#9ccfd8", brightMagenta: "#c4a7e7",
+    brightCyan: "#ebbcba", brightWhite: "#e0def4"
+  }),
+  defineTheme("vesper", "Vesper", "Minimal amber dark", {
+    background: "#101010", foreground: "#ffffff", cursor: "#acb1ab", cursorAccent: "#101010",
+    black: "#101010", red: "#f5a191", green: "#90b99f", yellow: "#e6b99d",
+    blue: "#aca1cf", magenta: "#e29eca", cyan: "#ea83a5", white: "#a0a0a0",
+    brightBlack: "#7e7e7e", brightRed: "#ff8080", brightGreen: "#99ffe4",
+    brightYellow: "#ffc799", brightBlue: "#b9aeda", brightMagenta: "#ecaad6",
+    brightCyan: "#f591b2", brightWhite: "#ffffff"
   })
 ];
 

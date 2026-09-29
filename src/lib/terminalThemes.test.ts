@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { terminalTheme, terminalThemes } from "./terminalThemes";
+import { contrastRatio, terminalTheme, terminalThemes } from "./terminalThemes";
 
 const ansiColors = [
   "black",
@@ -22,7 +22,7 @@ const ansiColors = [
 
 describe("terminal themes", () => {
   it("defines a complete xterm palette and matching pane chrome for every theme", () => {
-    expect(terminalThemes).toHaveLength(19);
+    expect(terminalThemes).toHaveLength(27);
     expect(new Set(terminalThemes.map((theme) => theme.id)).size).toBe(terminalThemes.length);
     for (const theme of terminalThemes) {
       expect(theme.palette.background).toMatch(/^#[0-9a-f]{6}$/i);
@@ -38,6 +38,11 @@ describe("terminal themes", () => {
       expect(theme.chrome.headerBackground).not.toBe("");
       expect(theme.chrome.headerForeground).not.toBe("");
       expect(theme.chrome.headerMuted).not.toBe("");
+      // Labels and descriptions in the tools sidebar use this color.
+      expect(
+        contrastRatio(theme.chrome.headerMuted, theme.palette.background!),
+        `${theme.id} muted text`
+      ).toBeGreaterThanOrEqual(3);
       expect(theme.chrome.headerBackground).toBe(theme.palette.background);
       expect(theme.chrome.headerForeground).toBe(theme.palette.foreground);
     }

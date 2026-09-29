@@ -227,6 +227,14 @@ pub enum TerminalTheme {
     SolarizedLight,
     Dracula,
     Monokai,
+    CatppuccinLatte,
+    GruvboxLight,
+    Nord,
+    OneDark,
+    EverforestDark,
+    KanagawaDragon,
+    RosePine,
+    Vesper,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
