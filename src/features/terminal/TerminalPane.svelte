@@ -96,6 +96,7 @@
     onClose = () => {},
     onRetry = () => {},
     onBroadcast = () => {},
+    onMove = () => {},
     onFocus = () => {},
     onFocusModeToggle = () => {},
     headerDraggable = false,
@@ -127,6 +128,7 @@
     onClose?: () => void;
     onRetry?: () => void;
     onBroadcast?: () => void;
+    onMove?: () => void;
     onFocus?: () => void;
     onFocusModeToggle?: () => void;
     headerDraggable?: boolean;
@@ -1243,6 +1245,18 @@
           if (event.type === "keydown") event.preventDefault();
           return false;
         }
+        // Ctrl+Tab / Ctrl+Shift+Tab switch tabs and Ctrl+Shift+E opens "Move
+        // to…" (window handler); xterm would otherwise send Tab / Ctrl+E.
+        if (
+          event.ctrlKey &&
+          !event.altKey &&
+          !event.metaKey &&
+          (event.key === "Tab" || event.code === "Tab" ||
+            (event.shiftKey && event.key.toLowerCase() === "e"))
+        ) {
+          if (event.type === "keydown") event.preventDefault();
+          return false;
+        }
         return true;
       });
 
@@ -1447,6 +1461,9 @@
         </button>
         <button title="Focus pane" onclick={onFocus}>
           <Icon name="maximize" size={15} />
+        </button>
+        <button title="Move to… (Ctrl+Shift+E)" onclick={onMove}>
+          <Icon name="forward" size={15} />
         </button>
         <button title="Close pane" onclick={onClose}>
           <Icon name="close" size={15} />

@@ -495,6 +495,10 @@
         event.preventDefault();
         void openTerminal();
       }
+      if (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "Tab" || event.code === "Tab")) {
+        event.preventDefault();
+        cycleTerminalTab(event.shiftKey ? -1 : 1);
+      }
       if (
         event.ctrlKey &&
         event.altKey &&
@@ -508,7 +512,7 @@
       }
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "e") {
         event.preventDefault();
-        toggleSplit();
+        if (page === "terminal" && activeTerminalId) openMovePicker(activeTerminalId);
       }
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
@@ -1921,6 +1925,121 @@
     page = "terminal";
   }
 
+  interface MoveTarget {
+    key: string;
+    label: string;
+    detail: string;
+    icon: string;
+    run: () => void;
+  }
+
+  let movePicker = $state<{ paneId: string; index: number } | null>(null);
+  let movePickerElement = $state<HTMLElement>();
+
+  /** Where a pane can go, in tab-bar order: out of its workspace, into
+   * another workspace, or into a new one together with another tab. */
+  function moveTargets(paneId: string): MoveTarget[] {
+    const own = workspaceForPane(paneId);
+    const targets: MoveTarget[] = [];
+    if (own) {
+      targets.push({
+        key: "out",
+        label: "Its own tab",
+        detail: `Out of ${own.name}`,
+        icon: "extract",
+        run: () => extractWorkspacePane(paneId)
+      });
+    }
+    const standalone = new Map(standaloneTerminalTabs().map((tab) => [tab.id, tab]));
+    // Tabs often share a title ("Local Terminal"); their place in the bar tells them apart.
+    let position = 0;
+    for (const id of topTabOrder) {
+      const workspaceId = workspaceIdFromTabId(id);
+      if (workspaceId || standalone.has(id)) position += 1;
+      const workspace = workspaceId ? workspaceById(workspaceId) : null;
+      if (workspace && workspace.id !== own?.id) {
+        const anchor = workspace.activePaneId ?? workspace.paneIds.at(-1);
+        if (!anchor) continue;
+        targets.push({
+          key: id,
+          label: workspace.name,
+          detail: `Tab ${position} · ` + workspace.paneIds
+            .map((pane) => terminalTabs.find((tab) => tab.id === pane)?.title ?? "")
+            .join(", "),
+          icon: "grid",
+          run: () => movePaneIntoPane(paneId, anchor, "right")
+        });
+      }
+      const tab = standalone.get(id);
+      if (tab && tab.id !== paneId) {
+        targets.push({
+          key: id,
+          label: tab.title,
+          detail: `Tab ${position} · New workspace with this tab`,
+          icon: "terminal",
+          run: () => movePaneIntoPane(paneId, tab.id, "right")
+        });
+      }
+    }
+    return targets;
+  }
+
+  async function openMovePicker(paneId: string) {
+    terminalContextMenu = null;
+    movePicker = { paneId, index: 0 };
+    await tick();
+    movePickerElement?.focus();
+  }
+
+  async function closeMovePicker(target: MoveTarget | null = null) {
+    const paneId = movePicker?.paneId;
+    movePicker = null;
+    // The pane may have closed while the picker was open; moving a gone id
+    // into a workspace would leave a ghost pane in it.
+    if (target && paneId && terminalTabs.some((tab) => tab.id === paneId)) {
+      target.run();
+      // Picked from a tab's menu on another page: show where it went.
+      if (page !== "terminal" && (await preparePageChange("terminal"))) page = "terminal";
+    }
+    await tick();
+    terminalGridElement?.querySelector<HTMLTextAreaElement>(
+      `[data-pane-id="${activeTerminalId}"] .xterm-helper-textarea`
+    )?.focus();
+  }
+
+  function handleMovePickerKeydown(event: KeyboardEvent, targets: MoveTarget[]) {
+    if (!movePicker) return;
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      void closeMovePicker();
+    } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && targets.length > 0) {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      movePicker.index = (movePicker.index + step + targets.length) % targets.length;
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      void closeMovePicker(targets[movePicker.index] ?? null);
+    }
+  }
+
+  /** Ctrl+Tab / Ctrl+Shift+Tab: the next or previous terminal tab, in bar order. */
+  function cycleTerminalTab(step: 1 | -1) {
+    const standalone = new Set(standaloneTerminalTabs().map((tab) => tab.id));
+    const order = topTabOrder.filter(
+      (id) => standalone.has(id) || workspaceIdFromTabId(id) !== null
+    );
+    if (order.length === 0) return;
+    const current = activeWorkspaceId ? workspaceTabId(activeWorkspaceId) : activeTerminalId;
+    const index = page === "terminal" && current ? order.indexOf(current) : -1;
+    const nextIndex =
+      index < 0 ? (step > 0 ? 0 : order.length - 1) : (index + step + order.length) % order.length;
+    if (nextIndex === index) return;
+    const next = order[nextIndex];
+    const workspaceId = workspaceIdFromTabId(next);
+    void (workspaceId ? activateWorkspace(workspaceId) : activateStandaloneTerminal(next));
+  }
+
   async function activateWorkspace(workspaceId: string) {
     const workspace = workspaceById(workspaceId);
     if (!workspace || workspace.paneIds.length < 2) return;
@@ -1970,7 +2089,7 @@
   function openTerminalContextMenu(event: MouseEvent, tab: TerminalTab) {
     event.preventDefault();
     const width = 226;
-    const height = workspaceIdFromTabId(tab.id) ? 146 : 252;
+    const height = workspaceIdFromTabId(tab.id) ? 146 : 294;
     terminalContextMenu = {
       tab,
       x: Math.max(10, Math.min(event.clientX, window.innerWidth - width - 10)),
@@ -2708,17 +2827,6 @@
         });
       broadcastChains.set(sessionId, chain);
     }
-  }
-
-  function toggleSplit() {
-    const workspace = activeWorkspace();
-    if (workspace) {
-      void activateWorkspace(workspace.id);
-      return;
-    }
-    const paneIds = standaloneTerminalTabs().map((tab) => tab.id);
-    if (paneIds.length < 2) return;
-    createWorkspace(paneIds);
   }
 
   async function toggleBroadcast(paneId = activeTerminalId) {
@@ -4212,6 +4320,7 @@
                   broadcast={visibleWorkspace?.broadcastPaneIds.includes(tab.id) ?? false}
                   onClose={() => void requestCloseTerminalTab(tab.id)}
                   onBroadcast={() => toggleBroadcast(tab.id)}
+                  onMove={() => void openMovePicker(tab.id)}
                   onFocus={() => focusWorkspacePane(tab.id)}
                   onFocusModeToggle={() => void toggleTerminalFocusMode()}
                   headerDraggable={!usesTauriNativeTerminalDrag}
@@ -5257,6 +5366,36 @@
     {/if}
   </div>
 
+  {#if movePicker}
+    {@const movingTab = terminalTabs.find((tab) => tab.id === movePicker?.paneId)}
+    {@const targets = moveTargets(movePicker.paneId)}
+    <div class="move-picker-backdrop" role="presentation" onpointerdown={() => void closeMovePicker()}></div>
+    <div
+      class="move-picker"
+      style={movingTab ? terminalMenuStyle(movingTab) : undefined}
+      role="listbox"
+      tabindex="-1"
+      aria-label="Move to"
+      bind:this={movePickerElement}
+      onkeydown={(event) => handleMovePickerKeydown(event, targets)}
+    >
+      <header>Move <strong>{movingTab?.title ?? "tab"}</strong> to…</header>
+      {#each targets as target, index (target.key)}
+        <button
+          role="option"
+          aria-selected={index === movePicker.index}
+          class:selected={index === movePicker.index}
+          onpointerenter={() => movePicker && (movePicker.index = index)}
+          onclick={() => void closeMovePicker(target)}
+        >
+          <Icon name={target.icon} size={16} />
+          <span><strong>{target.label}</strong><small>{target.detail}</small></span>
+        </button>
+      {:else}
+        <p>No other tab or workspace to move to.</p>
+      {/each}
+    </div>
+  {/if}
   {#if terminalContextMenu}
     <div
       class="host-context-menu terminal-context-menu"
@@ -5326,6 +5465,13 @@
             if (tab) void splitTerminalTab(tab);
           }}
         ><Icon name="grid" size={17} /><span>Split horizontally</span></button>
+        <button
+          role="menuitem"
+          onclick={() => {
+            const tab = terminalContextMenu?.tab;
+            if (tab) void openMovePicker(tab.id);
+          }}
+        ><Icon name="forward" size={17} /><span>Move to…</span><kbd>Ctrl+Shift+E</kbd></button>
         <button
           role="menuitem"
           onclick={() => {

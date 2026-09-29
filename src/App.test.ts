@@ -101,6 +101,42 @@ it("toggles terminal tools with Ctrl+Alt+J", async () => {
   await waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("false"));
 });
 
+it("moves a pane out of its workspace and back with Move to…, and cycles tabs", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const activeTab = () =>
+    view.container.querySelector('.terminal-tab[aria-current="page"]')?.textContent?.trim();
+
+  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  const picker = await view.findByRole("listbox", { name: "Move to" });
+  const options = view.getAllByRole("option");
+  expect(options[0].textContent).toContain("Its own tab");
+  await fireEvent.keyDown(picker, { key: "Enter" });
+  await waitFor(() => expect(view.queryByRole("group", { name: "Workspace terminal tab" })).toBeNull());
+  expect(view.getByRole("group", { name: "a terminal tab" })).toBeTruthy();
+  expect(view.getByRole("group", { name: "b terminal tab" })).toBeTruthy();
+  expect(view.queryByRole("listbox", { name: "Move to" })).toBeNull();
+
+  const first = activeTab();
+  await fireEvent.keyDown(document.body, { key: "Tab", ctrlKey: true });
+  await waitFor(() => expect(activeTab()).not.toBe(first));
+  await fireEvent.keyDown(document.body, { key: "Tab", code: "Tab", ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(activeTab()).toBe(first));
+  await fireEvent.keyDown(document.body, { key: "Tab", ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(activeTab()).not.toBe(first));
+
+  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  const again = await view.findByRole("listbox", { name: "Move to" });
+  expect(view.getAllByRole("option")).toHaveLength(1);
+  expect(view.getByRole("option").textContent).toContain("New workspace with this tab");
+  await fireEvent.keyDown(again, { key: "Escape" });
+  expect(view.queryByRole("listbox", { name: "Move to" })).toBeNull();
+  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  await fireEvent.keyDown(await view.findByRole("listbox", { name: "Move to" }), { key: "Enter" });
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  expect(ipc.closeTerminal).not.toHaveBeenCalled();
+});
+
 it("detaches the workspace from its context menu with both panes", async () => {
   const view = render(App);
   const workspace = await view.findByRole("group", { name: "Workspace terminal tab" });

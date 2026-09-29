@@ -1742,12 +1742,107 @@ select:focus-visible {
   color: var(--menu-muted);
 }
 
+.host-context-menu.terminal-context-menu button kbd {
+  color: var(--menu-muted);
+  background: color-mix(in srgb, var(--menu-foreground) 8%, transparent);
+}
+
 .host-context-menu.terminal-context-menu button.danger {
   color: color-mix(in srgb, var(--danger) 70%, var(--menu-foreground));
 }
 
 .host-context-menu.terminal-context-menu .context-separator {
   background: color-mix(in srgb, var(--menu-foreground) 10%, transparent);
+}
+
+/* "Move to…": pick a workspace, a tab to pair with, or leave the workspace. */
+.move-picker-backdrop {
+  position: fixed;
+  z-index: 950;
+  inset: 0;
+}
+
+.move-picker {
+  position: fixed;
+  z-index: 951;
+  top: 64px;
+  left: 50%;
+  display: grid;
+  gap: 2px;
+  width: min(400px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 96px));
+  padding: 7px;
+  overflow: auto;
+  color: var(--menu-foreground, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--menu-foreground, #1f2a30) 10%, transparent);
+  border-radius: 13px;
+  outline: 0;
+  background: color-mix(in srgb, var(--menu-background, #f8fafb) 92%, var(--menu-foreground, #1f2a30));
+  transform: translateX(-50%);
+}
+
+.move-picker header {
+  padding: 5px 9px 8px;
+  color: var(--menu-muted, var(--muted));
+  font-size: 12px;
+}
+
+.move-picker header strong {
+  color: var(--menu-foreground, var(--ink));
+}
+
+.move-picker button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 5px 10px;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.move-picker button > svg {
+  color: var(--menu-muted, var(--muted));
+}
+
+.move-picker button.selected {
+  background: color-mix(in srgb, var(--menu-foreground, #1f2a30) 10%, transparent);
+}
+
+.move-picker button span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.move-picker button strong,
+.move-picker button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.move-picker button strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.move-picker button small {
+  color: var(--menu-muted, var(--muted));
+  font-size: 11px;
+}
+
+.move-picker p {
+  margin: 0;
+  padding: 10px;
+  color: var(--menu-muted, var(--muted));
+  font-size: 12px;
 }
 
 .host-context-menu.submenu-left .context-submenu-panel {
