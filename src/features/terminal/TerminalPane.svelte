@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { appCtrlShiftCodes } from "../../lib/appChords";
   import { Channel } from "@tauri-apps/api/core";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
@@ -1245,18 +1246,15 @@
           if (event.type === "keydown") event.preventDefault();
           return false;
         }
-        // Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Ctrl+Shift+E opens "Move
-        // to…" and Ctrl+Shift+H/J/K/L move between panes (window handler).
-        // xterm would otherwise send Tab, Ctrl+E, or Ctrl+H/J/K/L, which
-        // the shell reads as backspace, Enter, kill-line and clear.
+        // Ctrl+Tab / Ctrl+Shift+Tab and the window's Ctrl+Shift chords
+        // (appChords.ts) bubble to the window handler without reaching the
+        // shell as Tab or Ctrl+<key>.
         if (
           event.ctrlKey &&
           !event.altKey &&
           !event.metaKey &&
           (event.key === "Tab" || event.code === "Tab" ||
-            (event.shiftKey &&
-              (event.key.toLowerCase() === "e" ||
-                ["KeyH", "KeyJ", "KeyK", "KeyL"].includes(event.code))))
+            (event.shiftKey && appCtrlShiftCodes.has(event.code)))
         ) {
           if (event.type === "keydown") event.preventDefault();
           return false;

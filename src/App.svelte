@@ -489,11 +489,11 @@
         event.preventDefault();
         toggleHistorySuggestions();
       }
-      if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "k" && !insidePane) {
+      if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyN") {
         event.preventDefault();
         void switchPage("new-tab");
       }
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "t") {
+      if (event.ctrlKey && event.shiftKey && event.code === "KeyT") {
         event.preventDefault();
         void openTerminal();
       }
@@ -519,11 +519,11 @@
         event.preventDefault();
         if (page === "terminal" && activeTerminalId) toggleTerminalTools();
       }
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "e") {
+      if (event.ctrlKey && event.shiftKey && event.code === "KeyE") {
         event.preventDefault();
         if (page === "terminal" && activeTerminalId) openMovePicker(activeTerminalId);
       }
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
+      if (event.ctrlKey && event.shiftKey && event.code === "KeyB") {
         event.preventDefault();
         toggleBroadcast();
       }
@@ -5368,7 +5368,7 @@
               if (event.key === "Enter") openFirstNewTabResult();
             }}
           />
-          <kbd>Ctrl K</kbd>
+          <kbd>Ctrl Shift N</kbd>
         </div>
         <section class="recent-panel">
           <header><h2>Connections</h2></header>

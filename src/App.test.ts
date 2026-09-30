@@ -107,7 +107,7 @@ it("moves a pane out of its workspace and back with Move to…, and cycles tabs"
   const activeTab = () =>
     view.container.querySelector('.terminal-tab[aria-current="page"]')?.textContent?.trim();
 
-  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  await fireEvent.keyDown(document.body, { key: "E", code: "KeyE", ctrlKey: true, shiftKey: true });
   const picker = await view.findByRole("listbox", { name: "Move to" });
   const options = view.getAllByRole("option");
   expect(options[0].textContent).toContain("Its own tab");
@@ -125,13 +125,13 @@ it("moves a pane out of its workspace and back with Move to…, and cycles tabs"
   await fireEvent.keyDown(document.body, { key: "Tab", ctrlKey: true, shiftKey: true });
   await waitFor(() => expect(activeTab()).not.toBe(first));
 
-  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  await fireEvent.keyDown(document.body, { key: "E", code: "KeyE", ctrlKey: true, shiftKey: true });
   const again = await view.findByRole("listbox", { name: "Move to" });
   expect(view.getAllByRole("option")).toHaveLength(1);
   expect(view.getByRole("option").textContent).toContain("New workspace with this tab");
   await fireEvent.keyDown(again, { key: "Escape" });
   expect(view.queryByRole("listbox", { name: "Move to" })).toBeNull();
-  await fireEvent.keyDown(document.body, { key: "E", ctrlKey: true, shiftKey: true });
+  await fireEvent.keyDown(document.body, { key: "E", code: "KeyE", ctrlKey: true, shiftKey: true });
   await fireEvent.keyDown(await view.findByRole("listbox", { name: "Move to" }), { key: "Enter" });
   await view.findByRole("group", { name: "Workspace terminal tab" });
   expect(ipc.closeTerminal).not.toHaveBeenCalled();
@@ -154,6 +154,16 @@ it("moves focus between workspace panes with Ctrl+Shift+H/J/K/L", async () => {
   }
   await waitFor(() => expect(active()).toBe("a"));
   expect(view.queryByText("New tab")).toBeNull();
+});
+
+it("opens the new-tab page with Ctrl+Shift+N, not Ctrl+K", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const search = () => view.queryByRole("textbox", { name: "Search hosts, terminal panes, or workspaces" });
+  await fireEvent.keyDown(document.body, { key: "k", code: "KeyK", ctrlKey: true });
+  expect(search()).toBeNull();
+  await fireEvent.keyDown(document.body, { key: "N", code: "KeyN", ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(search()).not.toBeNull());
 });
 
 it("detaches the workspace from its context menu with both panes", async () => {
