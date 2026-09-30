@@ -5171,20 +5171,20 @@ select:focus-visible {
 }
 
 .terminal-suggestion-list {
-  max-height: calc(7 * var(--suggestion-row) + 14px);
+  max-height: calc(7 * var(--suggestion-row) + 6px);
   overflow: auto;
-  padding: 7px;
+  padding: 3px;
   scrollbar-width: none;
 }
 
 .terminal-suggestion-list > button {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  /* No column gap: an empty badge column would still leave one at the end. */
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
   width: 100%;
   height: var(--suggestion-row);
-  padding: 0 4px 0 10px;
+  padding: 0 8px;
   color: inherit;
   text-align: left;
   border: 0;
@@ -5208,6 +5208,7 @@ select:focus-visible {
 }
 
 .suggestion-command {
+  margin-left: 12px;
   overflow: hidden;
   font-family: "JetBrains Mono", "Ubuntu Mono", monospace;
   font-size: var(--terminal-font-size, 14px);
@@ -5223,6 +5224,7 @@ select:focus-visible {
 
 .suggestion-enter {
   display: grid;
+  margin-left: 8px;
   width: 26px;
   height: min(24px, calc(var(--suggestion-row) - 6px));
   place-items: center;

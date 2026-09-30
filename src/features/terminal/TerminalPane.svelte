@@ -1031,7 +1031,7 @@
         const cellWidth = container.clientWidth / Math.max(terminal.cols, 1);
         const cellHeight = container.clientHeight / Math.max(terminal.rows, 1);
         const width = Math.min(520, Math.max(290, container.clientWidth - 20));
-        const height = Math.min(suggestions.length, 7) * suggestionRowHeight(appearance.fontSize) + 14;
+        const height = Math.min(suggestions.length, 7) * suggestionRowHeight(appearance.fontSize) + 6;
         const cursorLeft = 10 + cursor.x * cellWidth;
         const cursorTop = container.offsetTop + 8 + cursor.y * cellHeight;
         const left = Math.max(10, Math.min(cursorLeft, container.clientWidth - width - 10));
