@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { trimSelectionLineEnds } from "../../lib/terminalSelection";
   import { appCtrlShiftCodes } from "../../lib/appChords";
   import { Channel } from "@tauri-apps/api/core";
   import { FitAddon } from "@xterm/addon-fit";
@@ -741,7 +742,7 @@
           if (primarySelectionFrame !== null) {
             window.cancelAnimationFrame(primarySelectionFrame);
             primarySelectionFrame = null;
-            const selection = terminal?.getSelection() ?? "";
+            const selection = trimSelectionLineEnds(terminal?.getSelection() ?? "");
             if (selection) {
               primarySelectionWrite = primarySelectionWrite
                 .then(() => writeTerminalClipboard(selection, true))
@@ -1158,7 +1159,7 @@
         if (!supportsPrimarySelection || primarySelectionFrame !== null) return;
         primarySelectionFrame = window.requestAnimationFrame(() => {
           primarySelectionFrame = null;
-          const selection = terminal?.getSelection() ?? "";
+          const selection = trimSelectionLineEnds(terminal?.getSelection() ?? "");
           if (selection) {
             primarySelectionWrite = primarySelectionWrite
               .then(() => writeTerminalClipboard(selection, true))
@@ -1182,7 +1183,7 @@
         ) {
           event.preventDefault();
           event.stopPropagation();
-          const selection = terminal?.getSelection() ?? "";
+          const selection = trimSelectionLineEnds(terminal?.getSelection() ?? "");
           if (selection) void writeTerminalClipboard(selection);
           return false;
         }
