@@ -544,7 +544,7 @@
       if (event.key === "Escape") terminalContextMenu = null;
     };
     const onFocusModeKeydown = (event: KeyboardEvent) => {
-      if (event.key !== "F11" || event.ctrlKey || event.metaKey || event.shiftKey || page !== "terminal") return;
+      if (event.key !== "F11" || event.ctrlKey || event.metaKey || event.shiftKey || !focusModePage(page)) return;
       event.preventDefault();
       event.stopPropagation();
       if (!event.repeat) void toggleTerminalFocusMode();
@@ -2661,6 +2661,12 @@
     }, 230);
   }
 
+  /** F11 survives a trip to the new-tab page: it is a launcher on the way
+   * back to a terminal. Other pages leave focus mode. */
+  function focusModePage(current: MainPage): boolean {
+    return current === "terminal" || current === "new-tab";
+  }
+
   async function toggleTerminalFocusMode() {
     if (terminalFocusChanging) return;
     terminalFocusChanging = true;
@@ -2685,12 +2691,12 @@
       showMessage(cause, true);
     } finally {
       terminalFocusChanging = false;
-      if (page !== "terminal" && terminalFocusMode) void toggleTerminalFocusMode();
+      if (!focusModePage(page) && terminalFocusMode) void toggleTerminalFocusMode();
     }
   }
 
   $effect(() => {
-    if (page !== "terminal" && terminalFocusMode) void toggleTerminalFocusMode();
+    if (!focusModePage(page) && terminalFocusMode) void toggleTerminalFocusMode();
   });
 
   /**
@@ -4032,12 +4038,12 @@
   class:detached-window={detachedMode}
   class:detached-initialized={detachedInitialized}
   class:terminal-surface={page === "terminal"}
-  class:terminal-focus={page === "terminal" && terminalFocusMode}
+  class:terminal-focus={focusModePage(page) && terminalFocusMode}
   class:single-terminal-surface={page === "terminal" && !activeWorkspace() && Boolean(activeTerminalId)}
   class:dragging-terminal-tab={Boolean(panePointerDrag?.dragging || topTabPointerDrag?.dragging)}
   style={`${singleTerminalChromeStyle()};--terminal-accent:${activeDividerColor()}`}
 >
-  {#if page === "terminal" && terminalFocusMode}
+  {#if focusModePage(page) && terminalFocusMode}
     <button
       class="terminal-focus-exit"
       title="Show header (F11)"

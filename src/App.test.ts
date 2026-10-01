@@ -179,6 +179,19 @@ it("does not close a tab with Ctrl+Shift+W behind an open dialog", async () => {
   expect(view.container.querySelectorAll(".terminal-instance")).toHaveLength(2);
 });
 
+it("keeps F11 focus mode on the new-tab page", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const app = view.container.querySelector(".application")!;
+  await fireEvent.keyDown(window, { key: "F11" });
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(true));
+  await fireEvent.keyDown(document.body, { key: "N", code: "KeyN", ctrlKey: true, shiftKey: true });
+  await view.findByRole("textbox", { name: "Search hosts, terminal panes, or workspaces" });
+  expect(app.classList.contains("terminal-focus")).toBe(true);
+  await fireEvent.keyDown(window, { key: "F11" });
+  await waitFor(() => expect(app.classList.contains("terminal-focus")).toBe(false));
+});
+
 it("opens the new-tab page with Ctrl+Shift+N, not Ctrl+K", async () => {
   const view = render(App);
   await view.findByRole("group", { name: "Workspace terminal tab" });
