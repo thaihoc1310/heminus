@@ -493,6 +493,17 @@
         event.preventDefault();
         void switchPage("new-tab");
       }
+      if (
+        event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey &&
+        event.code === "KeyW" && !event.repeat
+      ) {
+        event.preventDefault();
+        // Same as the tab's (or pane's) close button, prompt for running work
+        // included. Not behind an open dialog: that tab is not what's in view.
+        const dialogOpen = Boolean(document.querySelector(".app-dialog-layer"));
+        const closing = page === "terminal" && !dialogOpen ? activeTerminalId : null;
+        if (closing) void requestCloseTerminalTab(closing).then(() => focusTerminalPane());
+      }
       if (event.ctrlKey && event.shiftKey && event.code === "KeyT") {
         event.preventDefault();
         void openTerminal();
@@ -1927,11 +1938,22 @@
     }
   }
 
+  /** Hand the keyboard to a pane once it is on screen. A tab that was
+   * hidden took its focus with it, so switching tabs would leave nothing
+   * focused and typing would go nowhere until a click. */
+  async function focusTerminalPane(id = activeTerminalId) {
+    await tick();
+    terminalGridElement?.querySelector<HTMLTextAreaElement>(
+      `[data-pane-id="${id}"] .xterm-helper-textarea`
+    )?.focus();
+  }
+
   async function activateStandaloneTerminal(id: string) {
     if (!(await preparePageChange("terminal"))) return;
     activeTerminalId = id;
     activeWorkspaceId = null;
     page = "terminal";
+    await focusTerminalPane(id);
   }
 
   interface MoveTarget {
@@ -2010,10 +2032,7 @@
       // Picked from a tab's menu on another page: show where it went.
       if (page !== "terminal" && (await preparePageChange("terminal"))) page = "terminal";
     }
-    await tick();
-    terminalGridElement?.querySelector<HTMLTextAreaElement>(
-      `[data-pane-id="${activeTerminalId}"] .xterm-helper-textarea`
-    )?.focus();
+    await focusTerminalPane();
   }
 
   function handleMovePickerKeydown(event: KeyboardEvent, targets: MoveTarget[]) {
@@ -2048,11 +2067,7 @@
     activateTerminalPane(target);
     // A zoomed workspace shows one pane; follow focus to the next one.
     if (workspace.focusedPaneId) workspace.focusedPaneId = target;
-    void tick().then(() =>
-      terminalGridElement?.querySelector<HTMLTextAreaElement>(
-        `[data-pane-id="${target}"] .xterm-helper-textarea`
-      )?.focus()
-    );
+    void focusTerminalPane(target);
   }
 
   /** Ctrl+Tab / Ctrl+Shift+Tab: the next or previous terminal tab, in bar order. */
@@ -2081,6 +2096,7 @@
       ? workspace.activePaneId
       : workspace.paneIds[0] ?? null;
     page = "terminal";
+    await focusTerminalPane();
   }
 
   function terminalPaneVisible(id: string): boolean {
@@ -2661,10 +2677,9 @@
         terminalFocusMode = true;
         closeTerminalTools();
       }
-      await tick();
-      terminalGridElement?.querySelector<HTMLTextAreaElement>(
-        `[data-pane-id="${activeTerminalId}"] .xterm-helper-textarea`
-      )?.focus();
+      // Not awaited: the toggle is done once the mode flips, and holding
+      // terminalFocusChanging through the focus would swallow a quick F11.
+      void focusTerminalPane();
     } catch (cause) {
       if (leaving) terminalFocusMode = false;
       showMessage(cause, true);

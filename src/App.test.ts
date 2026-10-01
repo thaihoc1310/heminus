@@ -156,6 +156,29 @@ it("moves focus between workspace panes with Ctrl+Shift+H/J/K/L", async () => {
   expect(view.queryByText("New tab")).toBeNull();
 });
 
+it("closes the active pane, then the tab, with Ctrl+Shift+W", async () => {
+  const view = render(App);
+  await view.findByRole("group", { name: "Workspace terminal tab" });
+  const closeKey = { key: "W", code: "KeyW", ctrlKey: true, shiftKey: true };
+  await fireEvent.keyDown(document.body, closeKey);
+  await view.findByRole("group", { name: "b terminal tab" });
+  expect(view.queryByRole("group", { name: "a terminal tab" })).toBeNull();
+  expect(view.queryByRole("group", { name: "Workspace terminal tab" })).toBeNull();
+  await fireEvent.keyDown(document.body, closeKey);
+  await waitFor(() => expect(view.queryByRole("group", { name: "b terminal tab" })).toBeNull());
+});
+
+it("does not close a tab with Ctrl+Shift+W behind an open dialog", async () => {
+  const view = render(App);
+  const workspace = await view.findByRole("group", { name: "Workspace terminal tab" });
+  await fireEvent.contextMenu(workspace);
+  await fireEvent.click(view.getByRole("menuitem", { name: "Rename" }));
+  const dialog = await view.findByRole("dialog");
+  await fireEvent.keyDown(dialog, { key: "W", code: "KeyW", ctrlKey: true, shiftKey: true });
+  expect(view.getByRole("group", { name: "Workspace terminal tab" })).toBeTruthy();
+  expect(view.container.querySelectorAll(".terminal-instance")).toHaveLength(2);
+});
+
 it("opens the new-tab page with Ctrl+Shift+N, not Ctrl+K", async () => {
   const view = render(App);
   await view.findByRole("group", { name: "Workspace terminal tab" });

@@ -21,6 +21,7 @@ const reservedShortcuts = new Set([
   "Ctrl+Shift+K",
   "Ctrl+Shift+L",
   "Ctrl+Shift+T",
+  "Ctrl+Shift+W",
   "Ctrl+Shift+N",
   "Ctrl+Shift+E",
   "Ctrl+Shift+B",

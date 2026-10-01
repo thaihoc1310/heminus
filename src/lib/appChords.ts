@@ -6,6 +6,7 @@
  */
 export const appCtrlShiftCodes = new Set([
   "KeyT", // new terminal
+  "KeyW", // close the active tab or pane
   "KeyN", // new-tab page
   "KeyE", // Move to…
   "KeyB", // broadcast input
