@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { trimSelectionLineEnds } from "../../lib/terminalSelection";
+  import { tidySelectionHtml, trimSelectionLineEnds } from "../../lib/terminalSelection";
   import { appCtrlShiftCodes } from "../../lib/appChords";
   import { Channel } from "@tauri-apps/api/core";
   import { FitAddon } from "@xterm/addon-fit";
@@ -591,6 +591,18 @@
       webLinksAddon = new WebLinksAddon();
       searchAddon = new SearchAddon({ highlightLimit: 2_000 });
       const serializeAddon = new SerializeAddon();
+      // The selection with its colours and weights, for editors that paste
+      // HTML; plain text stays the fallback if serializing ever fails.
+      const selectionHtml = () => {
+        try {
+          return tidySelectionHtml(
+            serializeAddon.serializeAsHTML({ onlySelection: true, includeGlobalBackground: true }),
+            terminal?.options.fontFamily ?? ""
+          );
+        } catch {
+          return undefined;
+        }
+      };
       // SerializeAddon omits mouse encoding and cursor visibility. Herdr uses
       // SGR mouse coordinates; restoring tracking alone would corrupt clicks.
       const extraModes = new Map<number, boolean>([[25, true]]);
@@ -1184,7 +1196,7 @@
           event.preventDefault();
           event.stopPropagation();
           const selection = trimSelectionLineEnds(terminal?.getSelection() ?? "");
-          if (selection) void writeTerminalClipboard(selection);
+          if (selection) void writeTerminalClipboard(selection, false, selectionHtml());
           return false;
         }
         if (

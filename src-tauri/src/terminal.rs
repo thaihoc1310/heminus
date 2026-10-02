@@ -62,11 +62,20 @@ const TERMINAL_REPLAY_IDLE_CAPACITY: usize = 64 * 1024;
 /// Replay is delivered in pieces so re-attaching never builds one huge message.
 const TERMINAL_REPLAY_CHUNK: usize = 256 * 1024;
 
+/// `info` values for the targets offered alongside HTML.
+#[cfg(target_os = "linux")]
+const CLIPBOARD_TEXT: u32 = 0;
+#[cfg(target_os = "linux")]
+const CLIPBOARD_HTML: u32 = 1;
+
+/// Writes `text`, and `html` when given (colours, bold, italics from the
+/// terminal), so rich editors paste the styled copy and the rest plain text.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 pub async fn terminal_clipboard_write(
     app: AppHandle,
     text: String,
+    html: Option<String>,
     primary: bool,
 ) -> Result<(), String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -77,7 +86,34 @@ pub async fn terminal_clipboard_write(
             &gdk::SELECTION_CLIPBOARD
         };
         let clipboard = gtk::Clipboard::get(selection);
-        clipboard.set_text(&text);
+        match html {
+            Some(html) => {
+                let flags = gtk::TargetFlags::empty();
+                let mut targets = vec![gtk::TargetEntry::new("text/html", flags, CLIPBOARD_HTML)];
+                // The text flavours gtk_clipboard_set_text offers.
+                for target in ["UTF8_STRING", "text/plain;charset=utf-8", "text/plain", "STRING", "TEXT"] {
+                    targets.push(gtk::TargetEntry::new(target, flags, CLIPBOARD_TEXT));
+                }
+                clipboard.set_with_data(&targets, move |_, data, info| {
+                    if info == CLIPBOARD_HTML {
+                        data.set(&data.target(), 8, html.as_bytes());
+                    } else {
+                        data.set_text(&text);
+                    }
+                });
+                // set_text marks its data storable; set_with_data does not,
+                // and gtk-rs has no binding. NULL means every target.
+                // SAFETY: `clipboard` is a live GtkClipboard on the main thread.
+                unsafe {
+                    gtk::ffi::gtk_clipboard_set_can_store(
+                        gtk::glib::translate::ToGlibPtr::to_glib_none(&clipboard).0,
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+            }
+            None => clipboard.set_text(&text),
+        }
         if !primary {
             clipboard.store();
         }
@@ -94,6 +130,7 @@ pub async fn terminal_clipboard_write(
 pub async fn terminal_clipboard_write(
     _app: AppHandle,
     _text: String,
+    _html: Option<String>,
     _primary: bool,
 ) -> Result<(), String> {
     Err("Native terminal clipboard access is only available on Linux".to_string())

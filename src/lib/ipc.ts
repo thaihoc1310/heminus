@@ -579,19 +579,34 @@ export async function killTerminalProcesses(
   return invoke<SessionProcess[]>("terminal_kill_processes", { id, pids });
 }
 
+/** `html`, when given, rides along as text/html for editors that keep styling. */
 export async function writeTerminalClipboard(
   text: string,
-  primary = false
+  primary = false,
+  html?: string
 ): Promise<void> {
   if (isTauri) {
     try {
-      await invoke("terminal_clipboard_write", { text, primary });
+      await invoke("terminal_clipboard_write", { text, html: html ?? null, primary });
       return;
     } catch {
       if (primary) return;
     }
   }
   if (primary) return;
+  if (html && typeof ClipboardItem !== "undefined") {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" })
+        })
+      ]);
+      return;
+    } catch {
+      // A webview that refuses rich writes still takes plain text.
+    }
+  }
   await navigator.clipboard.writeText(text);
 }
 
